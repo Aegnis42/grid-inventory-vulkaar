@@ -29,7 +29,6 @@ CommonLibSSE-NG 기반으로 SE/AE 전 런타임을 단일 DLL로 지원합니�
 Grid Inventory.esp          (코인/주머니 + 가방 2종 폼 + 과적 처리 능력 2종 + UI 효과음)
 SKSE/Plugins/GridInventory.dll
 SKSE/Plugins/GridInventory_slots/       (장비 슬롯 실루엣)
-SKSE/Plugins/GridInventory_icons_lowpoly.pak   (로우폴리 아이콘, 선택 스타일)
 meshes/, textures/, Sound/  (코인 모델·효과음)
 ```
 
@@ -84,7 +83,8 @@ meshes/, textures/, Sound/  (코인 모델·효과음)
 
 ### 설정 (타이틀바 SETTINGS)
 - UI 크기, 스킨 6종, 언어 4종(실시간 전환), 후광 스타일/밝기, 아이콘 밝기·
-  스타일(사실적/로우폴리), 아이콘 캐시 초기화, 전체 사전 캐싱, 거래 옵션
+  스타일(사실적/스타일 — 캡처에서 자동 변환, 전 아이템 커버), 아이콘 캐시
+  초기화, 전체 사전 캐싱, 거래 옵션
   (상인 소지금 무제한 / 모든 품목 매입).
 - **프리셋**: 스킨·모든 아이템 정의·아이콘 그림까지 이름 붙여 저장,
   드롭다운에서 즉시 불러오기. 생성되는 `GridInventory_<이름>.ini` +
@@ -127,7 +127,8 @@ meshes/, textures/, Sound/  (코인 모델·효과음)
 - 한/중/일 표시는 윈도우 시스템 글꼴을 사용합니다(글꼴 미동봉).
 - 파피루스 스크립트 0개 — 스크립트 부하·세이브 잔재가 없습니다.
 - 자동 생성 파일(MO2는 Overwrite): `GridInventory_ui.ini`(설정·창 위치),
-  `_items.ini`, `_categories.ini`, `_icons.pak`, 내보낸 프리셋 파일들.
+  `_items.ini`, `_categories.ini`, `_icons.pak`, `_icons_styl.pak`(스타일 사용
+  시), 내보낸 프리셋 파일들.
   로그: `문서\My Games\Skyrim Special Edition\SKSE\GridInventory.log`
 
 ## 크레딧 / 라이선스

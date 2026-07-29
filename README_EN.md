@@ -30,7 +30,6 @@ Install the archive with your mod manager (MO2, Vortex). Contents:
 Grid Inventory.esp          (coin/pouch + 2 bag forms + 2 encumbrance abilities + UI sounds)
 SKSE/Plugins/GridInventory.dll
 SKSE/Plugins/GridInventory_slots/       (equipment slot silhouettes)
-SKSE/Plugins/GridInventory_icons_lowpoly.pak   (low-poly icon style, optional)
 meshes/, textures/, Sound/  (coin models, sounds)
 ```
 
@@ -89,7 +88,8 @@ run — there is nothing to edit beforehand. Safe to add to an ongoing save.
 
 ### Settings (SETTINGS in the title bar)
 - UI scale, 6 skins, 4 languages (live switch), glow style/brightness, icon
-  brightness/style (realistic vs low-poly), icon cache reset, precache all,
+  brightness/style (realistic vs stylized — auto-derived from the captures,
+  covers every item), icon cache reset, precache all,
   trade options (unlimited merchant gold / merchant buys anything).
 - **Presets**: save the whole look — skin, every item definition, and the icon
   pictures — under a name; load any from a dropdown. Share the two files
@@ -132,7 +132,8 @@ run — there is nothing to edit beforehand. Safe to add to an ongoing save.
 - CJK text uses your Windows system fonts (no fonts redistributed).
 - Zero Papyrus scripts — no script load, nothing left in your save.
 - Generated files (MO2: Overwrite): `GridInventory_ui.ini` (settings & windows),
-  `_items.ini`, `_categories.ini`, `_icons.pak`, and any presets you export.
+  `_items.ini`, `_categories.ini`, `_icons.pak`, `_icons_styl.pak` (when the
+  stylized style is on), and any presets you export.
   Log: `Documents\My Games\Skyrim Special Edition\SKSE\GridInventory.log`
 
 ## Credits / licence

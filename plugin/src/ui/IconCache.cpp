@@ -1,4 +1,5 @@
 #include "ui/IconCache.h"
+#include "ui/IconFilterB.h"
 #include "ui/ItemPreview.h"
 #include "ui/Theme.h"
 
@@ -14,7 +15,9 @@ namespace FUI
     static constexpr const char* kPakPath = "Data/SKSE/Plugins/GridInventory_icons.pak";
     // low-poly style pak: AUTHORED by IconStudio (PNG import), read-only in
     // game — keys are model slot << 32 (no rotation hash), same v5 records
-    static constexpr const char* kLpPakPath = "Data/SKSE/Plugins/GridInventory_icons_lowpoly.pak";
+    // GI59: derived "style B" sprites -- a cache like the capture pak, not
+    // authored content (regenerated from the realistic pak whenever absent)
+    static constexpr const char* kStylPakPath = "Data/SKSE/Plugins/GridInventory_icons_styl.pak";
     // capture keys that permanently failed (e.g. mod items whose preview
     // model never renders) — persisted so a relog does NOT retry them
     static constexpr const char* kFailPath = "Data/SKSE/Plugins/GridInventory_iconfail.txt";
@@ -294,20 +297,22 @@ namespace FUI
             SKSE::log::info("[ICONS] pak scanned: {} icons", g_pakIndex.size());
         }
 
-        // ---- low-poly pak (read-only) ----
-        std::unordered_map<std::uint64_t, PakEntry> g_lpIndex;
-        bool g_lpScanned = false;
+        // ---- stylized pak (GI59, derived cache) ----
+        std::unordered_map<std::uint64_t, PakEntry> g_stylIndex;
+        bool g_stylScanned = false;
+        // per-frame derivation budget (reset in PreRender): the first style
+        // toggle over a full board must not stylize 100 icons in one frame
+        int  g_stylBudget = 0;
 
-        // v5-records-only reader: no migration, no compaction, no writes —
-        // the file is authored by the offline tool ("last key wins" like the
-        // capture pak, so a re-import just appends)
-        void ScanLpPak()
+        // v5-records-only reader; appends keep the index current inline, so
+        // no rescan is ever needed mid-session
+        void ScanStylPak()
         {
-            if (g_lpScanned) return;
-            g_lpScanned = true;
-            g_lpIndex.clear();
+            if (g_stylScanned) return;
+            g_stylScanned = true;
+            g_stylIndex.clear();
 
-            std::ifstream in(kLpPakPath, std::ios::binary);
+            std::ifstream in(kStylPakPath, std::ios::binary);
             if (!in) return;
             in.seekg(0, std::ios::end);
             const std::uint64_t fileSize = static_cast<std::uint64_t>(in.tellg());
@@ -329,10 +334,10 @@ namespace FUI
                     len != w * h * 4 || off + kPakHdrSize + len > fileSize) {
                     break;   // corrupt record: drop it and the tail
                 }
-                g_lpIndex[key] = PakEntry{ off, w, h, fmt, len };
+                g_stylIndex[key] = PakEntry{ off, w, h, fmt, len };
                 in.seekg(static_cast<std::streamoff>(off + kPakHdrSize + len));
             }
-            SKSE::log::info("[ICONS] low-poly pak scanned: {} icons", g_lpIndex.size());
+            SKSE::log::info("[ICONS] stylized pak scanned: {} icons", g_stylIndex.size());
         }
     }
 
@@ -635,23 +640,35 @@ namespace FUI
     const IconCache::Icon* IconCache::Get(RE::TESBoundObject* a_obj) const
     {
         if (!a_obj) return nullptr;
-        // low-poly style wins per model slot (rotation-independent). The
-        // PINNED editor item is exempt so live rotation edits stay visible.
-        // LAZY LOAD here, not just in QueueCapture: items whose realistic
-        // icon is already cached never reach QueueCapture (Get returns it),
-        // so a style toggle would otherwise never pull their low-poly
-        // sprite off disk. One disk probe per slot per session (m_lpTried).
-        if (m_lowPoly && a_obj != m_pin) {
-            const auto slot = ModelSlot32(a_obj);
-            auto lp = m_lpIcons.find(slot);
-            if (lp == m_lpIcons.end() && !m_lpTried.contains(slot)) {
-                auto* self = const_cast<IconCache*>(this);
-                self->m_lpTried.insert(slot);
-                if (self->LoadLowPolyFromDisk(slot)) {
-                    lp = m_lpIcons.find(slot);
+        // GI59 stylized style: the derived sprite shares the realistic key.
+        // The PINNED editor item is exempt so live rotation edits stay
+        // visible. A miss falls through to the realistic icon (and its
+        // capture queue) -- once the capture lands, a later Get derives the
+        // stylized sprite within the per-frame budget.
+        if (m_stylized && a_obj != m_pin) {
+            auto*        self = const_cast<IconCache*>(this);
+            const IconDef sdef = ResolveDef(a_obj);
+            const std::uint64_t keys[2] = { KeyFor(a_obj, sdef),
+                                            LegacyKeyFor(a_obj, sdef) };
+            for (const auto key : keys) {
+                const auto st = m_stylIcons.find(key);
+                if (st != m_stylIcons.end()) return &st->second;
+            }
+            for (const auto key : keys) {
+                if (m_stylTried.contains(key)) continue;
+                if (self->LoadStylizedFromDisk(key)) {
+                    self->m_stylTried.insert(key);
+                    return &self->m_stylIcons[key];
+                }
+                if (g_stylBudget > 0) {
+                    --g_stylBudget;
+                    if (self->StylizeFromRealistic(key)) {
+                        self->m_stylTried.insert(key);
+                        return &self->m_stylIcons[key];
+                    }
+                    self->m_stylTried.insert(key);   // realistic missing too
                 }
             }
-            if (lp != m_lpIcons.end()) return &lp->second;
         }
         const IconDef def = ResolveDef(a_obj);
         auto it = m_icons.find(KeyFor(a_obj, def));
@@ -731,13 +748,13 @@ namespace FUI
         return true;
     }
 
-    bool IconCache::LoadLowPolyFromDisk(std::uint32_t a_slot)
+    bool IconCache::LoadStylizedFromDisk(std::uint64_t a_key)
     {
-        ScanLpPak();
-        const auto it = g_lpIndex.find(static_cast<std::uint64_t>(a_slot) << 32);
-        if (it == g_lpIndex.end()) return false;
+        ScanStylPak();
+        const auto it = g_stylIndex.find(a_key);
+        if (it == g_stylIndex.end()) return false;
 
-        std::ifstream in(kLpPakPath, std::ios::binary);
+        std::ifstream in(kStylPakPath, std::ios::binary);
         if (!in) return false;
         in.seekg(static_cast<std::streamoff>(it->second.off + kPakHdrSize));
         std::vector<std::uint8_t> px(it->second.len);
@@ -751,21 +768,79 @@ namespace FUI
                 static_cast<int>(it->second.h), it->second.fmt, true, icon)) {
             return false;
         }
-        m_lpIcons[a_slot] = icon;
+        m_stylIcons[a_key] = icon;
         return true;
     }
 
-    void IconCache::SetLowPolyStyle(bool a_on)
+    bool IconCache::StylizeFromRealistic(std::uint64_t a_key)
     {
-        if (a_on && !m_lowPoly) {
-            // re-index on enable so a tool re-import during this session is
-            // picked up (index rebuild only — no SRVs are touched, so this
-            // is safe inside the ImGui frame; already-loaded sprites keep
-            // their old pixels until the next menu Clear)
-            g_lpScanned = false;
-            m_lpTried.clear();   // let previous misses retry on the new index
+        ScanPak();
+        const auto it = g_pakIndex.find(a_key);
+        if (it == g_pakIndex.end()) return false;
+
+        std::vector<std::uint8_t> px(it->second.len);
+        {
+            std::ifstream in(kPakPath, std::ios::binary);
+            if (!in) return false;
+            in.seekg(static_cast<std::streamoff>(it->second.off + it->second.hdrSize()));
+            if (!in.read(reinterpret_cast<char*>(px.data()),
+                    static_cast<std::streamsize>(px.size()))) {
+                return false;
+            }
         }
-        m_lowPoly = a_on;
+        const int w = static_cast<int>(it->second.w);
+        const int h = static_cast<int>(it->second.h);
+        if (it->second.fmt == 87) {   // BGRA -> RGBA: filter + pak stay fmt 28
+            for (size_t i = 0; i + 3 < px.size(); i += 4) {
+                std::swap(px[i], px[i + 2]);
+            }
+        }
+        IconFilterB::Stylize(px, w, h);
+
+        // persist next to the capture pak (v5 record) + index inline
+        std::error_code ec;
+        const std::uint64_t base = std::filesystem::exists(kStylPakPath, ec)
+            ? static_cast<std::uint64_t>(std::filesystem::file_size(kStylPakPath, ec))
+            : 0;
+        {
+            std::ofstream out(kStylPakPath, std::ios::binary | std::ios::app);
+            if (out) {
+                const std::uint32_t magic = kIconMagic;
+                const std::uint32_t w32 = static_cast<std::uint32_t>(w);
+                const std::uint32_t h32 = static_cast<std::uint32_t>(h);
+                const std::uint32_t fmt32 = 28;
+                const std::uint32_t len = static_cast<std::uint32_t>(px.size());
+                out.write(reinterpret_cast<const char*>(&magic), 4);
+                out.write(reinterpret_cast<const char*>(&a_key), 8);
+                out.write(reinterpret_cast<const char*>(&w32), 4);
+                out.write(reinterpret_cast<const char*>(&h32), 4);
+                out.write(reinterpret_cast<const char*>(&fmt32), 4);
+                out.write(reinterpret_cast<const char*>(&len), 4);
+                out.write(reinterpret_cast<const char*>(px.data()),
+                    static_cast<std::streamsize>(px.size()));
+                if (out) {
+                    ScanStylPak();   // ensure the index exists before we add
+                    g_stylIndex[a_key] = PakEntry{ base, static_cast<std::uint32_t>(w),
+                        static_cast<std::uint32_t>(h), 28,
+                        static_cast<std::uint32_t>(px.size()) };
+                }
+            }
+        }
+
+        Icon icon;
+        if (!CreateIconTexture(px.data(), w, h, 28, true, icon)) return false;
+        m_stylIcons[a_key] = icon;
+        return true;
+    }
+
+    void IconCache::SetStylizedStyle(bool a_on)
+    {
+        if (a_on && !m_stylized) {
+            // realistic captures may have landed since the last miss -- let
+            // every key try again (index/pixels reload lazily per key)
+            m_stylTried.clear();
+        }
+        m_stylized = a_on;
     }
 
     void IconCache::SaveToDisk(std::uint64_t a_key, int a_w, int a_h, std::uint32_t a_fmt,
@@ -793,6 +868,9 @@ namespace FUI
         std::filesystem::remove(kPakPath, ec);
         std::filesystem::remove(kPakTmp, ec);
         std::filesystem::remove(kFailPath, ec);      // failed keys get a fresh chance
+        std::filesystem::remove(kStylPakPath, ec);   // derivative resets too (GI59)
+        g_stylIndex.clear();
+        g_stylScanned = true;
         std::filesystem::remove_all(kIconDir, ec);   // legacy leftovers too
         SKSE::log::info("[ICONS] disk cache reset (retexture refresh)");
     }
@@ -842,6 +920,15 @@ namespace FUI
         Clear();
         g_pakScanned = false;
         ScanPak();
+        // GI59: the stylized pak derives from the realistic one -- after a
+        // merge its overlapped keys are stale. Cheapest correct move: drop
+        // the whole derivative and let it regenerate lazily.
+        {
+            std::error_code sec;
+            std::filesystem::remove(kStylPakPath, sec);
+            g_stylIndex.clear();
+            g_stylScanned = true;
+        }
         SKSE::log::info("[ICONS] preset pak merged -> {} keys indexed",
             g_pakIndex.size());
         return true;
@@ -898,13 +985,9 @@ namespace FUI
     void IconCache::QueueCapture(RE::TESBoundObject* a_obj)
     {
         if (!Capturable(a_obj)) return;
-        // low-poly style: a covered slot needs no realistic work at all —
-        // uncovered slots fall through to the normal capture/load path
-        // (that fallback is what keeps a partial low-poly set seamless)
-        if (m_lowPoly && a_obj != m_pin) {
-            const auto slot = ModelSlot32(a_obj);
-            if (m_lpIcons.contains(slot) || LoadLowPolyFromDisk(slot)) return;
-        }
+        // GI59: the stylized style DERIVES from realistic captures, so the
+        // capture pipeline runs identically in both styles (the old authored
+        // low-poly pak used to suppress captures here).
         const auto key = KeyFor(a_obj, ResolveDef(a_obj));
 
         // live edit: a drag produces a new key every frame — drop the stale
@@ -1010,6 +1093,7 @@ namespace FUI
 
     void IconCache::PreRender()
     {
+        g_stylBudget = 2;   // GI59: per-frame stylize budget (see Get)
         auto* pv = ItemPreview::GetSingleton();
         if (!pv->IsRunning()) return;
 
@@ -1502,13 +1586,13 @@ namespace FUI
     void IconCache::Clear()
     {
         for (auto& [key, icon] : m_icons) ReleaseIcon(icon);
-        for (auto& [slot, icon] : m_lpIcons) ReleaseIcon(icon);
+        for (auto& [key, icon] : m_stylIcons) ReleaseIcon(icon);
         ReleaseIcon(m_inspectIcon);
         m_inspectValid = false;
         m_inspectRetire = false;
         m_pendingInspect = false;
-        m_lpIcons.clear();
-        m_lpTried.clear();
+        m_stylIcons.clear();
+        m_stylTried.clear();
         m_icons.clear();
         m_queue.clear();
         m_queued.clear();

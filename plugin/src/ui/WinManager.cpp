@@ -171,7 +171,7 @@ namespace FUI
             }
             if (key == "!iconstyle") {      // 0 realistic / 1 low-poly pak
                 try {
-                    IconCache::GetSingleton()->SetLowPolyStyle(std::stoi(rest) != 0);
+                    IconCache::GetSingleton()->SetStylizedStyle(std::stoi(rest) != 0);
                 } catch (...) {}
                 continue;
             }
@@ -236,7 +236,7 @@ namespace FUI
         out << "!glowgain0 = " << Theme::GlowGainOf(0) << "\n";
         out << "!glowgain1 = " << Theme::GlowGainOf(1) << "\n";
         out << "!icongain = " << Theme::IconGain() << "\n";
-        out << "!iconstyle = " << (IconCache::GetSingleton()->LowPolyStyle() ? 1 : 0) << "\n";
+        out << "!iconstyle = " << (IconCache::GetSingleton()->StylizedStyle() ? 1 : 0) << "\n";
         // GI47: the item/category defs ride along -- one file, whole look
         if (g_presetDefsWrite) g_presetDefsWrite(out);
         out.close();
@@ -288,7 +288,7 @@ namespace FUI
                     else if (key == "!glowgain1") Theme::SetGlowGainOf(1, std::stof(rest));
                     else if (key == "!icongain")  Theme::SetIconGain(std::stof(rest));
                     else if (key == "!iconstyle")
-                        IconCache::GetSingleton()->SetLowPolyStyle(std::stoi(rest) != 0);
+                        IconCache::GetSingleton()->SetStylizedStyle(std::stoi(rest) != 0);
                 } catch (...) {}
                 continue;
             }
@@ -325,7 +325,7 @@ namespace FUI
         out << "!icongain = " << Theme::IconGain() << "\n";
         out << "!merchgoldinf = " << (LootBarter::MerchantGoldInfinite() ? 1 : 0) << "\n";
         out << "!merchbuyall = " << (LootBarter::MerchantBuysAll() ? 1 : 0) << "\n";
-        out << "!iconstyle = " << (IconCache::GetSingleton()->LowPolyStyle() ? 1 : 0) << "\n";
+        out << "!iconstyle = " << (IconCache::GetSingleton()->StylizedStyle() ? 1 : 0) << "\n";
         for (const auto& w : m_wins) {
             if (!w.posKnown) continue;
             out << w.key << " = "

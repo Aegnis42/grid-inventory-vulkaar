@@ -72,7 +72,7 @@ namespace FUI::Lang
         X(SoulGrand, "Grand", "최상급", "极品", "極大")                                                                      \
         X(IconStyleLabel, "ICON STYLE", "아이콘 스타일", "图标风格", "アイコンスタイル")         /* two-pak icon style */    \
         X(StyleRealistic, "Realistic", "리얼리스틱", "写实", "リアル")                                                        \
-        X(StyleLowPoly, "Low-poly", "로우폴리", "低多边形", "ローポリ")                                                       \
+        X(StyleStylized, "Stylized", "스타일", "风格化", "スタイライズ")                                                      \
         X(GlowLabel, "GLOW", "후광", "光晕", "光彩")                                             /* settings: rarity glow */ \
         X(GlowSilhouette, "Silhouette", "실루엣", "轮廓", "シルエット")                                                      \
         X(GlowRadial, "Radial", "라디얼", "径向", "放射")                                                                    \

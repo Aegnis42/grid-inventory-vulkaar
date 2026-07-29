@@ -46,6 +46,8 @@ set(SOURCES
     src/ui/UIRoot.cpp
     src/ui/IconCache.h
     src/ui/IconCache.cpp
+    src/ui/IconFilterB.h
+    src/ui/IconFilterB.cpp
     src/ui/WinManager.h
     src/ui/WinManager.cpp
     src/ui/Grid.h

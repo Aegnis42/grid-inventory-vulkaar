@@ -440,20 +440,20 @@ namespace FUI::UIRoot
         }
 
         // GLOW — rarity glow style chips (silhouette=1 / radial=0)
-        // ICON STYLE — realistic auto-captures vs the tool-authored low-poly
-        // pak (uncovered low-poly items fall back to realistic)
+        // ICON STYLE — realistic auto-captures vs the GI59 stylized filter
+        // (derived from the captures on demand; covers every item)
         void RowIconStyle(const SettingsCtx& a_c)
         {
             SettingLabel(a_c, Lang::Str::IconStyleLabel);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
             auto* icons = IconCache::GetSingleton();
             for (int style : { 0, 1 }) {
-                const bool on = icons->LowPolyStyle() == (style == 1);
+                const bool on = icons->StylizedStyle() == (style == 1);
                 if (on) ImGui::PushStyleColor(ImGuiCol_Button, Theme::Acc(0.28f));
                 ImGui::PushID(style);
-                if (Sfx::Button(Lang::T(style == 1 ? Lang::Str::StyleLowPoly
+                if (Sfx::Button(Lang::T(style == 1 ? Lang::Str::StyleStylized
                                                    : Lang::Str::StyleRealistic))) {
-                    icons->SetLowPolyStyle(style == 1);
+                    icons->SetStylizedStyle(style == 1);
                     WinManager::GetSingleton()->Save();
                 }
                 ImGui::PopID();

@@ -99,7 +99,7 @@ namespace FUI
         // for users who install retexture mods after icons were captured.
         // Call OUTSIDE the ImGui frame only (UIRoot::Tick): the current draw
         // list may still reference the SRVs being released.
-        // The LOW-POLY pak is authored content, not cache — never touched.
+        // The stylized pak is a derivative and resets along with it.
         void ResetDiskCache();
 
         // GI47: preset icon bundle. Export copies our capture pak next to the
@@ -111,13 +111,15 @@ namespace FUI
         bool ExportPakTo(const char* a_path);
         bool MergePak(const char* a_path);
 
-        // Icon style (two-pak): OFF = realistic auto-captures (default).
-        // ON = the tool-authored GridInventory_icons_lowpoly.pak wins per
-        // model slot; items it doesn't cover fall back to realistic, so the
-        // grid always looks complete while the low-poly set is in progress.
-        // The auto-capture pipeline never writes the low-poly pak.
-        void SetLowPolyStyle(bool a_on);
-        [[nodiscard]] bool LowPolyStyle() const { return m_lowPoly; }
+        // Icon style. OFF = realistic auto-captures (default). ON (GI59) =
+        // STYLIZED: the approved "style B" flat-illustration filter, DERIVED
+        // on demand from the realistic capture and cached in its own pak --
+        // every item (mods included) is covered with nothing authored or
+        // shipped. An item whose realistic capture hasn't landed yet shows
+        // the realistic flow until it does. (Replaces the retired authored
+        // low-poly pak.)
+        void SetStylizedStyle(bool a_on);
+        [[nodiscard]] bool StylizedStyle() const { return m_stylized; }
 
         // INSPECT mode (C key = vanilla "Item Zoom"): one item is captured
         // every frame at a mouse-driven rotation and drawn large, so the player
@@ -182,8 +184,10 @@ namespace FUI
         // Disk cache: an item is captured once EVER (per def); later sessions
         // load the pixels straight from disk — no engine renders at all.
         bool LoadFromDisk(std::uint64_t a_key);
-        // low-poly pak entry for this model slot -> m_lpIcons (read-only pak)
-        bool LoadLowPolyFromDisk(std::uint32_t a_slot);
+        // stylized derivatives (GI59): load a cached entry, or derive one
+        // from the realistic pak via IconFilterB (appends to the styl pak)
+        bool LoadStylizedFromDisk(std::uint64_t a_key);
+        bool StylizeFromRealistic(std::uint64_t a_key);
         static void SaveToDisk(std::uint64_t a_key, int a_w, int a_h, std::uint32_t a_fmt,
                                const std::vector<std::uint8_t>& a_pixels);
 
@@ -202,14 +206,14 @@ namespace FUI
 
         DefResolver                            m_resolver;
         std::unordered_map<std::uint64_t, Icon> m_icons;
-        // low-poly style: tool-authored sprites, keyed by model slot alone
-        // (rotation-independent — hand-drawn art has a fixed composition).
-        // m_lpTried = slots probed against the pak this session, hit or miss
-        // (Get() lazy-loads; without it every uncovered tile would re-read
-        // the pak index every frame)
-        std::unordered_map<std::uint32_t, Icon> m_lpIcons;
-        std::unordered_set<std::uint32_t>       m_lpTried;
-        bool                                    m_lowPoly = false;
+        // stylized style (GI59): derived sprites under the SAME keys as the
+        // realistic pak. m_stylTried = keys probed to a decisive end this
+        // session (loaded, derived, or realistic-missing); attempts skipped
+        // by the per-frame generation budget do NOT mark it, so they simply
+        // retry on a later frame.
+        std::unordered_map<std::uint64_t, Icon> m_stylIcons;
+        std::unordered_set<std::uint64_t>       m_stylTried;
+        bool                                    m_stylized = false;
         std::deque<Pending>                    m_queue;
         std::unordered_set<std::uint64_t>      m_queued;    // membership for m_queue
         std::unordered_map<std::uint64_t, int> m_attempts;  // soft-skip retry counts
