@@ -1,0 +1,21 @@
+# Whitelist repository: everything is ignored unless explicitly allowed.
+# The working folder holds private dev notes, test checklists, release
+# archives and build output that must never reach the public repo.
+/*
+
+# --- plugin source ---
+!/plugin/
+/plugin/*
+!/plugin/src/
+!/plugin/CMakeLists.txt
+!/plugin/vcpkg.json
+
+# --- docs shipped with the mod ---
+!/README_KO.md
+!/README_EN.md
+!/CREDITS.md
+!/LICENSE
+
+# --- repo files ---
+!/.gitignore
+!/README.md

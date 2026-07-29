@@ -1,0 +1,366 @@
+#include "ui/GridMenu.h"
+#include "ui/Grid.h"
+#include "ui/IconCache.h"
+#include "ui/ItemPreview.h"
+#include "ui/Sfx.h"
+#include "ui/UIRoot.h"
+
+// Ported from ModExplorerMenu (Modex) by patchulidev — UIMenuImpl.cpp.
+// https://github.com/patchulidev/ModExplorerMenu (GPL-3.0 with Modding Exception)
+// Scaleform-event input relay originally credited to cyfewlp (SimpleIME).
+// Changes vs upstream: no hotkey listeners / InputManager / UserConfig;
+// gameplay-control toggling deliberately omitted (input policy per PLAN_B §6).
+
+namespace RE
+{
+    class GFxCharEvent : public RE::GFxEvent
+    {
+    public:
+        GFxCharEvent() = default;
+
+        explicit GFxCharEvent(UINT32 a_wcharCode, UINT8 a_keyboardIndex = 0) :
+            GFxEvent(EventType::kCharEvent), wcharCode(a_wcharCode), keyboardIndex(a_keyboardIndex)
+        {}
+
+        // @members
+        std::uint32_t wcharCode{};      // 04
+        std::uint32_t keyboardIndex{};  // 08
+    };
+
+    static_assert(sizeof(GFxCharEvent) == 0x0C);
+}
+
+namespace
+{
+    struct
+    {
+        RE::GFxKey::Code gfxCode;
+        ImGuiKey         imGuiKey;
+    } GFxCodeToImGuiKeyTable[] = {
+        { RE::GFxKey::kAlt,          ImGuiMod_Alt            },
+        { RE::GFxKey::kControl,      ImGuiMod_Ctrl           },
+        { RE::GFxKey::kShift,        ImGuiMod_Shift          },
+        { RE::GFxKey::kCapsLock,     ImGuiKey_CapsLock       },
+        // Don't send tab: upstream notes a bug when tab closes the menu
+        { RE::GFxKey::kHome,         ImGuiKey_Home           },
+        { RE::GFxKey::kEnd,          ImGuiKey_End            },
+        { RE::GFxKey::kPageUp,       ImGuiKey_PageUp         },
+        { RE::GFxKey::kPageDown,     ImGuiKey_PageDown       },
+        { RE::GFxKey::kComma,        ImGuiKey_Comma          },
+        { RE::GFxKey::kPeriod,       ImGuiKey_Period         },
+        { RE::GFxKey::kSlash,        ImGuiKey_Slash          },
+        { RE::GFxKey::kBackslash,    ImGuiKey_Backslash      },
+        { RE::GFxKey::kQuote,        ImGuiKey_Apostrophe     },
+        { RE::GFxKey::kBracketLeft,  ImGuiKey_LeftBracket    },
+        { RE::GFxKey::kBracketRight, ImGuiKey_RightBracket   },
+        { RE::GFxKey::kReturn,       ImGuiKey_Enter          },
+        { RE::GFxKey::kEqual,        ImGuiKey_Equal          },
+        { RE::GFxKey::kMinus,        ImGuiKey_Minus          },
+        { RE::GFxKey::kEscape,       ImGuiKey_Escape         },
+        { RE::GFxKey::kLeft,         ImGuiKey_LeftArrow      },
+        { RE::GFxKey::kUp,           ImGuiKey_UpArrow        },
+        { RE::GFxKey::kRight,        ImGuiKey_RightArrow     },
+        { RE::GFxKey::kDown,         ImGuiKey_DownArrow      },
+        { RE::GFxKey::kSpace,        ImGuiKey_Space          },
+        { RE::GFxKey::kBackspace,    ImGuiKey_Backspace      },
+        { RE::GFxKey::kDelete,       ImGuiKey_Delete         },
+        { RE::GFxKey::kInsert,       ImGuiKey_Insert         },
+        { RE::GFxKey::kKP_Multiply,  ImGuiKey_KeypadMultiply },
+        { RE::GFxKey::kKP_Add,       ImGuiKey_KeypadAdd      },
+        { RE::GFxKey::kKP_Enter,     ImGuiKey_KeypadEnter    },
+        { RE::GFxKey::kKP_Subtract,  ImGuiKey_KeypadSubtract },
+        { RE::GFxKey::kKP_Decimal,   ImGuiKey_KeypadDecimal  },
+        { RE::GFxKey::kKP_Divide,    ImGuiKey_KeypadDivide   },
+        { RE::GFxKey::kVoidSymbol,   ImGuiKey_None           },
+    };
+
+    ImGuiMouseSource GetMouseSourceFromMessageExtraInfo()
+    {
+        LPARAM extra_info = ::GetMessageExtraInfo();
+        if ((extra_info & 0xFFFFFF80) == 0xFF515700) return ImGuiMouseSource_Pen;
+        if ((extra_info & 0xFFFFFF80) == 0xFF515780) return ImGuiMouseSource_TouchScreen;
+        return ImGuiMouseSource_Mouse;
+    }
+}
+
+namespace FUI
+{
+    void GridInventoryMenu::FlushInputState()
+    {
+        if (ImGui::GetCurrentContext() == nullptr) return;
+
+        auto& io = ImGui::GetIO();
+        io.ClearInputKeys();
+        io.ClearEventsQueue();
+    }
+
+    void GridInventoryMenu::RegisterMenu()
+    {
+        if (auto* ui = RE::UI::GetSingleton()) {
+            ui->Register(MENU_NAME, Creator);
+            SKSE::log::info("[UI] {} registered", MENU_NAME);
+        }
+    }
+
+    void GridInventoryMenu::ForceCursor()
+    {
+        if (auto* ui = RE::UI::GetSingleton(); ui && !ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)) {
+            SKSE::GetTaskInterface()->AddUITask([]() {
+                if (const auto mq = RE::UIMessageQueue::GetSingleton()) {
+                    mq->AddMessage(RE::CursorMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kShow, nullptr);
+                }
+            });
+        }
+    }
+
+    void GridInventoryMenu::AdvanceMovie(float a_interval, std::uint32_t a_currentTime)
+    {
+        // kPausesGame stops the PlayerCharacter::Update hook, so pre-render
+        // parking must run here: menus still advance every frame while the
+        // game is paused, BEFORE the frame renders.
+        UIRoot::Tick();
+        IMenu::AdvanceMovie(a_interval, a_currentTime);
+    }
+
+    void GridInventoryMenu::PostDisplay()
+    {
+        IconCache::GetSingleton()->PreRender();   // icon queue owns the request while busy
+        ItemPreview::GetSingleton()->Render();
+        IconCache::GetSingleton()->PostRender();  // harvest this frame's capture
+        UIRoot::Render();
+        ForceCursor();
+    }
+
+    // close-sound guard: the user-event handler plays MenuClose BEFORE the
+    // close message; engine-initiated closes (I-key routed internally, menu
+    // hopping) bypass that handler entirely — OnHide plays the fallback.
+    // The custom descriptor sounds stay audible through the hide transition
+    // (only the UI-category vanilla path was swallowed).
+    static bool g_closeSfxPlayed = false;
+
+    void GridInventoryMenu::MarkCloseSfxPlayed() { g_closeSfxPlayed = true; }
+
+    void GridInventoryMenu::OnShow()
+    {
+        g_closeSfxPlayed = false;
+        FlushInputState();
+        UIRoot::OnShow();   // whoosh plays deferred (UIRoot) — at kShow time
+                            // the audio path swallowed it
+        ItemPreview::GetSingleton()->Begin();
+    }
+
+    void GridInventoryMenu::OnHide()
+    {
+        if (!g_closeSfxPlayed) {
+            Sfx::MenuClose();
+        }
+        g_closeSfxPlayed = false;
+        ItemPreview::GetSingleton()->End();
+        UIRoot::OnClose();
+    }
+
+    RE::UI_MESSAGE_RESULTS GridInventoryMenu::ProcessMessage(RE::UIMessage& a_message)
+    {
+        switch (a_message.type.get()) {
+        case RE::UI_MESSAGE_TYPE::kUpdate:
+            break;
+        case RE::UI_MESSAGE_TYPE::kUserEvent: {
+            if (const auto* data = reinterpret_cast<RE::BSUIMessageData*>(a_message.data)) {
+                // While a text field owns the keyboard, EVERY key is text —
+                // swallow the whole user-event channel (J opened the Journal
+                // mid-typing; ESC unfocuses the field via ImGui instead).
+                if (UIRoot::IsTextInputActive()) {
+                    return RE::UI_MESSAGE_RESULTS::kHandled;
+                }
+                const auto* ue = RE::UserEvents::GetSingleton();
+                // A2: ESC ("Cancel") and the inventory hotkey ("Inventory" —
+                // translated by the kItemMenu context, vanilla-style) both
+                // close; while carrying an item they cancel the carry first.
+                if (data->fixedStr == ue->cancel || data->fixedStr == ue->inventory) {
+                    if (Grid::IsHolding()) {
+                        Grid::CancelHold();
+                        Sfx::SelectOff();   // carry cancelled
+                    } else if (UIRoot::CloseTopWindow()) {
+                        Sfx::SelectOff();   // a sub-window closed
+                    } else {
+                        // sub-windows/settings/EDIT close first; only then the
+                        // inventory. Sound plays BEFORE the close message —
+                        // during the hide transition it never became audible.
+                        Sfx::MenuClose();
+                        g_closeSfxPlayed = true;
+                        UIRoot::Close();
+                    }
+                    return RE::UI_MESSAGE_RESULTS::kHandled;
+                }
+                // vanilla-style menu hopping (J = Journal, TAB = Tween etc.)
+                // stays available when not typing
+            }
+            break;
+        }
+        case RE::UI_MESSAGE_TYPE::kShow:
+            OnShow();
+            break;
+        case RE::UI_MESSAGE_TYPE::kHide:
+            OnHide();
+            break;
+        case RE::UI_MESSAGE_TYPE::kScaleformEvent: {
+            auto* scaleformData = reinterpret_cast<RE::BSUIScaleformData*>(a_message.data);
+            if (scaleformData && scaleformData->scaleformEvent) {
+                ProcessScaleformEvent(scaleformData);
+                return RE::UI_MESSAGE_RESULTS::kHandled;
+            }
+            break;
+        }
+        default:;
+        }
+
+        return IMenu::ProcessMessage(a_message);
+    }
+
+    RE::IMenu* GridInventoryMenu::Creator()
+    {
+        using Flags = RE::UI_MENU_FLAGS;
+        auto* menu = new GridInventoryMenu();
+        menu->menuFlags.set(Flags::kUpdateUsesCursor, Flags::kUsesCursor);
+        menu->menuFlags.set(Flags::kCustomRendering);
+        menu->menuFlags.set(Flags::kUsesMenuContext);
+        // the engine blocks saving while ANY open menu lacks this flag —
+        // the vanilla InventoryMenu carries it (F5 works there), so must we
+        menu->menuFlags.set(Flags::kAllowSaving);
+        menu->depthPriority = 11;
+
+        // kPausesGame is REQUIRED for the engine's item 3D preview: Modex's own
+        // config notes "show3DPreview requires pauseGame; effective only when
+        // both are on" — Inventory3DManager::Render() draws nothing while the
+        // game runs. Realtime policy (PLAN_B A5) is revisited at B-2 via the
+        // icon cache (captures become rare one-shots).
+        menu->menuFlags.set(Flags::kPausesGame, Flags::kDisablePauseMenu);
+
+        // kInventory, NOT kMenuMode/kItemMenu: this is the vanilla
+        // InventoryMenu's own context — its controlmap section TRANSLATES the
+        // bound inventory key into the "Inventory" user event delivered to
+        // ProcessMessage (the same channel that brings "Cancel" for ESC).
+        // Other contexts simply swallow the key: no event, nothing to receive.
+        menu->inputContext.set(Context::kInventory);
+        return menu;
+    }
+
+    void GridInventoryMenu::ProcessScaleformEvent(const RE::BSUIScaleformData* a_data)
+    {
+        switch (const auto& fxEvent = a_data->scaleformEvent; fxEvent->type.get()) {
+        case RE::GFxEvent::EventType::kMouseDown:
+            OnMouseEvent(fxEvent, true);
+            break;
+        case RE::GFxEvent::EventType::kMouseUp:
+            OnMouseEvent(fxEvent, false);
+            break;
+        case RE::GFxEvent::EventType::kMouseWheel:
+            OnMouseWheelEvent(fxEvent);
+            break;
+        case RE::GFxEvent::EventType::kKeyDown:
+            OnKeyEvent(fxEvent, true);
+            break;
+        case RE::GFxEvent::EventType::kKeyUp:
+            OnKeyEvent(fxEvent, false);
+            break;
+        case RE::GFxEvent::EventType::kCharEvent:
+            OnCharEvent(fxEvent);
+            break;
+        default:
+            break;
+        }
+    }
+
+    void GridInventoryMenu::OnMouseEvent(RE::GFxEvent* a_event, const bool a_down)
+    {
+        const auto  mouseSource = GetMouseSourceFromMessageExtraInfo();
+        const auto* mouseEvent  = reinterpret_cast<RE::GFxMouseEvent*>(a_event);
+        auto&       io          = ImGui::GetIO();
+
+        io.AddMouseSourceEvent(mouseSource);
+        io.AddMouseButtonEvent(static_cast<int>(mouseEvent->button), a_down);
+    }
+
+    void GridInventoryMenu::OnMouseWheelEvent(RE::GFxEvent* a_event)
+    {
+        const auto* mouseEvent = reinterpret_cast<RE::GFxMouseEvent*>(a_event);
+        UIRoot::AddScrollEvent(0.0f, mouseEvent->scrollDelta);
+    }
+
+    void GridInventoryMenu::OnKeyEvent(RE::GFxEvent* a_event, const bool a_down)
+    {
+        const auto* keyEvent = reinterpret_cast<RE::GFxKeyEvent*>(a_event);
+        const auto  imguiKey = GFxKeyToImGuiKey(keyEvent->keyCode);
+        // (Inventory-key close lives in UIRoot::HandleCloseHotkey — Scaleform
+        // key events don't reach a movie-less menu reliably.)
+
+        if (imguiKey == ImGuiKey_PageUp && a_down) {
+            UIRoot::AddScrollEvent(0.0f, 1.0f);
+            return;
+        }
+        if (imguiKey == ImGuiKey_PageDown && a_down) {
+            UIRoot::AddScrollEvent(0.0f, -1.0f);
+            return;
+        }
+
+        // Menu-mode WASD arrives PRE-TRANSLATED into arrow GFx codes, which
+        // moved the text caret while typing a/d/w/s. While a text field owns
+        // the keyboard an arrow only passes if the PHYSICAL arrow key is down
+        // (GetAsyncKeyState); the synthetic ones are dropped. Track what we
+        // passed so a real arrow's key-up never leaves ImGui a stuck key.
+        {
+            static bool s_arrowLive[4] = {};
+            int ai = -1, vk = 0;
+            switch (imguiKey) {
+            case ImGuiKey_LeftArrow:  ai = 0; vk = VK_LEFT; break;
+            case ImGuiKey_RightArrow: ai = 1; vk = VK_RIGHT; break;
+            case ImGuiKey_UpArrow:    ai = 2; vk = VK_UP; break;
+            case ImGuiKey_DownArrow:  ai = 3; vk = VK_DOWN; break;
+            default: break;
+            }
+            if (ai >= 0 && UIRoot::IsTextInputActive()) {
+                if (a_down) {
+                    if ((GetAsyncKeyState(vk) & 0x8000) == 0) return;   // WASD-translated
+                    s_arrowLive[ai] = true;
+                } else {
+                    if (!s_arrowLive[ai]) return;
+                    s_arrowLive[ai] = false;
+                }
+            }
+        }
+
+        ImGui::GetIO().AddKeyEvent(imguiKey, a_down);
+    }
+
+    void GridInventoryMenu::OnCharEvent(RE::GFxEvent* a_event)
+    {
+        // Chars come from the chained WndProc now (UIRoot::WndProcThunk) —
+        // the movie-less menu never reliably received GFxCharEvents, and
+        // feeding both paths would double-type where they DO arrive.
+        (void)a_event;
+    }
+
+    ImGuiKey GridInventoryMenu::GFxKeyToImGuiKey(const RE::GFxKey::Code a_keyCode)
+    {
+        ImGuiKey imguiKey = ImGuiKey_None;
+
+        if (a_keyCode >= RE::GFxKey::kA && a_keyCode <= RE::GFxKey::kZ) {
+            imguiKey = static_cast<ImGuiKey>(a_keyCode - RE::GFxKey::kA + ImGuiKey_A);
+        } else if (a_keyCode >= RE::GFxKey::kF1 && a_keyCode <= RE::GFxKey::kF15) {
+            imguiKey = static_cast<ImGuiKey>(a_keyCode - RE::GFxKey::kF1 + ImGuiKey_F1);
+        } else if (a_keyCode >= RE::GFxKey::kNum0 && a_keyCode <= RE::GFxKey::kNum9) {
+            imguiKey = static_cast<ImGuiKey>(a_keyCode - RE::GFxKey::kNum0 + ImGuiKey_0);
+        } else if (a_keyCode >= RE::GFxKey::kKP_0 && a_keyCode <= RE::GFxKey::kKP_9) {
+            imguiKey = static_cast<ImGuiKey>(a_keyCode - RE::GFxKey::kKP_0 + ImGuiKey_Keypad0);
+        } else {
+            for (const auto& [gfxCode, imGuiKey] : GFxCodeToImGuiKeyTable) {
+                if (a_keyCode == gfxCode) {
+                    imguiKey = imGuiKey;
+                    break;
+                }
+            }
+        }
+
+        return imguiKey;
+    }
+}
