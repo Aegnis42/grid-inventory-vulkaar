@@ -998,6 +998,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         };
         std::vector<Vacated>  g_vacated;
 
+        // GI55: RETIRED for release (P1/P2 sign-off done) -- the flash was a
+        // verification aid. Flip to true to see "which cell did this action
+        // aim at" again when hunting a wrong-cell-vanished bug; the call
+        // sites stay wired (same policy as g_poolTrace).
+        constexpr bool        g_vacatedFlash = false;
         constexpr float       kVacatedFade = 0.40f;   // seconds
 
         // Writes a tile's PLACEMENT and nothing else.
@@ -1150,6 +1155,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // Reads the layout BEFORE the caller changes it, so it must run first.
         void NoteVacated(const std::string& a_key, RE::TESBoundObject* a_obj)
         {
+            if (!g_vacatedFlash) return;   // GI55: diagnostic off in release
             const auto li = g_layout.find(a_key);
             if (li == g_layout.end() || li->second.col < 0) return;
             if (li->second.bag == kTrashKey) return;   // not a board cell
