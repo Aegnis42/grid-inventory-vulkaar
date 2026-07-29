@@ -1113,11 +1113,24 @@ namespace FUI::UIRoot
             IM_COL32(c, c, c, 255));
         if (g > 1.0f && g_fillBlend) {
             // slider top (1.6) maps to full lift strength
-            const auto t = static_cast<std::uint32_t>(
-                (std::min)(1.0f, (g - 1.0f) / 0.6f) * 255.0f + 0.5f);
+            const float tf = (std::min)(1.0f, (g - 1.0f) / 0.6f);
+            const auto t = static_cast<std::uint32_t>(tf * 255.0f + 0.5f);
             a_dl->AddCallback(&FillLightBlendCB, nullptr);
             a_dl->AddImage(tex, a_min, a_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
                 IM_COL32(t, t, t, 255));
+            // GI58: one screen pass tops out at +25% midtone, which left the
+            // slider's upper range feeling dim (1.0 IS the raw capture — the
+            // old additive default merely hid that by inflating highlights).
+            // The upper half of the slider stacks a second lift; repeated
+            // screen passes converge on a gamma-style curve and still cannot
+            // blow out highlights. Same callback scope: consecutive quads
+            // blend in submission order, so pass 2 sees pass 1's result.
+            if (tf > 0.5f) {
+                const auto t2 = static_cast<std::uint32_t>(
+                    (tf - 0.5f) * 2.0f * 255.0f + 0.5f);
+                a_dl->AddImage(tex, a_min, a_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                    IM_COL32(t2, t2, t2, 255));
+            }
             a_dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
         }
     }
