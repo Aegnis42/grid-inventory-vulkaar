@@ -171,6 +171,7 @@ namespace FUI
                     in.seekg(0, std::ios::end);
                     fileSize = static_cast<std::uint64_t>(in.tellg());
                     in.seekg(0);
+                    std::uint64_t goodEnd = 0;   // end of the last valid record
                     while (true) {
                         const std::uint64_t off = static_cast<std::uint64_t>(in.tellg());
                         std::uint32_t magic = 0, w = 0, h = 0, fmt = 0, len = 0;
@@ -206,7 +207,27 @@ namespace FUI
                             std::memcpy(en.rot, rot, 36);
                         }
                         g_pakIndex[key] = en;
-                        in.seekg(static_cast<std::streamoff>(off + hdr + len));
+                        goodEnd = off + hdr + len;
+                        in.seekg(static_cast<std::streamoff>(goodEnd));
+                    }
+                    in.close();
+                    // GI53 (review): a torn tail must be TRUNCATED, not just
+                    // ignored. Appends land at the file END -- behind a torn
+                    // tail they are unreachable to every future scan, so each
+                    // session re-captured and re-appended the same icons until
+                    // the dead-bytes threshold finally forced a compaction.
+                    if (goodEnd < fileSize) {
+                        ClosePakHandle();
+                        std::error_code tec;
+                        std::filesystem::resize_file(kPakPath, goodEnd, tec);
+                        if (!tec) {
+                            SKSE::log::info("[ICONS] pak tail truncated ({} -> {} bytes)",
+                                fileSize, goodEnd);
+                            fileSize = goodEnd;
+                        } else {
+                            SKSE::log::error("[ICONS] pak tail truncation failed: {}",
+                                tec.message());
+                        }
                     }
                 }
             }
