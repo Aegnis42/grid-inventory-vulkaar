@@ -133,4 +133,5 @@ meshes/, textures/, Sound/  (코인 모델·효과음)
 
 [CREDITS.md](CREDITS.md) 참조 — 플러그인 소스는 **GPL-3.0**(Modding Exception
 포함)으로 배포됩니다. ModExplorerMenu(patchulidev), game-icons.net(Lorc,
-Delapouite), CommonLibSSE-NG, Dear ImGui, SKSE 팀에 감사드립니다.
+Delapouite), Address Library(meh321), CommonLibSSE-NG, Dear ImGui,
+SKSE 팀에 감사드립니다.

@@ -36,6 +36,10 @@ The plugin source is therefore distributed under **GPL-3.0** (see
 - **Dear ImGui** (ocornut) — MIT
 - **spdlog / fmt** — MIT
 - **SKSE** team
+- **Address Library for SKSE Plugins** (meh321) — the version-independent
+  address resolution every `REL::ID` in this plugin rides on (runtime
+  dependency; no files redistributed)
+  / 버전 독립 주소 해석의 기반(런타임 의존, 파일 미동봉)
 
 ## Fonts / 폰트
 

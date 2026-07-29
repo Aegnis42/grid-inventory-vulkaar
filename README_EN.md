@@ -138,4 +138,5 @@ run — there is nothing to edit beforehand. Safe to add to an ongoing save.
 
 See [CREDITS.md](CREDITS.md) — plugin source under **GPL-3.0** (with the Modding
 Exception). Thanks to ModExplorerMenu (patchulidev), game-icons.net (Lorc,
-Delapouite), CommonLibSSE-NG, Dear ImGui, and the SKSE team.
+Delapouite), Address Library (meh321), CommonLibSSE-NG, Dear ImGui, and the
+SKSE team.
