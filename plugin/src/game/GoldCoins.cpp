@@ -196,7 +196,7 @@ namespace FUI::GoldCoins
 
     void SeedVendorStock(RE::Actor* a_merchant, RE::TESObjectREFR* a_container)
     {
-        if (!g_pouch || !a_merchant || !a_container) return;
+        if (!a_merchant || !a_container) return;
 
         auto* fac = a_merchant->GetVendorFaction();
         if (!fac) return;
@@ -215,17 +215,29 @@ namespace FUI::GoldCoins
         // The list is a whitelist unless notBuySell flips it into a blacklist.
         if (fac->vendorData.vendorValues.notBuySell ? inList : !inList) return;
 
-        // Already stocked (ours from a previous visit, or the player sold one
-        // back) -- never stack them up.
-        for (const auto& [obj, data] : a_container->GetInventory(
-                 [](RE::TESBoundObject& o) { return &o == g_pouch; })) {
-            (void)obj;
-            if (data.first > 0) return;
+        // §RELEASE-B: the shipped bags ride the same shelf as the pouch --
+        // one of each per general-goods vendor, refilled on a later visit
+        // once bought. Same "already stocked (ours from a previous visit, or
+        // the player sold one back) -- never stack them up" rule per item.
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        RE::TESBoundObject* wares[] = {
+            g_pouch,
+            dh ? dh->LookupForm<RE::TESObjectMISC>(0x818, kPlugin) : nullptr,   // Satchel
+            dh ? dh->LookupForm<RE::TESObjectMISC>(0x819, kPlugin) : nullptr,   // Knapsack
+        };
+        for (auto* item : wares) {
+            if (!item) continue;
+            bool stocked = false;
+            for (const auto& [obj, data] : a_container->GetInventory(
+                     [&](RE::TESBoundObject& o) { return &o == item; })) {
+                (void)obj;
+                if (data.first > 0) stocked = true;
+            }
+            if (stocked) continue;
+            a_container->AddObjectToContainer(item, nullptr, 1, nullptr);
+            logger::info("[GOLD] seeded '{}' into {}'s stock",
+                item->GetName(), a_merchant->GetDisplayFullName());
         }
-
-        a_container->AddObjectToContainer(g_pouch, nullptr, 1, nullptr);
-        logger::info("[GOLD] seeded a coin pouch into {}'s stock",
-            a_merchant->GetDisplayFullName());
     }
 
     namespace

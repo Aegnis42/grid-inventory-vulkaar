@@ -679,18 +679,35 @@ namespace
     void LoadItemDefs()
     {
         g_itemDefs.clear();
-        std::ifstream in(kDefsPath);
-        if (!in) return;
-        std::string line;
-        while (std::getline(in, line)) {
-            if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-            const auto eq = line.find('=');
-            if (eq == std::string::npos) continue;
-            std::string key = line.substr(0, eq);
-            key.erase(0, key.find_first_not_of(" \t"));
-            key.erase(key.find_last_not_of(" \t") + 1);
-            // shared metatable parser (ui/ItemDef.h) over factory defaults
-            g_itemDefs[key] = ParseItemDef(line.substr(eq + 1), ItemDef{});
+        {
+            std::ifstream in(kDefsPath);
+            std::string line;
+            while (in && std::getline(in, line)) {
+                if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+                const auto eq = line.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = line.substr(0, eq);
+                key.erase(0, key.find_first_not_of(" \t"));
+                key.erase(key.find_last_not_of(" \t") + 1);
+                // shared metatable parser (ui/ItemDef.h) over factory defaults
+                g_itemDefs[key] = ParseItemDef(line.substr(eq + 1), ItemDef{});
+            }
+        }
+        // §RELEASE-B: the SHIPPED bags (Grid Inventory.esp Satchel 0x818 /
+        // Knapsack 0x819) must act as bags out of the box, with no ini to
+        // ship. Values mirror the author's Default preset. A user line parsed
+        // above always wins; "Reset Default" erases the line and these seeds
+        // return on the next launch -- i.e. THIS is their factory default.
+        static constexpr std::pair<const char*, const char*> kShippedBagDefs[] = {
+            { "Grid Inventory.esp|0x000818",
+              "w:1, h:1, rx:90, ry:0, rz:180, scale:1.00, bag:1, bw:6, bh:4" },
+            { "Grid Inventory.esp|0x000819",
+              "w:2, h:2, rx:0, ry:1, rz:90, scale:1.00, bag:1, bw:8, bh:6" },
+        };
+        for (const auto& [key, val] : kShippedBagDefs) {
+            if (!g_itemDefs.contains(key)) {
+                g_itemDefs[key] = ParseItemDef(val, ItemDef{});
+            }
         }
         g_modelDefsDirty = true;
         logger::info("[DEFS] {} item overrides loaded", g_itemDefs.size());

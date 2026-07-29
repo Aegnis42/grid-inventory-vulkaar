@@ -97,10 +97,12 @@ namespace FUI::GoldCoins
     // SPID (an NPC distributor) cannot put it on the shelf either.
     //
     // So we stock it ourselves when a barter session opens: one pouch into this
-    // merchant's chest, but only for general-goods vendors and only when the
-    // chest has none. Nothing is added to the esp, so no leveled-list override
-    // can conflict with a merchant mod, and existing saves are covered on the
-    // next visit. A chest restock that clears it is re-seeded the visit after.
+    // merchant's chest -- and (§RELEASE-B) one Satchel and one Knapsack, the
+    // shipped bag items -- but only for general-goods vendors and only when
+    // the chest has none. Nothing is added to the esp's vendor lists, so no
+    // leveled-list override can conflict with a merchant mod, and existing
+    // saves are covered on the next visit. A chest restock that clears them
+    // is re-seeded the visit after.
     void SeedVendorStock(RE::Actor* a_merchant, RE::TESObjectREFR* a_container);
 
     void MarkDirty();   // player's Gold001 (or a coin form) changed

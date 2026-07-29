@@ -27,7 +27,7 @@ Built on CommonLibSSE-NG; one DLL covers every SE/AE runtime.
 Install the archive with your mod manager (MO2, Vortex). Contents:
 
 ```
-Grid Inventory.esp          (coin/pouch forms + 2 encumbrance abilities + UI sounds)
+Grid Inventory.esp          (coin/pouch + 2 bag forms + 2 encumbrance abilities + UI sounds)
 SKSE/Plugins/GridInventory.dll
 SKSE/Plugins/GridInventory_slots/       (equipment slot silhouettes)
 SKSE/Plugins/GridInventory_icons_lowpoly.pak   (low-poly icon style, optional)
@@ -65,8 +65,9 @@ run — there is nothing to edit beforehand. Safe to add to an ongoing save.
 - **Equipment doll**: 17 slots, place to equip / right-click to unequip.
 - **Gear-set tabs**: one click swaps the whole set (really equips; stats follow).
   Gear held by inactive tabs is hidden and takes no squares.
-- **Bags**: none pre-configured — designate an item as a bag in EDIT mode and
-  right-click opens its inner grid (up to 10×10).
+- **Bags**: general goods merchants sell the **Satchel** (1 square, 6×4
+  inside) and **Knapsack** (2×2, 8×6 inside). Right-click opens the inner
+  grid; EDIT mode can designate any other item as a bag too (up to 10×10).
 - **Trash bin**: 6×4 staging area; right-click restores; **deletion is final when
   the window closes.**
 
