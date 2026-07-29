@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -442,10 +444,12 @@ namespace FUI::GoldCoins
     {
         // The actual drop, run on the GAME thread from Tick (PlaceObjectAtMe
         // in the render pass leaves the ref's 3D unattached — invisible bag).
-        void ProcessDrop(RE::PlayerCharacter* a_p, RE::TESBoundObject* a_gold, int a_value)
+        // GI53: returns the gold actually debited (0 when placement failed),
+        // so the caller's lastLedger stays honest.
+        int ProcessDrop(RE::PlayerCharacter* a_p, RE::TESBoundObject* a_gold, int a_value)
         {
             const int v = (std::min)(a_value, CountOf(a_p, a_gold));
-            if (v <= 0) return;
+            if (v <= 0) return 0;
 
             a_p->PlayPickUpSound(a_gold, false, false);
             // purse size follows the amount (same bands as the coin tiers);
@@ -471,14 +475,15 @@ namespace FUI::GoldCoins
                         nullptr, nullptr);
                     SKSE::log::info("[GOLD] dropped a {} G sack ({:08X})",
                         v, ref->GetFormID());
-                } else {   // placement failed: no gold was taken
-                    SKSE::log::error("[GOLD] sack placement failed — gold kept");
+                    return v;
                 }
-            } else {
-                // 1~4 G (or missing records): vanilla loose-gold ref
-                a_p->RemoveItem(a_gold, v, RE::ITEM_REMOVE_REASON::kDropping, nullptr, nullptr);
-                SKSE::log::info("[GOLD] dropped {} G to the world", v);
+                SKSE::log::error("[GOLD] sack placement failed — gold kept");
+                return 0;
             }
+            // 1~4 G (or missing records): vanilla loose-gold ref
+            a_p->RemoveItem(a_gold, v, RE::ITEM_REMOVE_REASON::kDropping, nullptr, nullptr);
+            SKSE::log::info("[GOLD] dropped {} G to the world", v);
+            return v;
         }
 
         // Apply one deferred op on the game thread. It also adjusts g_lastLedger
@@ -489,8 +494,10 @@ namespace FUI::GoldCoins
         {
             switch (a_op.kind) {
             case LedgerOp::kDropCoin:
-                ProcessDrop(a_p, a_gold, a_op.value);
-                if (g_lastLedger >= 0) g_lastLedger -= a_op.value;
+                {
+                    const int d = ProcessDrop(a_p, a_gold, a_op.value);
+                    if (g_lastLedger >= 0) g_lastLedger -= d;
+                }
                 break;
             case LedgerOp::kPouchLeave:
                 {
@@ -499,7 +506,15 @@ namespace FUI::GoldCoins
                         a_p->RemoveItem(a_gold, d, RE::ITEM_REMOVE_REASON::kRemove,
                             nullptr, nullptr);
                     }
-                    if (g_lastLedger >= 0) g_lastLedger -= a_op.value;
+                    // GI53: the ledger could cover only d of the promised value
+                    // (a payment queued the same tick ran first). awayGold must
+                    // shrink by the shortfall or the pouch comes back with free
+                    // gold; lastLedger must track the ACTUAL debit or the next
+                    // tick reads the difference as an external pickup.
+                    if (d < a_op.value) {
+                        g_awayGold = (std::max)(0, g_awayGold - (a_op.value - d));
+                    }
+                    if (g_lastLedger >= 0) g_lastLedger -= d;
                 }
                 break;
             case LedgerOp::kPouchReturn:
@@ -533,13 +548,21 @@ namespace FUI::GoldCoins
         if (const auto it = g_sackRefs.find(a_ref->GetFormID()); it != g_sackRefs.end()) {
             v = it->second;
             g_sackRefs.erase(it);
+        } else if (const char* nm = a_ref->GetDisplayFullName()) {
+            // GI53: a sack the map no longer knows (lost cosave entry) must not
+            // be destroyed for 0 G. The amount also rides the display name
+            // "<sack> (1234G)" -- recover it from there.
+            if (const char* par = std::strrchr(nm, '(')) v = std::atoi(par + 1);
         }
         auto* p = RE::PlayerCharacter::GetSingleton();
         auto* gold = RE::TESForm::LookupByID<RE::TESBoundObject>(kGold001);
-        if (p && gold && v > 0) {
-            p->PlayPickUpSound(gold, true, false);
-            p->AddObjectToContainer(gold, nullptr, v, nullptr);
+        if (!p || !gold || v <= 0) {
+            SKSE::log::error("[GOLD] sack {:08X} not redeemable -- left in place",
+                a_ref->GetFormID());
+            return true;   // swallow the activation, keep the sack (no 0 G burn)
         }
+        p->PlayPickUpSound(gold, true, false);
+        p->AddObjectToContainer(gold, nullptr, v, nullptr);
         a_ref->Disable();
         a_ref->SetDelete(true);
         g_dirty = true;
@@ -599,8 +622,9 @@ namespace FUI::GoldCoins
         if (g_pouchStored < 0) g_pouchStored = 0;
 
         // G4: pinned purses can't outlast the ledger either — if gold was spent
-        // (shop/quest) below pouch+pinned, trim purses (newest first) so walking
-        // never goes negative. Rare; keeps the mirror consistent.
+        // (shop/quest) below pouch+pinned, trim purses (highest map key first —
+        // effectively arbitrary) so walking never goes negative. Rare; keeps
+        // the mirror consistent.
         {
             int budget = total - g_pouchStored;   // gold available to pinned+walking
             int psum = PinnedSum();
@@ -673,7 +697,15 @@ namespace FUI::GoldCoins
         }
         if (a_version >= 2) {
             std::uint32_t n = 0;
-            if (a_intfc->ReadRecordData(n) && n <= 4096) {
+            if (!a_intfc->ReadRecordData(n)) return;
+            if (n > 4096) {
+                // GI53: an impossible count means the record is corrupt. The n
+                // entries are still IN the stream -- skipping the loop but
+                // reading on would parse sack pairs as awayGold (free gold).
+                SKSE::log::error("[GOLD] GPCH sack count {} rejected -- record dropped", n);
+                return;
+            }
+            {
                 for (std::uint32_t i = 0; i < n; ++i) {
                     RE::FormID id = 0;
                     std::uint32_t val = 0;
@@ -693,7 +725,12 @@ namespace FUI::GoldCoins
         }
         if (a_version >= 4) {
             std::uint32_t n = 0;
-            if (a_intfc->ReadRecordData(n) && n <= 65536) {
+            if (!a_intfc->ReadRecordData(n)) return;
+            if (n > 65536) {   // GI53: corrupt count -> stop (see v2 note)
+                SKSE::log::error("[GOLD] GPCH pin count {} rejected -- record dropped", n);
+                return;
+            }
+            {
                 for (std::uint32_t i = 0; i < n; ++i) {
                     std::string  key;
                     std::int32_t val = 0;

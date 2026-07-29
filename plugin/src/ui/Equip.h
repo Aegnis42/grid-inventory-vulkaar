@@ -38,6 +38,10 @@ namespace FUI::Equip
     // L2: loadout buy/delete confirm windows — call at TOP LEVEL (like the
     // settings window), NOT inside the equip panel child.
     void DrawLoadoutWindows();
+
+    // GI53: drop popup state (buy/delete asks) when the menu closes — a
+    // confirm left open used to reappear on the next open.
+    void OnMenuClosed();
     bool CloseTopPopup();   // I/ESC layering: close an open buy/delete popup
 
     // v9 spec: every slot = 2x2 inventory cells; weapon/body/shield = 2x4 (+5px)

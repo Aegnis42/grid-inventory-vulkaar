@@ -1471,6 +1471,7 @@ namespace FUI::UIRoot
         if (Grid::CloseTrash()) Grid::ProcessTrashDeletes();
         LootBarter::Reset();      // back to kNormal (loot/barter mode ends)
         Grid::ClearPendingEquips();   // no queued equip outlives the menu
+        Equip::OnMenuClosed();        // GI53: nor does a loadout confirm popup
         if (Grid::IsHolding()) Grid::CancelHold();   // never close mid-carry
         g_showSettings = false;
         g_textInputOn = false;

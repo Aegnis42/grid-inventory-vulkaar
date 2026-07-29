@@ -80,6 +80,11 @@ namespace FUI::Equip
             // Which TILE the item left. Rule 13 forgets exactly that cell -- the
             // one the player acted on -- rather than guessing among siblings.
             std::string   srcKey;
+            // GI53: which hand the slot wears (0 none, 1 right, 2 left). An
+            // unequip without it matched "the first worn list of this form",
+            // so right-clicking the right slot could strip the LEFT copy when
+            // both hands wore identical units.
+            int           hand = 0;
         };
         std::vector<PendingAction> g_pending;
         int                        g_rebuildLag = 0;   // rebuild AFTER the queued task applied
@@ -442,7 +447,7 @@ namespace FUI::Equip
                     SKSE::log::info("[ACT] rclick-unequip '{}' slot '{}' hand={}",
                                     eq->obj->GetName(), a_slot.id, eq->hand);
                     g_pending.push_back({ eq->obj->GetFormID(), "", true,
-                                          eq->uid, -1, eq->sig });
+                                          eq->uid, -1, eq->sig, {}, eq->hand });
                 }
                 if (eq && ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
                     // v9.2: left-click PICKS the equipped item up — unequip
@@ -452,7 +457,7 @@ namespace FUI::Equip
                     // this form", which answered the other hand's item whenever
                     // the same form was worn twice.
                     g_pending.push_back({ eq->obj->GetFormID(), "", true,
-                                          eq->uid, -1, eq->sig });
+                                          eq->uid, -1, eq->sig, {}, eq->hand });
                     Grid::BeginCarry(eq->obj, eq->uid, eq->sig, eq->hand);
                 }
             } else if (ImGui::IsItemHovered()) {
@@ -545,9 +550,15 @@ namespace FUI::Equip
                 // D4: unequip the WORN sub-stack explicitly -- with a null list
                 // the engine picks, and it does not have to pick the one on the
                 // body when spares of the same form sit in the pack.
+                // GI53: name the HAND too (worn-unit identity needs it), and
+                // hand the engine the left-hand slot so identical copies in
+                // both hands cannot resolve to the wrong side.
                 auto* wornList = Grid::WornExtraMatching(Grid::LiveEntryOf(player, obj),
-                                                         act.uid, act.sig);
-                em->UnequipObject(player, obj, wornList, 1, nullptr,
+                                                         act.uid, act.sig, act.hand);
+                const RE::BGSEquipSlot* unSlot = act.hand == 2
+                    ? RE::TESForm::LookupByID<RE::BGSEquipSlot>(0x13F43)
+                    : nullptr;
+                em->UnequipObject(player, obj, wornList, 1, unSlot,
                     false, false, true, true);
                 SKSE::log::info("[EQUIP] unequip {}", obj->GetName());
                 continue;
@@ -633,8 +644,15 @@ namespace FUI::Equip
             if (act.uid != 0 || act.sig != 0) {
                 srcList = Grid::ExtraForPool(Grid::LiveEntryOf(player, obj),
                                              act.uid, act.sig);
-            }
-            if (!srcList) {
+                // GI53: the named unit vanished between the click and this
+                // tick (a queued sale/transfer raced us). A stale xlIdx still
+                // resolves to a REAL list -- the wrong one -- so refuse rather
+                // than equip an arbitrary sibling (PoolChoice rule 61).
+                if (!srcList) {
+                    SKSE::log::info("[EQUIP] named unit gone -- equip skipped");
+                    continue;
+                }
+            } else {
                 srcList = Grid::ExtraForInstance(Grid::LiveEntryOf(player, obj),
                                                  act.uid, act.xlIdx);
             }
@@ -907,6 +925,12 @@ namespace FUI::Equip
             }
             ImGui::End();
         }
+    }
+
+    void OnMenuClosed()
+    {
+        g_buyOpen = false;
+        g_delTarget = -1;
     }
 
     void Draw()

@@ -98,7 +98,13 @@ namespace FUI::Loadout
             auto inv = a_p->GetInventory(
                 [](RE::TESBoundObject& o) { return o.Is(RE::FormType::Armor); });
             for (auto& [obj, data] : inv) {
-                if (data.first > 0 && data.second && data.second->IsWorn()) add(obj, false);
+                if (data.first <= 0 || !data.second || !data.second->IsWorn()) continue;
+                // GI53: a worn SHIELD was already captured by the left-hand
+                // path above -- a second (form, right) entry duplicated it in
+                // the preset: ReservedCount said 2, EquipSet equipped it twice,
+                // and a spare copy of the same shield vanished from the board.
+                if (seen.contains({ obj->GetFormID(), true })) continue;
+                add(obj, false);
             }
             return out;
         }
@@ -249,6 +255,14 @@ namespace FUI::Loadout
             if (a_idx < 1 || a_idx >= static_cast<int>(g_loadouts.size())) return;
             if (a_idx == g_active) {
                 DoSwitch(0);   // back to EQUIP; the deleted tab's gear becomes free
+                // GI53: DoSwitch bails without switching when the player's 3D
+                // is not loaded -- erasing anyway leaves g_active pointing at
+                // (or past) the erased slot, and the next snapshot writes out
+                // of bounds. Keep the tab; deleting again later works.
+                if (g_active == a_idx) {
+                    SKSE::log::info("[LOADOUT] remove aborted: switch-away failed");
+                    return;
+                }
             }
             g_loadouts.erase(g_loadouts.begin() + a_idx);
             if (g_active > a_idx) --g_active;
