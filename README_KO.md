@@ -28,20 +28,24 @@ CommonLibSSE-NG 기반으로 SE/AE 전 런타임을 단일 DLL로 지원합니�
 ```
 Grid Inventory.esp          (코인/주머니 + 가방 2종 폼 + 과적 처리 능력 2종 + UI 효과음)
 SKSE/Plugins/GridInventory.dll
+SKSE/Plugins/GridInventory_icons.pak      (바닐라+AE CC 전 아이템 아이콘 사전 캡처본)
+SKSE/Plugins/GridInventory_items.ini      (전 아이템 칸 크기·회전 튜닝값)
+SKSE/Plugins/GridInventory_categories.ini (카테고리 기본값 — 목록에 없는 아이템용)
 SKSE/Plugins/GridInventory_slots/       (장비 슬롯 실루엣)
 meshes/, textures/, Sound/  (코인 모델·효과음)
 ```
 
-설정(ini)·아이콘 캐시(pak)는 첫 실행 후 `SKSE/Plugins/`에 자동 생성됩니다.
+나머지 설정 파일(`_ui.ini` 등)은 첫 실행 후 `SKSE/Plugins/`에 자동 생성됩니다.
 미리 손볼 ini는 없습니다. 진행 중인 세이브에 설치해도 됩니다.
 
 ## 첫 실행
 
-1. 인벤토리를 열면 보이는 아이템부터 아이콘이 캡처됩니다 — 격자 위
-   **'아이템' 라벨 옆에 "아이콘 캐싱 중… N"** 카운터가 표시됩니다.
+1. **바닐라·AE 크리에이션 클럽 아이템은 아이콘이 미리 동봉**되어 있어 캐싱
+   대기 없이 바로 보입니다. 모드 아이템만 처음 화면에 보일 때 캡처됩니다 —
+   격자 위 **'아이템' 라벨 옆에 "아이콘 캐싱 중… N"** 카운터가 표시됩니다.
 2. **기본 언어는 영어**입니다. 설정 → 언어 → 한국어.
-3. (권장) 설정 → 아이콘 → **전체 사전 캐싱** — 인벤토리를 열어 둔 동안
-   한 프레임에 하나씩 전 아이템을 미리 캡처합니다(창을 닫으면 저장 후 중단).
+3. (모드 아이템이 많다면 권장) 설정 → 아이콘 → **전체 사전 캐싱** — 인벤토리를
+   열어 둔 동안 한 프레임에 하나씩 전 아이템을 미리 캡처합니다(창을 닫으면 저장 후 중단).
 
 ---
 
@@ -127,8 +131,10 @@ meshes/, textures/, Sound/  (코인 모델·효과음)
 - 한/중/일 표시는 윈도우 시스템 글꼴을 사용합니다(글꼴 미동봉).
 - 파피루스 스크립트 0개 — 스크립트 부하·세이브 잔재가 없습니다.
 - 자동 생성 파일(MO2는 Overwrite): `GridInventory_ui.ini`(설정·창 위치),
-  `_items.ini`, `_categories.ini`, `_icons.pak`, `_icons_styl.pak`(스타일 사용
-  시), 내보낸 프리셋 파일들.
+  `_icons_styl.pak`(스타일 사용 시), 내보낸 프리셋 파일들.
+  동봉된 `_items.ini`·`_categories.ini`·`_icons.pak`는 게임 중 갱신됩니다
+  (EDIT 수정, 새 캡처) — 모드 업데이트 시 덮이므로 **내 튜닝은 프리셋으로
+  백업**하세요.
   로그: `문서\My Games\Skyrim Special Edition\SKSE\GridInventory.log`
 
 ## 크레딧 / 라이선스

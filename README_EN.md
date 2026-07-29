@@ -29,20 +29,26 @@ Install the archive with your mod manager (MO2, Vortex). Contents:
 ```
 Grid Inventory.esp          (coin/pouch + 2 bag forms + 2 encumbrance abilities + UI sounds)
 SKSE/Plugins/GridInventory.dll
+SKSE/Plugins/GridInventory_icons.pak      (pre-captured icons for all vanilla + AE CC items)
+SKSE/Plugins/GridInventory_items.ini      (tuned footprint/rotation for every item)
+SKSE/Plugins/GridInventory_categories.ini (category defaults — for unlisted items)
 SKSE/Plugins/GridInventory_slots/       (equipment slot silhouettes)
 meshes/, textures/, Sound/  (coin models, sounds)
 ```
 
-Settings (ini) and the icon cache (pak) are generated in `SKSE/Plugins/` on first
-run — there is nothing to edit beforehand. Safe to add to an ongoing save.
+The remaining settings files (`_ui.ini` etc.) are generated in `SKSE/Plugins/` on
+first run — there is nothing to edit beforehand. Safe to add to an ongoing save.
 
 ## First run
 
-1. Open the inventory. Icons are captured as items become visible — a
-   **"caching icons… N"** counter shows next to the **ITEMS label** above the grid.
+1. **Vanilla and AE Creation Club items come with icons pre-captured** — they
+   show instantly, no caching wait. Only modded items are captured as they first
+   become visible — a **"caching icons… N"** counter shows next to the **ITEMS
+   label** above the grid.
 2. The default language is English; other languages switch instantly in Settings.
-3. Recommended: Settings → Icons → **Precache All** — captures every item in your
-   load order, one per frame, while the inventory stays open (closing saves and stops).
+3. Recommended with many modded items: Settings → Icons → **Precache All** —
+   captures every item in your load order, one per frame, while the inventory
+   stays open (closing saves and stops).
 
 ---
 
@@ -132,8 +138,10 @@ run — there is nothing to edit beforehand. Safe to add to an ongoing save.
 - CJK text uses your Windows system fonts (no fonts redistributed).
 - Zero Papyrus scripts — no script load, nothing left in your save.
 - Generated files (MO2: Overwrite): `GridInventory_ui.ini` (settings & windows),
-  `_items.ini`, `_categories.ini`, `_icons.pak`, `_icons_styl.pak` (when the
-  stylized style is on), and any presets you export.
+  `_icons_styl.pak` (when the stylized style is on), and any presets you export.
+  The bundled `_items.ini` / `_categories.ini` / `_icons.pak` are updated during
+  play (EDIT changes, new captures) — a mod update overwrites them, so **back up
+  your own tuning as a preset.**
   Log: `Documents\My Games\Skyrim Special Edition\SKSE\GridInventory.log`
 
 ## Credits / licence
