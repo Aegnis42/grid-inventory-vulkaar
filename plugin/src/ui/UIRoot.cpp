@@ -44,34 +44,40 @@ namespace FUI::UIRoot
         ImFont* g_fontMain = nullptr;
         ID3D11ShaderResourceView* g_glowSRV = nullptr;   // radial falloff (rarity glow)
 
-        // icon-brightness UP pass: additive blend state (src*a + dst). A tint
-        // can only darken, so gains above 1.0 draw the icon a second time
-        // additively — live, no texture rebake.
-        ID3D11BlendState* g_addBlend = nullptr;
+        // icon-brightness UP pass. GI57: the >1 gain used to be ADDITIVE
+        // (dst + t*src) — bright pixels received the most, dark ones almost
+        // nothing, which read as "glow" rather than "brighter" (user report).
+        // What "brighter" means here is FILL LIGHT: lift the dim, keep the
+        // highlights. Screen-style blend does exactly that with no shader:
+        //   out = dst + t*src*(1 - dst)
+        // (src carries t in the vertex COLOR; captures are effectively
+        // premultiplied — transparent texels are black — so the pass is
+        // alpha-gated for free and pure black albedo stays black.)
+        ID3D11BlendState* g_fillBlend = nullptr;
 
-        void AdditiveBlendCB(const ImDrawList*, const ImDrawCmd*)
+        void FillLightBlendCB(const ImDrawList*, const ImDrawCmd*)
         {
             auto* data = RE::BSGraphics::Renderer::GetRendererData();
             auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
-            if (ctx && g_addBlend) {
+            if (ctx && g_fillBlend) {
                 const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-                ctx->OMSetBlendState(g_addBlend, bf, 0xFFFFFFFF);
+                ctx->OMSetBlendState(g_fillBlend, bf, 0xFFFFFFFF);
             }
         }
 
-        void CreateAdditiveBlend(ID3D11Device* a_device)
+        void CreateFillLightBlend(ID3D11Device* a_device)
         {
-            if (g_addBlend) return;
+            if (g_fillBlend) return;
             D3D11_BLEND_DESC bd = {};
             bd.RenderTarget[0].BlendEnable           = TRUE;
-            bd.RenderTarget[0].SrcBlend              = D3D11_BLEND_SRC_ALPHA;
+            bd.RenderTarget[0].SrcBlend              = D3D11_BLEND_INV_DEST_COLOR;
             bd.RenderTarget[0].DestBlend             = D3D11_BLEND_ONE;
             bd.RenderTarget[0].BlendOp               = D3D11_BLEND_OP_ADD;
             bd.RenderTarget[0].SrcBlendAlpha         = D3D11_BLEND_ZERO;
             bd.RenderTarget[0].DestBlendAlpha        = D3D11_BLEND_ONE;
             bd.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
             bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-            a_device->CreateBlendState(&bd, &g_addBlend);
+            a_device->CreateBlendState(&bd, &g_fillBlend);
         }
         IconCache::Icon g_tornGlowA;   // torn 9-slice panel, thin cream rim (skin 3)
         IconCache::Icon g_tornGlowB;   // torn 9-slice panel, soft cream halo (skin 4)
@@ -489,7 +495,7 @@ namespace FUI::UIRoot
         }
 
         // ICON LIGHT — item icon brightness, LIVE: <=1 darkens via tint,
-        // >1 brightens via the additive pass (see DrawItemIcon)
+        // >1 brightens via the fill-light pass (see DrawItemIcon)
         void RowIconGain(const SettingsCtx& a_c)
         {
             SettingLabel(a_c, Lang::Str::IconBrightLabel);
@@ -1098,18 +1104,20 @@ namespace FUI::UIRoot
     {
         const float g = Theme::IconGain();
         const auto  tex = reinterpret_cast<ImTextureID>(a_srv);
-        // <=1: plain darkening tint. >1: full draw + additive top-up of
-        // icon*(g-1) — exact linear gain, applied LIVE (no texture rebake)
+        // <=1: plain darkening tint. >1 (GI57): FILL-LIGHT top-up — a screen
+        // blend adds t*icon*(1-dst), so dim midtones get lifted the most and
+        // highlights cannot blow out. Live, no texture rebake.
         const auto c = static_cast<std::uint32_t>(
             255.0f * (std::min)(1.0f, g) + 0.5f);
         a_dl->AddImage(tex, a_min, a_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
             IM_COL32(c, c, c, 255));
-        if (g > 1.0f && g_addBlend) {
+        if (g > 1.0f && g_fillBlend) {
+            // slider top (1.6) maps to full lift strength
             const auto t = static_cast<std::uint32_t>(
-                (std::min)(1.0f, g - 1.0f) * 255.0f + 0.5f);
-            a_dl->AddCallback(&AdditiveBlendCB, nullptr);
+                (std::min)(1.0f, (g - 1.0f) / 0.6f) * 255.0f + 0.5f);
+            a_dl->AddCallback(&FillLightBlendCB, nullptr);
             a_dl->AddImage(tex, a_min, a_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
-                IM_COL32(255, 255, 255, t));
+                IM_COL32(t, t, t, 255));
             a_dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
         }
     }
@@ -1201,7 +1209,7 @@ namespace FUI::UIRoot
         ImGui::StyleColorsDark();
         Theme::Apply();
         CreateGlowTexture(device);
-        CreateAdditiveBlend(device);
+        CreateFillLightBlend(device);
 
         // OATHVEIN TORN 9-slice panels: baked from the user's torn PNG with a
         // light rim/glow (in-game has no CSS filter — glow is in the texture)
