@@ -1284,7 +1284,7 @@ namespace
 SKSEPluginInfo(
     .Version              = { 1, 0, 0, 0 },
     .Name                 = "GridInventory",
-    .Author               = "Fablerim",
+    .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)
 
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse)

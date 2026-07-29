@@ -1,6 +1,6 @@
 {
-  "name": "fablerim-inventory",
-  "version-string": "0.1.0",
+  "name": "grid-inventory",
+  "version-string": "1.0.0",
   "dependencies": [
     "spdlog",
     "fmt",
