@@ -96,7 +96,7 @@ namespace FUI::Theme
         // GI46 release defaults (tuned in playtesting): radial 1.34 /
         // silhouette 0.5, icons slightly brightened.
         float g_glowGain[2] = { 1.34f, 0.5f };
-        float g_iconGain = 1.19f;  // item icon brightness (baked at texture upload)
+        float g_iconGain = 1.36f;  // item icon brightness (GI58 fill-light scale)
     }
 
     float IconGain() { return g_iconGain; }
