@@ -221,12 +221,21 @@ namespace FUI::Equip
                         rGlow = Grid::GlowBits(obj, data.second.get(), rXl);
                     }
                     if (obj == leftObj) {
-                        lXl = Grid::WornExtraOf(data.second.get(), 2);
+                        // GI54: a SHIELD is armour -- the engine wears it with
+                        // ExtraWorn (hand-free), never ExtraWornLeft. Reading
+                        // hand 2 missed its list (sig/uid/temper-ring blank)
+                        // and recording hand 2 poisoned every hand-aware worn
+                        // match downstream (the spare-shield blink).
+                        const int lh = leftObj->Is(RE::FormType::Armor) ? 0 : 2;
+                        lXl = Grid::WornExtraOf(data.second.get(), lh);
                         lGlow = Grid::GlowBits(obj, data.second.get(), lXl);
                     }
                 }
                 if (rightObj) add("weapon", rightObj, 1, rGlow, rXl, 1);
-                if (leftObj) add("shieldL", leftObj, 1, lGlow, lXl, 2);
+                if (leftObj) {
+                    add("shieldL", leftObj, 1, lGlow, lXl,
+                        leftObj->Is(RE::FormType::Armor) ? 0 : 2);
+                }
             }
 
             if (auto* ammo = player->GetCurrentAmmo()) {

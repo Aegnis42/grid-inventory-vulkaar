@@ -77,8 +77,11 @@ namespace FUI::Loadout
                 // ...and read the signature from THAT hand's list, not "the first
                 // worn list of this form" -- with a tempered copy in one hand and
                 // a plain one in the other, both slots recorded the same unit.
+                // GI54: a SHIELD is armour (ExtraWorn, hand-free) -- reading
+                // hand 2 missed its list and recorded sig 0 for tempered shields.
+                const int readHand = left ? (b->Is(RE::FormType::Armor) ? 0 : 2) : 1;
                 const std::uint16_t sig = Grid::InstanceSigOf(
-                    Grid::WornExtraOf(Grid::LiveEntryOf(a_p, b), left ? 2 : 1));
+                    Grid::WornExtraOf(Grid::LiveEntryOf(a_p, b), readHand));
                 out.push_back({ b->GetFormID(), left, sig });
             };
 
@@ -183,7 +186,13 @@ namespace FUI::Loadout
                 auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(e.id);
                 if (!obj || !StillOwned(a_p, obj)) continue;   // sold/dropped -> skip
                 const RE::BGSEquipSlot* slot = nullptr;
-                if (e.leftHand) slot = RE::TESForm::LookupByID<RE::BGSEquipSlot>(kLeftHandSlot);
+                // GI54: leftHand is recorded for shields (they come off the
+                // left-hand path) but the LeftHand EQUIP SLOT belongs to
+                // weapons and torches only -- armour equips through its own
+                // biped slot.
+                if (e.leftHand && !obj->Is(RE::FormType::Armor)) {
+                    slot = RE::TESForm::LookupByID<RE::BGSEquipSlot>(kLeftHandSlot);
+                }
                 // D4-b: name the unit the preset actually captured. Sig 0 (a
                 // plain unit) resolves to nullptr and the engine picks, which
                 // is right -- plain units are interchangeable.

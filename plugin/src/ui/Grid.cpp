@@ -5617,7 +5617,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the swap was skipped in exactly the case pools exist for.
             RE::TESBoundObject* worn = Equip::WornObjectAt(g_slotTarget);
             auto*               wxl = worn ? Equip::WornExtraAt(g_slotTarget) : nullptr;
-            const int           wornHand = (g_slotTarget == "shieldL") ? 2 : 1;
+            // GI54: the hand is how the ENGINE marks the worn list -- weapons
+            // take the slot's hand, a torch is left, and ARMOUR (a shield on
+            // the shieldL slot included) is biped-worn with no hand mark.
+            // Slot-based hand 2 made the landed-test look for an ExtraWornLeft
+            // a shield never gets: the pending entry double-counted with the
+            // applied worn list and the SPARE blinked out meanwhile.
+            const auto engineHand = [&](RE::TESBoundObject* a_o) {
+                if (!a_o) return 0;
+                if (a_o->Is(RE::FormType::Weapon)) {
+                    return g_slotTarget == "shieldL" ? 2 : 1;
+                }
+                if (a_o->Is(RE::FormType::Light)) return 2;
+                return 0;
+            };
+            const int           wornHand = engineHand(worn);
             const std::uint16_t wsig = InstanceSig(wxl);
             std::uint16_t       wuid = 0;
             if (wxl) {
@@ -5654,8 +5668,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     worn ? worn->GetName() : "(empty)", swapping, accepted);
             }
             if (accepted) {
+                // GI54: the INCOMING item's engine hand, not the occupant's --
+                // a shield replacing a left-hand sword is still hand 0.
                 NotePendingEquip(a_held.obj, a_held.uid, a_held.sig,
-                                 wornHand, a_held.key);
+                                 engineHand(a_held.obj), a_held.key);
                 g_drainHint = { FormKey(a_held.obj), a_held.key };
             }
             g_held.reset();
