@@ -3,12 +3,13 @@
 ## License / 라이선스
 
 This SKSE plugin's source contains code ported from ModExplorerMenu (GPL-3.0).
-The plugin source is therefore distributed under **GPL-3.0** (with the same
-Modding Exception as upstream).
+The plugin source is therefore distributed under **GPL-3.0** (see
+`LICENSE-GPL`) with the same modding/linking exceptions as upstream
+(`EXCEPTIONS.txt`).
 
 이 SKSE 플러그인 소스에는 ModExplorerMenu(GPL-3.0)에서 이식한 코드가 포함되어
-있으며, 따라서 플러그인 소스는 **GPL-3.0**(업스트림과 동일한 Modding Exception
-포함)으로 배포됩니다.
+있으며, 따라서 플러그인 소스는 **GPL-3.0**(`LICENSE-GPL`)으로 배포됩니다 —
+업스트림과 동일한 모딩/링킹 예외(`EXCEPTIONS.txt`) 포함.
 
 ## Ported code / 이식 코드
 

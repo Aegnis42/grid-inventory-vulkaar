@@ -9,12 +9,18 @@
 !/plugin/src/
 !/plugin/CMakeLists.txt
 !/plugin/vcpkg.json
+# dead-in-build files stay local: Fallback.* (unused 2D icon set, not in
+# CMakeLists) and api/ (unimplemented ABI design draft for the sockets mod)
+/plugin/src/ui/Fallback.cpp
+/plugin/src/ui/Fallback.h
+/plugin/src/api/
 
 # --- docs shipped with the mod ---
 !/README_KO.md
 !/README_EN.md
 !/CREDITS.md
-!/LICENSE
+!/LICENSE-GPL
+!/EXCEPTIONS.txt
 
 # --- repo files ---
 !/.gitignore
