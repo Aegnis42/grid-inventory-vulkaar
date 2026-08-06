@@ -16,11 +16,16 @@ namespace FUI::Theme
             return ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, a);
         }
 
-        // ── light-panel ink and chrome ─────────────────────────────────────
-        // Measured against the panel (#5295B9). White body text there is only
-        // 3.30:1 — under the 4.5:1 a reading string needs — so what is READ
-        // goes dark, and what is SOUGHT stays white with a black outline.
-        constexpr ImVec4 kDarkInk   = Rgba(14, 46, 56);    // labels, body   4.3:1
+        // ── light-panel chrome fallbacks ───────────────────────────────────
+        // What a light-panel skin gets when it names none of the lp* tokens.
+        // These are SIMPLE's own values, which is why every theme derived from
+        // it must name its own — silence here means "inherit blue".
+        //
+        // ★A `kDarkInk` used to sit alongside these, for labels and body text.
+        // It is gone: Chrome() and ValVec() read the SKIN's ink now, so a
+        // second dark ink would be a copy of a decision each skin already
+        // made. On SIMPLE that ink is white with a black outline (21:1 over
+        // any panel); on parchment it is the brown the body already uses.
         constexpr ImVec4 kBtnOnFace = Rgba(143, 211, 222); // active button face
         constexpr ImVec4 kBtnOnInk  = Rgba(14, 48, 56);    // ink ON that face
         constexpr ImVec4 kRuleInk   = Rgba(13, 32, 46);    // rules, drawn at .70
@@ -273,7 +278,7 @@ namespace FUI::Theme
                 Rgba(67, 71, 79),                       // borders/ink
                 Rgba(119, 127, 131),                    // inner rim
                 Rgba(255, 255, 255),                    // ink
-                Rgba(214, 232, 242, 0.8f),              // inkDim
+                Rgba(232, 233, 235, 0.8f),              // inkDim
                 Rgba(132, 139, 145, 0.68f),             // winBg (translucent board)
                 Rgba(94, 101, 104),                     // glyph
                 Rgba(49, 53, 55),                       // shade (occupied cell)
@@ -289,7 +294,7 @@ namespace FUI::Theme
                 Rgba(61, 66, 69, 0.85f),                // cellGroove
                 Rgba(103, 110, 115, 0.85f),             // cellGrooveLt (unused)
                 Rgba(82, 88, 93),                       // btnFace
-                Rgba(181, 175, 172, 0.5f),              // bagOpen (complement, so it never reads as the panel)
+                Rgba(194, 171, 159, 0.5f),              // bagOpen (complement, so it never reads as the panel)
                 Rgba(238, 206, 118),                    // goldNum — money is money on every theme
                 24.0f,                                  // titleSize
                 // ★★light-panel palette. Simple leaves these at alpha 0 and
@@ -313,7 +318,7 @@ namespace FUI::Theme
                 Rgba(47, 51, 63),                       // borders/ink
                 Rgba(98, 108, 116),                     // inner rim
                 Rgba(255, 255, 255),                    // ink
-                Rgba(214, 232, 242, 0.8f),              // inkDim
+                Rgba(211, 215, 220, 0.8f),              // inkDim
                 Rgba(109, 120, 132, 0.68f),             // winBg (translucent board)
                 Rgba(74, 83, 88),                       // glyph
                 Rgba(31, 35, 37),                       // shade (occupied cell)
@@ -329,7 +334,7 @@ namespace FUI::Theme
                 Rgba(43, 48, 52, 0.85f),                // cellGroove
                 Rgba(83, 91, 99, 0.85f),                // cellGrooveLt (unused)
                 Rgba(62, 69, 77),                       // btnFace
-                Rgba(174, 167, 161, 0.5f),              // bagOpen (complement, so it never reads as the panel)
+                Rgba(187, 164, 148, 0.5f),              // bagOpen (complement, so it never reads as the panel)
                 Rgba(238, 206, 118),                    // goldNum — money is money on every theme
                 24.0f,                                  // titleSize
                 // ★★light-panel palette. Simple leaves these at alpha 0 and
@@ -353,7 +358,7 @@ namespace FUI::Theme
                 Rgba(97, 62, 28),                       // borders/ink
                 Rgba(152, 90, 77),                      // inner rim
                 Rgba(255, 255, 255),                    // ink
-                Rgba(214, 232, 242, 0.8f),              // inkDim
+                Rgba(237, 215, 209, 0.8f),              // inkDim
                 Rgba(174, 103, 83, 0.68f),              // winBg (translucent board)
                 Rgba(118, 63, 60),                      // glyph
                 Rgba(56, 30, 28),                       // shade (occupied cell)
@@ -369,7 +374,7 @@ namespace FUI::Theme
                 Rgba(75, 40, 35, 0.85f),                // cellGroove
                 Rgba(133, 79, 65, 0.85f),               // cellGrooveLt (unused)
                 Rgba(109, 60, 45),                      // btnFace
-                Rgba(155, 184, 188, 0.5f),              // bagOpen (complement, so it never reads as the panel)
+                Rgba(153, 186, 190, 0.5f),              // bagOpen (complement, so it never reads as the panel)
                 Rgba(238, 206, 118),                    // goldNum — money is money on every theme
                 24.0f,                                  // titleSize
                 // ★★light-panel palette. Simple leaves these at alpha 0 and
@@ -393,7 +398,7 @@ namespace FUI::Theme
                 Rgba(92, 34, 39),                       // borders/ink
                 Rgba(147, 83, 108),                     // inner rim
                 Rgba(255, 255, 255),                    // ink
-                Rgba(214, 232, 242, 0.8f),              // inkDim
+                Rgba(235, 211, 219, 0.8f),              // inkDim
                 Rgba(167, 90, 117, 0.68f),              // winBg (translucent board)
                 Rgba(113, 64, 89),                      // glyph
                 Rgba(54, 30, 42),                       // shade (occupied cell)
@@ -409,7 +414,7 @@ namespace FUI::Theme
                 Rgba(72, 38, 53, 0.85f),                // cellGroove
                 Rgba(128, 70, 91, 0.85f),               // cellGrooveLt (unused)
                 Rgba(104, 50, 67),                      // btnFace
-                Rgba(157, 186, 173, 0.5f),              // bagOpen (complement, so it never reads as the panel)
+                Rgba(153, 190, 173, 0.5f),              // bagOpen (complement, so it never reads as the panel)
                 Rgba(238, 206, 118),                    // goldNum — money is money on every theme
                 24.0f,                                  // titleSize
                 // ★★light-panel palette. Simple leaves these at alpha 0 and
@@ -433,7 +438,7 @@ namespace FUI::Theme
                 Rgba(34, 91, 69),                       // borders/ink
                 Rgba(84, 146, 103),                     // inner rim
                 Rgba(255, 255, 255),                    // ink
-                Rgba(214, 232, 242, 0.8f),              // inkDim
+                Rgba(211, 235, 220, 0.8f),              // inkDim
                 Rgba(91, 166, 117, 0.68f),              // winBg (translucent board)
                 Rgba(65, 113, 74),                      // glyph
                 Rgba(30, 54, 35),                       // shade (occupied cell)
@@ -449,7 +454,7 @@ namespace FUI::Theme
                 Rgba(38, 72, 47, 0.85f),                // cellGroove
                 Rgba(71, 127, 90, 0.85f),               // cellGrooveLt (unused)
                 Rgba(51, 103, 70),                      // btnFace
-                Rgba(185, 157, 178, 0.5f),              // bagOpen (complement, so it never reads as the panel)
+                Rgba(190, 153, 181, 0.5f),              // bagOpen (complement, so it never reads as the panel)
                 Rgba(238, 206, 118),                    // goldNum — money is money on every theme
                 24.0f,                                  // titleSize
                 // ★★light-panel palette. Simple leaves these at alpha 0 and
@@ -738,9 +743,15 @@ namespace FUI::Theme
     const ImVec4& ValVec()
     {
         const Skin& sk = S();
-        // ★A light panel has no headroom above it: `hi` fades INTO the panel
-        // there, so emphasis has to go the other way, toward acc.
-        return sk.lightPanel ? sk.acc : sk.hi;
+        // ★★A light panel has no headroom above it — `hi` is tuned to glow on a
+        // dark ground and simply fades into a bright one. The answer is the
+        // skin's own INK: on SIMPLE that is white (and every number carries a
+        // black outline, so it reads at 21:1 whatever the panel is doing), on
+        // parchment it is the same brown the body text uses.
+        // ★NOT acc. Acc is the darkest token in a light skin — it is the frame
+        // colour — so numbers painted in it read as engraved into the panel
+        // rather than as the figures the eye is hunting for.
+        return sk.lightPanel ? sk.ink : sk.hi;
     }
 
     ImU32 Val(float a_alpha) { return Col(ValVec(), a_alpha); }
@@ -754,10 +765,13 @@ namespace FUI::Theme
     ImU32 Chrome(float a_alpha)
     {
         const Skin& sk = S();
-        // over a LIGHT panel acc is the darkest thing on screen, and headings
-        // painted in it stop reading as headings — they read as borders
-        return sk.lightPanel ? Col(LP(sk.lpRule, kDarkInk), a_alpha)
-                             : Col(sk.acc, a_alpha);
+        // ★Over a LIGHT panel acc is the darkest thing on screen, and headings
+        // painted in it stop reading as headings — they read as borders. The
+        // answer is the skin's own INK, not a darker colour still: on SIMPLE
+        // that is white (and TextOutlined gives it a black edge, 21:1), on
+        // parchment it is the brown the body text already uses. Each skin
+        // already decided what "written on this panel" looks like.
+        return sk.lightPanel ? Col(sk.ink, a_alpha) : Col(sk.acc, a_alpha);
     }
 
     ImU32 OccupiedGround()
@@ -773,13 +787,21 @@ namespace FUI::Theme
     float PadX() { return 12.0f * g_scale; }
     float PadY() { return 8.0f * g_scale; }
 
-    float WinRounding() { return S().rounding; }
+    // ★★Skin::rounding == 0 means "this skin does not name one", NOT "square".
+    // Windows and frames want different amounts — 6px on a 700px window is a
+    // soft corner, the same 6px on a 17px button is a lozenge — so the default
+    // is a PAIR, and a skin that sets `rounding` overrides both with its one
+    // value (that is the "single knob" the header speaks of).
+    float WinRounding()
+    {
+        const float r = S().rounding;
+        return r > 0.0f ? r : 6.0f;
+    }
 
     float FrameRounding()
     {
-        // 6px on a 700px window is a soft corner; on a 17px button it is a
-        // lozenge. Frames never round harder than 4.
-        return (std::min)(4.0f, S().rounding);
+        const float r = S().rounding;
+        return r > 0.0f ? (std::min)(r, 4.0f) : 3.0f;
     }
 
     // larger for the torn frame: the panel is inset from the window edge by
@@ -913,17 +935,41 @@ namespace FUI::Theme
         return sk.lightPanel ? Col(LP(sk.lpRule, kRuleInk), 0.70f) : Acc(0.25f);
     }
 
-    // gauge fill/border: sel (EDIT painter red) on translucent skins so the
-    // filled portion pops; acc-tinted chrome everywhere else
+    // ★★A gauge on a LIGHT panel fills UPWARD in brightness. Everywhere else
+    // the track is a dark well with an accent fill, but on a light panel the
+    // accent IS the darkest token — a track drawn that way reads as a groove
+    // cut into the panel, and the filled part is indistinguishable from the
+    // empty part. The ON-button face is already the skin's "brightest, means
+    // active" colour, so the fill borrows it and the whole control reads at a
+    // glance.
+    ImU32 GaugeTrack()
+    {
+        const Skin& sk = S();
+        return sk.lightPanel ? IM_COL32(255, 255, 255, 38) : IM_COL32(0, 0, 0, 51);
+    }
+
     ImU32 GaugeFill()
     {
         const Skin& sk = S();
+        // ★WHITE on a light panel, not the skin's brightest token. A gauge is
+        // read at a glance, and the only thing that survives being that small
+        // against a mid-tone panel is the value the panel cannot reach — a
+        // tinted fill has to compete with the panel's own hue.
+        //
+        // ★★HALF strength, because the VALUE sits on top of it. At full white
+        // a filled slider swallowed its own number, and worst of all at half
+        // fill: the digits were sliced down the middle, half of them legible.
+        // Something read halfway is more distracting than something not read.
+        // The capacity bar keeps full white (UIRoot) — nothing is written over
+        // that one, so it has no reason to give any brightness back.
+        if (sk.lightPanel) return IM_COL32(255, 255, 255, 107);
         return sk.translucent ? Col(sk.sel, 0.55f) : Acc(0.20f);
     }
 
     ImU32 GaugeBorder()
     {
         const Skin& sk = S();
+        if (sk.lightPanel) return Col(LP(sk.lpBorder, Rgba(39, 80, 106)), 0.75f);
         return sk.translucent ? Col(sk.sel, 0.60f) : Acc(0.25f);
     }
 
@@ -997,6 +1043,9 @@ namespace FUI::Theme
         // ★ImGui 1.92 moved glyph metrics behind ImFontBaked: a glyph's box is
         // only meaningful at a SIZE, so the font hands out a baked set per size
         // instead of one set that callers scaled themselves.
+        // ★FindGlyph, not FindGlyphNoFallback: a string whose glyphs are all
+        // missing would otherwise fall through to the line box and centre the
+        // ImGui way — the exact behaviour this function exists to replace.
         ImFontBaked* baked = f->GetFontBaked(sz);
         float top = FLT_MAX, bot = -FLT_MAX;
         for (const char* p = a_text; *p; ) {
@@ -1004,19 +1053,49 @@ namespace FUI::Theme
             const int adv = ImTextCharFromUtf8(&cp, p, nullptr);
             p += adv > 0 ? adv : 1;
             const ImFontGlyph* g =
-                baked ? baked->FindGlyphNoFallback(static_cast<ImWchar>(cp)) : nullptr;
-            if (g) {
+                baked ? baked->FindGlyph(static_cast<ImWchar>(cp)) : nullptr;
+            // a space has no ink and would drag `top` to its own empty box
+            if (g && g->Y1 > g->Y0) {
                 top = (std::min)(top, g->Y0);
                 bot = (std::max)(bot, g->Y1);
             }
         }
         if (top > bot) { top = 0.0f; bot = ts.y; }
+        // ★NOT rounded. The caller's rect is already at whatever subpixel
+        // position the layout put it, and snapping only the text moves the
+        // label off the centre of the box it belongs to — by up to half a
+        // pixel, in whichever direction, per label.
         const float cx = a_p0.x + ((a_p1.x - a_p0.x) - ts.x) * 0.5f;
         const float cy = a_p0.y + ((a_p1.y - a_p0.y) - (bot - top)) * 0.5f - top;
-        a_dl->AddText(f, sz, ImVec2(std::round(cx), std::round(cy)), a_col, a_text);
+        a_dl->AddText(f, sz, ImVec2(cx, cy), a_col, a_text);
     }
 
     // ---- chrome widgets ------------------------------------------------------
+    namespace
+    {
+        // ★★The slider's number, drawn by US so it can carry the black edge
+        // ImGui cannot give it. On a light panel the fill is white and the ink
+        // is white: at full fill the value vanished, and at HALF fill it was
+        // sliced down the middle with one half legible — worse than gone,
+        // because a half-read string keeps pulling the eye back.
+        // Centred on the whole track, which is where ImGui put it.
+        void GaugeValue(ImDrawList* a_dl, const ImVec2& a_p, float a_w, float a_h,
+                        const char* a_fmt, float a_v, bool a_isInt)
+        {
+            if (!a_dl || !a_fmt) return;
+            char buf[64];
+            if (a_isInt) {
+                std::snprintf(buf, sizeof(buf), a_fmt, static_cast<int>(a_v));
+            } else {
+                std::snprintf(buf, sizeof(buf), a_fmt, a_v);
+            }
+            const ImVec2 ts = ImGui::CalcTextSize(buf);
+            TextOutlined(a_dl,
+                ImVec2(a_p.x + (a_w - ts.x) * 0.5f, a_p.y + (a_h - ts.y) * 0.5f),
+                Val(), buf);
+        }
+    }
+
     bool ChromeSliderInt(const char* a_id, int* a_v, int a_min, int a_max,
                          float a_w, const char* a_fmt)
     {
@@ -1027,17 +1106,23 @@ namespace FUI::Theme
         const float frac = a_max > a_min
             ? static_cast<float>(*a_v - a_min) / static_cast<float>(a_max - a_min)
             : 0.0f;
-        dl->AddRectFilled(p, ImVec2(p.x + a_w, p.y + h), IM_COL32(0, 0, 0, 51), sk.rounding);
+        dl->AddRectFilled(p, ImVec2(p.x + a_w, p.y + h), GaugeTrack(), sk.rounding);
         if (frac > 0.0f) {
             dl->AddRectFilled(p, ImVec2(p.x + a_w * frac, p.y + h),
                 GaugeFill(), sk.rounding);
         }
         dl->AddRect(p, ImVec2(p.x + a_w, p.y + h), GaugeBorder(), sk.rounding);
         PushChromeStyle(true);
+        // ★ImGui draws the value itself and cannot outline it, so it draws
+        // NOTHING (transparent ink) and we put the number back below. See the
+        // float version for why the outline matters.
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
         ImGui::SetNextItemWidth(a_w);
         const bool ch = ImGui::SliderInt(a_id, a_v, a_min, a_max, a_fmt,
             ImGuiSliderFlags_AlwaysClamp);
+        ImGui::PopStyleColor();
         PopChromeStyle(true);
+        GaugeValue(dl, p, a_w, h, a_fmt, static_cast<float>(*a_v), true);
         return ch;
     }
 
@@ -1051,17 +1136,20 @@ namespace FUI::Theme
         const float frac = a_max > a_min
             ? (std::max)(0.0f, (std::min)(1.0f, (*a_v - a_min) / (a_max - a_min)))
             : 0.0f;
-        dl->AddRectFilled(p, ImVec2(p.x + a_w, p.y + h), IM_COL32(0, 0, 0, 51), sk.rounding);
+        dl->AddRectFilled(p, ImVec2(p.x + a_w, p.y + h), GaugeTrack(), sk.rounding);
         if (frac > 0.0f) {
             dl->AddRectFilled(p, ImVec2(p.x + a_w * frac, p.y + h),
                 GaugeFill(), sk.rounding);
         }
         dl->AddRect(p, ImVec2(p.x + a_w, p.y + h), GaugeBorder(), sk.rounding);
         PushChromeStyle(true);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
         ImGui::SetNextItemWidth(a_w);
         bool ch = ImGui::SliderFloat(a_id, a_v, a_min, a_max, a_fmt,
             ImGuiSliderFlags_AlwaysClamp);
+        ImGui::PopStyleColor();
         PopChromeStyle(true);
+        GaugeValue(dl, p, a_w, h, a_fmt, *a_v, false);
         // ★Right-click restores the default. One gesture, defined here so every
         // settings slider has it without each row remembering to add it.
         if (a_resetTo > -1.0e8f && ImGui::IsItemHovered() &&

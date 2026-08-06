@@ -409,6 +409,10 @@ namespace FUI::Theme
 
     // gauge/slider track chrome: translucent skins fill in sel (the EDIT
     // painter red) — a grey acc fill reads as dead space over the world
+    // ★And on a LIGHT panel the gauge fills UPWARD in brightness instead: the
+    // accent is the darkest token there, so an accent fill in a dark well
+    // reads as a groove cut into the panel with no visible level in it.
+    [[nodiscard]] ImU32 GaugeTrack();   // the empty part
     [[nodiscard]] ImU32 GaugeFill();
     [[nodiscard]] ImU32 GaugeBorder();
 

@@ -1853,7 +1853,10 @@ namespace FUI::UIRoot
                 const float by = y - (StatRowH() - StatValuePx()) + kCapBarGap * S;
                 const ImVec2 b0(cp.x + 2.0f, by);
                 const ImVec2 b1(cp.x + a_leftW - 2.0f, by + bh);
-                dl->AddRectFilled(b0, b1, IM_COL32(0, 0, 0, 62), bh * 0.5f);
+                // ★The capacity bar is a gauge like any other — same well, so
+                // it lightens on a light panel instead of cutting a dark slot
+                // across the stats block.
+                dl->AddRectFilled(b0, b1, Theme::GaugeTrack(), bh * 0.5f);
                 const float f = (std::min)(1.0f, static_cast<float>(used) / static_cast<float>(total));
                 if (f > 0.0f) {
                     dl->AddRectFilled(b0, ImVec2(b0.x + (b1.x - b0.x) * f, b1.y),

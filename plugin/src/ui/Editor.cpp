@@ -138,7 +138,10 @@ namespace FUI::Editor
             auto* dl = ImGui::GetWindowDrawList();
             const float r = Theme::S().rounding;
             const float f = (std::max)(0.0f, (std::min)(1.0f, a_frac));
-            dl->AddRectFilled(a_p, ImVec2(a_p.x + a_w, a_p.y + a_h), IM_COL32(0, 0, 0, 51), r);
+            // ★Theme::GaugeTrack(), not a hard-coded dark well: on a light
+            // panel the well has to be LIGHTER than the panel, and this gauge
+            // is the same control as the settings sliders.
+            dl->AddRectFilled(a_p, ImVec2(a_p.x + a_w, a_p.y + a_h), Theme::GaugeTrack(), r);
             if (f > 0.0f) {
                 dl->AddRectFilled(a_p, ImVec2(a_p.x + a_w * f, a_p.y + a_h),
                     Theme::GaugeFill(), r);
