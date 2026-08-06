@@ -1,5 +1,8 @@
+#include "api/HostApi.h"
+#include "game/BagFilter.h"
 #include "game/GoldCoins.h"
 #include "ui/Editor.h"
+#include "ui/Fallback.h"
 #include "ui/Lang.h"
 #include "ui/Theme.h"
 #include "ui/WinManager.h"
@@ -346,11 +349,48 @@ namespace
                 return RE::BSEventNotifyControl::kContinue;
             }
             for (auto* e = *a_event; e; e = e->next) {
+                // A real mouse event hands the pointer back from the pad.
+                // This is the ONLY reliable signal — see UIRoot::NoteMouseInput.
+                if (e->GetDevice() == RE::INPUT_DEVICE::kMouse) {
+                    if (auto* ui = RE::UI::GetSingleton();
+                        ui && ui->IsMenuOpen("GridInventoryMenu"sv)) {
+                        FUI::UIRoot::NoteMouseInput();
+                    }
+                    continue;
+                }
+
+                // ---- gamepad: drive the grid's own pointer -----------------
+                // Only while our menu owns the screen, so nothing here can
+                // touch normal gameplay input.
+                if (e->GetDevice() == RE::INPUT_DEVICE::kGamepad) {
+                    auto* ui = RE::UI::GetSingleton();
+                    if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) continue;
+                    if (FUI::UIRoot::IsBookOpen()) continue;   // the book has input
+                    if (auto* ts = e->AsThumbstickEvent()) {
+                        FUI::UIRoot::NotePadStick(ts->IsRight(), ts->xValue, ts->yValue);
+                        // let the engine's cursor move itself (see the header)
+                        FUI::UIRoot::FeedEngineCursor(ts);
+                    } else if (auto* gb = e->AsButtonEvent()) {
+                        // held state, not the down EDGE: the UI needs press and
+                        // release both (click-drag, the shift modifier)
+                        FUI::UIRoot::NotePadButton(gb->GetIDCode(), gb->IsPressed());
+                    }
+                    continue;
+                }
+
                 auto* btn = e->AsButtonEvent();
                 if (!btn || !btn->IsDown()) {
                     continue;
                 }
                 if (btn->GetDevice() != RE::INPUT_DEVICE::kKeyboard) {
+                    continue;
+                }
+                // A book opened from our grid owns the keyboard until it is
+                // dismissed — the Inventory key must not close us underneath it.
+                // ★The console is the same story from the other direction: it
+                // sits on top taking keystrokes, and an 'i' typed into a
+                // command would otherwise close the menu behind it.
+                if (FUI::UIRoot::IsBookOpen() || FUI::UIRoot::IsConsoleOpen()) {
                     continue;
                 }
                 // The game's Inventory key closes our menu. This sink sits
@@ -699,10 +739,44 @@ namespace
         // above always wins; "Reset Default" erases the line and these seeds
         // return on the next launch -- i.e. THIS is their factory default.
         static constexpr std::pair<const char*, const char*> kShippedBagDefs[] = {
-            { "Grid Inventory.esp|0x000818",
-              "w:1, h:1, rx:90, ry:0, rz:180, scale:1.00, bag:1, bw:6, bh:4" },
-            { "Grid Inventory.esp|0x000819",
-              "w:2, h:2, rx:0, ry:1, rz:90, scale:1.00, bag:1, bw:8, bh:6" },
+            { "Grid Inventory.esp|0x000818",   // Satchel
+              "w:1, h:1, rx:90, ry:0, rz:180, scale:1.00, bag:1, bw:4, bh:4" },
+            { "Grid Inventory.esp|0x000819",   // Knapsack
+              "w:2, h:2, rx:0, ry:1, rz:90, scale:1.00, bag:1, bw:8, bh:4" },
+            // ---- typed bags: the accept token is what makes them typed ----
+            { "Grid Inventory.esp|0x00081A",   // Alchemy Pouch
+              "w:2, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:8, bh:5, accept:alchemy" },
+            { "Grid Inventory.esp|0x00081B",   // Ore Sack
+              "w:2, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:6, bh:5, accept:ore" },
+            { "Grid Inventory.esp|0x00081C",   // Hide Roll
+              "w:2, h:1, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:6, bh:5, accept:hide" },
+            { "Grid Inventory.esp|0x00081D",   // Potion Bag
+              "w:2, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:6, bh:5, accept:potion" },
+            { "Grid Inventory.esp|0x00081E",   // Soul Gem Pouch
+              "w:2, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:6, bh:4, accept:soulgem" },
+            { "Grid Inventory.esp|0x00081F",   // Key Pouch
+              "w:2, h:1, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:5, bh:5, accept:key" },
+            // ---- general purpose ----
+            { "Grid Inventory.esp|0x000820",   // Small Leather Pouch
+              "w:1, h:1, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:4, bh:4" },
+            { "Grid Inventory.esp|0x000821",   // Leather Satchel
+              "w:1, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:4, bh:5" },
+            { "Grid Inventory.esp|0x000822",   // Belt Pouch
+              "w:2, h:1, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:6, bh:4" },
+            { "Grid Inventory.esp|0x000823",   // Witching Pouch
+              "w:1, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:4, bh:6" },
+            { "Grid Inventory.esp|0x000824",   // Canvas Pack
+              "w:3, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:8, bh:5" },
+            { "Grid Inventory.esp|0x000825",   // Buckled Satchel
+              "w:3, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:8, bh:6" },
+            { "Grid Inventory.esp|0x000826",   // Backframe Pack
+              "w:2, h:3, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:5, bh:10" },
+            { "Grid Inventory.esp|0x000827",   // Adventure Satchel
+              "w:3, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:9, bh:6" },
+            { "Grid Inventory.esp|0x000828",   // Exploration Pack
+              "w:2, h:2, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:10, bh:8" },
+            { "Grid Inventory.esp|0x000829",   // Mysterious Bag
+              "w:1, h:1, rx:90, ry:0, rz:0, scale:1.00, bag:1, bw:10, bh:14" },
         };
         for (const auto& [key, val] : kShippedBagDefs) {
             if (!g_itemDefs.contains(key)) {
@@ -710,7 +784,58 @@ namespace
             }
         }
         g_modelDefsDirty = true;
-        logger::info("[DEFS] {} item overrides loaded", g_itemDefs.size());
+
+        // ★Typed bags: an accept token naming a filter that does not exist is
+        // the quiet failure mode of this whole feature — the bag simply takes
+        // nothing and looks like a routing bug. Name it at load, once.
+        int bags = 0, typed = 0;
+        for (const auto& [key, d] : g_itemDefs) {
+            if (!d.bag) continue;
+            ++bags;
+            if (d.accept.empty()) continue;
+            ++typed;
+            bool known = false;
+            for (int i = 0; i < FUI::BagFilter::Count(); ++i) {
+                if (d.accept == FUI::BagFilter::Id(i)) { known = true; break; }
+            }
+            if (!known) {
+                logger::warn("[DEFS] {}: accept:{} is not a known filter - "
+                             "this bag will accept nothing", key, d.accept);
+            }
+        }
+        logger::info("[DEFS] {} item overrides loaded ({} bags, {} typed)",
+            g_itemDefs.size(), bags, typed);
+
+        // ★Hand the merchant seeder the bag list derived from THESE defs. A
+        // FormID table inside GoldCoins would be a second source of truth: add
+        // a bag here and the shops would quietly never stock it.
+        //
+        // ★OUR esp only. Marking an item as a bag in EDIT says "I want to use
+        // this as a bag", not "put this on a shopkeeper's shelf" — and putting
+        // another mod's item into a vendor chest rewrites THAT mod's intended
+        // acquisition. Measured on the author's load order: 16 foreign packs
+        // had been designated, diluting the rotation pool to 28 so the 12
+        // shipped general bags drew less than half the time (one merchant
+        // rolled three foreign backpacks in a row).
+        {
+            constexpr std::string_view kOurs = "grid inventory.esp|";
+            std::vector<FUI::GoldCoins::BagWare> wares;
+            int foreign = 0;
+            for (const auto& [key, d] : g_itemDefs) {
+                if (!d.bag) continue;
+                std::string lower = key.substr(0, (std::min)(key.size(), kOurs.size()));
+                for (auto& c : lower) {
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                if (lower != kOurs) { ++foreign; continue; }
+                if (auto* obj = FormFromKey(key)) wares.push_back({ obj, d.accept });
+            }
+            if (foreign > 0) {
+                logger::info("[VENDOR] {} user-designated bag(s) from other plugins"
+                             " are NOT stocked (by design)", foreign);
+            }
+            FUI::GoldCoins::SetBagWares(std::move(wares));
+        }
     }
 
     // ---- category ini (H7) ----
@@ -726,6 +851,50 @@ namespace
         const std::map<std::string, ItemDef> sorted(g_catDefs.begin(), g_catDefs.end());
         for (const auto& [name, d] : sorted) {
             out << FormatItemDef(name, d) << "\n";
+        }
+    }
+
+    // ---- drawn-icon transforms (GI60) ----
+    // ONE LINE PER ICON KEY, not per item. A drawing is shared by everything
+    // that resolves to it (472 swords all draw wpn_sword), so how big it sits
+    // and which way it points belongs to the picture. Written by IconStudio,
+    // read here; an item def that names its own value still wins at draw time.
+    constexpr const char* kFlatPath = "Data/SKSE/Plugins/GridInventory_flaticons.ini";
+
+    void SaveFlatIconDefs()
+    {
+        std::ofstream out(kFlatPath, std::ios::trunc);
+        if (!out) return;
+        out << "; Drawn-icon transforms -- ONE LINE PER ICON, not per item.\n";
+        out << "; 그림 아이콘 자체의 확대·회전·좌우 위치입니다.\n";
+        out << "; 아이템에 개별 값이 있으면 그쪽이 우선합니다 (카테고리 기본값과 같은 규칙).\n";
+        char buf[128];
+        for (const auto& [key, x] : FUI::Fallback::Xforms()) {
+            std::snprintf(buf, sizeof(buf), "%s = fscale:%.2f, frot:%.0f, fx:%.2f",
+                key.c_str(), x.scale, x.rot, x.x);
+            out << buf << "\n";
+        }
+    }
+
+    void LoadFlatIconDefs()
+    {
+        FUI::Fallback::ClearXforms();
+        std::ifstream in(kFlatPath);
+        if (!in) return;
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = line.substr(0, eq);
+            const auto b = key.find_first_not_of(" \t");
+            const auto e = key.find_last_not_of(" \t\r");
+            if (b == std::string::npos) continue;
+            key = key.substr(b, e - b + 1);
+            // reuse the item-def grammar so there is ONE parser for
+            // "fscale:… , frot:… , fx:…" and it cannot drift
+            const ItemDef d = ParseItemDef(line.substr(eq + 1), ItemDef{});
+            FUI::Fallback::SetXform(key, { d.fscale, d.frot, d.fx });
         }
     }
 
@@ -1112,12 +1281,19 @@ namespace
                 ItemDef d = f;
                 DeriveShapeBounds(d);
                 d.bag = 0;   // bags are per-item, never a category trait
+                d.accept.clear();   // ...and so is what a bag accepts
                 g_catDefs[CategoryOf(o)] = d;
                 SaveCategoryDefs();
             };
             hooks.categoryName = [](RE::TESBoundObject* o) { return std::string(CategoryOf(o)); };
             FUI::Editor::SetHooks(std::move(hooks));
         }
+
+        // Per-item drawn icons are named after this exact string. Handing the
+        // function over instead of letting Fallback spell it again keeps ONE
+        // definition of "which item is this line about" — the item ini and the
+        // PNG file name can then never disagree.
+        FUI::Fallback::SetFormKeyResolver([](RE::TESForm* f) { return FormKey(f); });
 
         // GI47: the settings-window preset is the ONE share file -- it carries
         // the item/category defs alongside the style keys. The def storage
@@ -1159,9 +1335,21 @@ namespace
                     sweepDefs(dh->GetFormArray<RE::TESObjectLIGH>());
                 }
                 for (const auto& [key, d] : si) o << FormatItemDef(key, d) << "\n";
+                // GI60: drawn-icon transforms travel too — they are part of
+                // how the author's inventory LOOKS, which is what a preset is.
+                o << "[flat]\n";
+                char fb[128];
+                for (const auto& [key, x] : FUI::Fallback::Xforms()) {
+                    std::snprintf(fb, sizeof(fb), "%s = fscale:%.2f, frot:%.0f, fx:%.2f",
+                        key.c_str(), x.scale, x.rot, x.x);
+                    o << fb << "\n";
+                }
             },
             [](int a_section, const std::string& a_key, const std::string& a_val) {
-                if (a_section == 1) {
+                if (a_section == 4) {   // [flat]
+                    const ItemDef d = ParseItemDef(a_val, ItemDef{});
+                    FUI::Fallback::SetXform(a_key, { d.fscale, d.frot, d.fx });
+                } else if (a_section == 1) {
                     if (const auto it = g_catDefs.find(a_key); it != g_catDefs.end()) {
                         it->second = ParseItemDef(a_val, it->second);
                     }
@@ -1176,6 +1364,7 @@ namespace
             []() {
                 SaveCategoryDefs();
                 RewriteItemDefsFile();
+                SaveFlatIconDefs();
                 g_modelDefsDirty = true;
                 FUI::Grid::RequestRebuild();
                 FUI::Grid::MarkCapacityDirty();
@@ -1186,13 +1375,39 @@ namespace
         // empty it lost every user override (bag flags above all), counted bag
         // CONTENTS as main-board occupants and reported a false overload
         // ("slow until the inventory is opened", log-verified).
+        // ★GI71: BEFORE any settings read. "!lang" is stored as an id, so the
+        // pack list has to exist for that id to resolve to anything — load them
+        // afterwards and a user on a pack silently reverts to English once,
+        // then saves that revert back over their choice.
+        FUI::Lang::LoadPacks();
+        // ★Typed bags: BEFORE LoadItemDefs. That loader validates every bag's
+        // accept token against this list, so an empty list would report each
+        // typed bag as naming an unknown filter — the loudest possible version
+        // of the exact false alarm the check exists to prevent. Keyword lookup
+        // needs the game data, which kDataLoaded guarantees.
+        FUI::BagFilter::SetCategoryResolver(
+            [](RE::TESBoundObject* o) { return std::string(CategoryOf(o)); });
+        FUI::BagFilter::Load();
+
         LoadCategoryDefs();
         LoadItemDefs();
+        LoadFlatIconDefs();
 
         FUI::UIRoot::SetVisibilityCallbacks(
             []() {   // menu shown
                 LoadCategoryDefs();   // hot-reload category defaults (H7)
                 LoadItemDefs();       // hot-reload user overrides (same as legacy path)
+                LoadFlatIconDefs();   // hot-reload IconStudio's drawn-icon edits
+                // typed bags phase 0: classify what the player is carrying and
+                // write the tally out. ONCE per session — this is an
+                // observation, not a feature, and it must not cost anything on
+                // every open. Nothing is routed or moved.
+                static bool s_bagDumped = false;
+                if (!s_bagDumped) {
+                    s_bagDumped = true;
+                    FUI::BagFilter::DumpFormDatabase();
+                    FUI::BagFilter::DumpPlayerInventory();
+                }
                 // NOTE (A3, 2026-07-13): the attack handler is NOT disabled any
                 // more. kPausesGame + the kInventory menu context already keep
                 // clicks from the gameplay layer, and toggling
@@ -1235,9 +1450,15 @@ namespace
         FUI::UIRoot::Close();   // hide across load/new game
     }
 
+    // Registered with sender == "SKSE", so every `type` here really is a
+    // lifecycle value. GI10's ABI messages arrive on a SEPARATE listener
+    // (HostApi::Install) precisely so that stays true.
     void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
     {
         switch (a_msg->type) {
+        case SKSE::MessagingInterface::kPostLoad:
+            FUI::HostApi::Broadcast();   // GI10: announce the host to providers
+            break;
         case SKSE::MessagingInterface::kDataLoaded:
             Setup();
             FUI::GoldCoins::InitForms();   // G1: resolve Grid Inventory.esp
@@ -1299,7 +1520,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 0, 0, 0 },
+    .Version              = { 1, 0, 5, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)
@@ -1328,7 +1549,11 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     CapacityActivateHook<RE::ScrollItem>::Install(RE::VTABLE_ScrollItem[0]);
     CapacityActivateHook<RE::TESObjectLIGH>::Install(RE::VTABLE_TESObjectLIGH[0]);
 
+    // Lifecycle: sender == "SKSE" (the 1.0 path, unchanged). GI10's ABI messages
+    // come in on a separate listener so a stray "type 4" from an unrelated
+    // plugin can never be mistaken for kPostLoadGame here.
     SKSE::GetMessagingInterface()->RegisterListener(MessageHandler);
+    FUI::HostApi::Install();
 
     // L3: loadout tabs + grid layout persist in the SKSE cosave (per-save,
     // load-order safe). The global layout ini stays as a legacy fallback only.

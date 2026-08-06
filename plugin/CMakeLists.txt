@@ -35,19 +35,26 @@ FetchContent_MakeAvailable(CommonLibSSE)
 set(SOURCES
     src/PCH.h
     src/main.cpp
+    src/api/GridInventoryAPI.h
+    src/api/HostApi.h
+    src/api/HostApi.cpp
     src/game/Inv3D.h
     src/game/GoldCoins.h
     src/game/GoldCoins.cpp
+    src/game/BagFilter.h
+    src/game/BagFilter.cpp
     src/ui/ItemPreview.h
     src/ui/ItemPreview.cpp
     src/ui/GridMenu.h
     src/ui/GridMenu.cpp
+    src/ui/Badges.h
+    src/ui/Badges.cpp
     src/ui/UIRoot.h
     src/ui/UIRoot.cpp
     src/ui/IconCache.h
     src/ui/IconCache.cpp
-    src/ui/IconFilterB.h
-    src/ui/IconFilterB.cpp
+
+    src/ui/Fallback.cpp
     src/ui/WinManager.h
     src/ui/WinManager.cpp
     src/ui/Grid.h
@@ -81,6 +88,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     spdlog::spdlog
     imgui::imgui
     d3d11
+    windowscodecs   # WIC: PNG decoding for the drawn icon set (Windows SDK)
 )
 
 # --- Deploy DLL to a local MO2 mod folder (developer convenience) ---

@@ -38,5 +38,12 @@ namespace FUI::Editor
     // Draw the editor panel window (call from UIRoot::Render while editing).
     void DrawPanel();
 
-    void OnMenuClosed();   // drop selection, flush pending edits
+    void OnMenuClosed();   // drop selection, discard unsaved edits
+
+    // ★Editing is a session: the values apply live but reach the ini only on
+    // SAVE, and leaving an item (or EDIT, or the menu) puts the baseline back.
+    // These two let the bottom bar say so — the model's one risk is losing
+    // work silently, so both states are reported where the player is looking.
+    [[nodiscard]] bool HasUnsavedEdits();
+    [[nodiscard]] bool DiscardNoteActive();
 }

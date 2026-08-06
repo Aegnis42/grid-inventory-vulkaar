@@ -1,6 +1,10 @@
 ﻿#include "ui/ItemPreview.h"
 #include "game/Inv3D.h"
 
+#include <RE/B/BSLight.h>
+#include <RE/N/NiLight.h>
+#include <RE/U/UI3DSceneManager.h>
+
 #include <d3d11_1.h>
 
 // Ported from ModExplorerMenu (Modex) by patchulidev — Item3DPreview.cpp.
@@ -26,6 +30,198 @@ namespace FUI
             }
             return false;
         }
+
+        // ★★1.0.5 — the capture rig, measured from the shipped scene:
+        //   item (-12.4,-500,-26.25)   lamp (100,-350,100)   |d| = 226
+        // Read as spherical about the item, with the camera at the origin
+        // looking down -Y, that lamp sits 37 degrees to the screen LEFT and 34
+        // degrees up. (Screen left is +X here: mirroring X in the experiment
+        // moved the highlight to the right.) Angles are the interface because
+        // they are what a person can reason about; the distance stays fixed
+        // because moving the lamp closer only changes brightness, which the
+        // ICON LIGHT slider already owns.
+        //
+        // ★★These two are the SHIPPED rig — the origin the offsets are measured
+        // from, not the angle in use. The caller hands in ONE offset that
+        // already sums the global setting and the item def's own (see
+        // IconCache::CaptureLightFor), so that a changed GLOBAL reaches
+        // SetLightOffset as a changed value and un-settles the park exactly the
+        // way a changed item does. Reading the global here instead would leave
+        // the rig moving while ItemPreview still believed nothing had changed.
+        constexpr float kBaseAzDeg = -37.0f;   // - = screen left
+        constexpr float kBaseElDeg =  34.0f;
+        constexpr float kLightDist = 226.0f;
+        constexpr float kBaseRadius = 400.0f;  // the shipped lamp's reach
+        constexpr float kDeg2Rad   = 3.14159265f / 180.0f;
+
+        struct LightProbe
+        {
+            RE::NiPoint3 menuPos{};
+            RE::NiPoint3 bsPos{};
+            RE::NiPoint3 niWorld{};
+            RE::NiPoint3 niLocal{};
+            float        menuRadius = 0.0f;
+            RE::NiPoint3 niRadius{};
+            bool         held = false;
+        };
+        LightProbe g_probe;
+
+        // the one MenuLight that is actually attached to the scene (bsLight
+        // non-null) — the survey showed exactly one, on the inventory scheme
+        // ★DIAGNOSTIC: which slot answered. The engine could attach a DIFFERENT
+        // MenuLight when it rebuilds the scheme, in which case we would be
+        // writing to a slot nothing reads any more — indistinguishable from
+        // "the write was ignored" without recording the index.
+        int g_lightSlot = -1;
+
+        [[nodiscard]] RE::MenuLight* AttachedMenuLight()
+        {
+            auto* sm = RE::UI3DSceneManager::GetSingleton();
+            if (!sm) return nullptr;
+            for (std::uint32_t i = 0; i < sm->menuLights.size(); ++i) {
+                RE::MenuLight* L = sm->menuLights[i];
+                if (L && L->light) {
+                    g_lightSlot = static_cast<int>(i);
+                    return L;
+                }
+            }
+            g_lightSlot = -1;
+            return nullptr;
+        }
+
+        // ★Three places hold this position and we do not know which one the
+        // renderer consumes: MenuLight (the engine's settings copy), BSLight
+        // (the scene registration) and NiLight (the node itself). The mirror
+        // experiment wrote all three and the capture followed, so all three
+        // keep being written — narrowing it down would buy nothing and risks
+        // finding the wrong one on a different runtime.
+        void WriteLightWorld(const RE::NiPoint3& a_pos, float a_radius)
+        {
+            RE::MenuLight* L = AttachedMenuLight();
+            if (!L) return;
+            if (!g_probe.held) {   // first write of this session: remember it all
+                g_probe.menuPos = L->translate;
+                g_probe.menuRadius = L->radius;
+                if (RE::BSLight* b = L->light.get()) {
+                    g_probe.bsPos = b->worldTranslate;
+                    if (RE::NiLight* n = b->light.get()) {
+                        g_probe.niWorld = n->world.translate;
+                        g_probe.niLocal = n->local.translate;
+                        g_probe.niRadius = n->GetLightRuntimeData().radius;
+                    }
+                }
+                g_probe.held = true;
+            }
+            L->translate = a_pos;
+            L->radius = a_radius;
+            if (RE::BSLight* bl = L->light.get()) {
+                bl->worldTranslate = a_pos;
+                if (RE::NiLight* nl = bl->light.get()) {
+                    nl->world.translate = a_pos;
+                    nl->local.translate = a_pos;
+                    // NiLight keeps radius as a vector; the shipped value only
+                    // ever used .x, so scale the whole thing off that
+                    nl->GetLightRuntimeData().radius =
+                        RE::NiPoint3{ a_radius, a_radius, a_radius };
+                }
+            }
+        }
+
+        // item-relative spherical -> world, using the engine's own item origin
+        // so the rig follows if the parked position ever moves.
+        // ★A model-size-relative rig was tried and REVERTED: the guess was that
+        // big items outgrow the lamp's 400 reach, but measured bound radii are
+        // 4~11 (armour 9, axe 11, satchel 4) against that 400. The model is
+        // tiny compared to the sphere, not larger than it, so the scaling
+        // clamped to 1.00 on every single item and changed nothing. Whatever
+        // makes armour ignore its angle, it is not the light's reach.
+        // ★DIAGNOSTIC (1.0.5, temporary): what the lamp held immediately BEFORE
+        // we wrote it. Deliberately assumes nothing about WHY a recapture
+        // ignores the setting — it just records the lamp every frame a tuned
+        // item is parked, so the log shows whether the value survives, when it
+        // stops surviving, and in what order items were processed.
+        RE::NiPoint3 g_lightBefore{};
+
+        void PlaceLight(float a_azOff, float a_elOff)
+        {
+            if (const RE::MenuLight* probe = AttachedMenuLight()) {
+                g_lightBefore = probe->translate;
+            }
+            const float az = (kBaseAzDeg + a_azOff) * kDeg2Rad;
+            const float el = (kBaseElDeg + a_elOff) * kDeg2Rad;
+            const float rh = kLightDist * std::cos(el);
+            RE::NiPoint3 base{};
+            if (auto* mgr = RE::Inventory3DManager::GetSingleton()) base = mgr->itemPos;
+            WriteLightWorld(RE::NiPoint3{
+                base.x - std::sin(az) * rh,
+                base.y + std::cos(az) * rh,
+                base.z + std::sin(el) * kLightDist },
+                kBaseRadius);
+        }
+
+        void RestoreCaptureLight()
+        {
+            if (!g_probe.held) return;
+            g_probe.held = false;
+            // ★Re-find rather than keep a stored pointer: the scene may have
+            // been rebuilt between move and restore, and writing through a
+            // stale MenuLight* would be a write into freed memory.
+            RE::MenuLight* L = AttachedMenuLight();
+            if (!L) {
+                SKSE::log::warn("[LIGHT]no attached light at restore — "
+                                "the engine re-applies the scheme on next open");
+                g_probe = {};
+                return;
+            }
+            L->translate = g_probe.menuPos;
+            L->radius = g_probe.menuRadius;
+            if (RE::BSLight* bl = L->light.get()) {
+                bl->worldTranslate = g_probe.bsPos;
+                if (RE::NiLight* nl = bl->light.get()) {
+                    nl->world.translate = g_probe.niWorld;
+                    nl->local.translate = g_probe.niLocal;
+                    nl->GetLightRuntimeData().radius = g_probe.niRadius;
+                }
+            }
+            g_probe = {};
+            SKSE::log::info("[LIGHT]light restored");
+        }
+    }
+
+
+    // ★1.0.5 — every load goes through here so the fresh-request path and the
+    // self-heal reload cannot drift apart; they used to be two separate calls,
+    // which is exactly how one gets changed and the other does not.
+    // (An item-loader variant that attaches enchant effect passes was measured
+    // and rejected — see Inv3D::Load for why.)
+    void ItemPreview::LoadForCapture(RE::Inventory3DManager* a_mgr,
+                                     RE::TESBoundObject* a_item)
+    {
+        Inv3D::Load(a_mgr, a_item, nullptr);
+    }
+
+    void ItemPreview::SetLightOffset(float a_azDeg, float a_elDeg)
+    {
+        // ★A changed lamp un-settles the rig even when the item is the same —
+        // that is what makes an EDIT slider drag re-capture under the NEW angle
+        // instead of accepting a frame still lit by the old one.
+        if (a_azDeg != m_lightAz || a_elDeg != m_lightEl) m_parkTicks = 0;
+        m_lightAz = a_azDeg;
+        m_lightEl = a_elDeg;
+    }
+
+    bool ItemPreview::ParkSettled() const
+    {
+        return m_parkTicks >= 2;
+    }
+
+    void ItemPreview::LogLightNow(const char* a_tag, const char* a_item)
+    {
+        RE::NiPoint3 p{};
+        if (const RE::MenuLight* L = AttachedMenuLight()) p = L->translate;
+        SKSE::log::info("[LIGHT] f{} {} '{}' slot={} lamp=({:.0f},{:.0f},{:.0f})",
+            ImGui::GetFrameCount(), a_tag, a_item ? a_item : "-", g_lightSlot,
+            p.x, p.y, p.z);
     }
 
     ItemPreview* ItemPreview::GetSingleton()
@@ -155,6 +351,14 @@ namespace FUI
     void ItemPreview::End()
     {
         const bool wasRunning = m_running;
+        // ★Put the light back BEFORE anything else in the teardown — the scene
+        // is still whole here, whereas TeardownWhenIdle may run frames later
+        // (or be skipped entirely on a stuck load).
+        RestoreCaptureLight();
+        // still running, node still reachable: take our zoom off it before
+        // the scene is handed back (a 2.5x left behind is the next system's
+        // problem, and it would be invisible until something else loads it)
+        RestoreNodeScale();
         m_running   = false;
         m_requested = false;
         m_current   = nullptr;
@@ -230,6 +434,12 @@ namespace FUI
         return nullptr;
     }
 
+    bool ItemPreview::LoadPending() const
+    {
+        auto* mgr = RE::Inventory3DManager::GetSingleton();
+        return mgr && LoadInFlight(mgr);
+    }
+
     bool ItemPreview::RotationApplied() const
     {
         auto* model = FindCurrentModel();
@@ -247,8 +457,29 @@ namespace FUI
         return true;
     }
 
+    // ★Symmetry: the capture zoom is OUR write on an engine-owned node, so it
+    // comes off before we let the node go. Skipping this is not "the node is
+    // about to die anyway" — the engine dedupes same-nif loads and can hand
+    // the very same node back, and it comes back wearing our 2.5x.
+    void ItemPreview::RestoreNodeScale()
+    {
+        if (!m_scaledNode) return;
+        // The node may already be freed — the pointer alone is not proof it
+        // exists. Only write through it if the scene still holds it.
+        if (auto* mgr = RE::Inventory3DManager::GetSingleton()) {
+            for (auto& lm : mgr->GetRuntimeData().loadedModels) {
+                if (lm.spModel && lm.spModel.get() == m_scaledNode) {
+                    m_scaledNode->local.scale = m_savedNodeScale;
+                    break;
+                }
+            }
+        }
+        m_scaledNode = nullptr;
+    }
+
     void ItemPreview::UnloadCurrent()
     {
+        RestoreNodeScale();
         if (auto* mgr = RE::Inventory3DManager::GetSingleton()) {
             Inv3D::Unload(mgr);
         }
@@ -262,6 +493,7 @@ namespace FUI
         if (LoadInFlight(mgr)) {
             return false;   // deferred — caller retries once the load lands
         }
+        RestoreNodeScale();
         Inv3D::Unload(mgr);
         Inv3D::End3D(mgr);
         Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
@@ -285,22 +517,17 @@ namespace FUI
 
     void ItemPreview::UpdateParking()
     {
-        // INSPECT zoom: push the engine's own item scale (and the node scale)
-        // so the capture has real pixels to trim. Runs BEFORE the model check
-        // so the restore path can never be skipped. Whichever of the two the
-        // engine honours wins; if it overwrites both, the overlay just draws
-        // the normal-resolution sprite upscaled (still functional).
-        if (auto* mgr = RE::Inventory3DManager::GetSingleton()) {
-            if (m_inspectScale > 0.0f) {
-                if (!m_hasSavedScale) {
-                    m_savedItemScale = mgr->itemScale;
-                    m_hasSavedScale = true;
-                }
-                mgr->itemScale = m_savedItemScale * m_inspectScale;
-            } else if (m_hasSavedScale) {
+        // Capture zoom: ★the NODE scale is the ONE lever, deliberately.
+        // The engine's mgr->itemScale used to be pushed as well ("whichever
+        // the engine honours wins") — but right after game launch the engine
+        // honours BOTH for the first captures, and 2.5 x 2.5 is the "some
+        // icons capture huge until I reset once more" report. The node is
+        // re-applied by us every frame, so it alone is deterministic.
+        if (m_hasSavedScale) {   // heal anything an earlier code path left behind
+            if (auto* mgr = RE::Inventory3DManager::GetSingleton()) {
                 mgr->itemScale = m_savedItemScale;
-                m_hasSavedScale = false;
             }
+            m_hasSavedScale = false;
         }
 
         auto* model = FindCurrentModel();
@@ -310,15 +537,60 @@ namespace FUI
         // reload, so a stray 2x would leak into later captures of that model
         // (enchant variants) — those aren't pinned, so the oversized sprite
         // would have been written to the pak permanently.
-        if (m_inspectScale > 0.0f) {
-            if (!m_nodeScaled) {
-                m_savedNodeScale = model->local.scale;
-                m_nodeScaled = true;
+        // ★Re-applied EVERY frame, like the node scale and for the same reason:
+        // the engine owns this scene and re-asserts the light scheme on its own
+        // schedule. Setting it once at request time would work until it didn't,
+        // and the failure would be one item captured under its neighbour's lamp.
+        const bool newNode = (m_scaledNode != model);
+        PlaceLight(m_lightAz, m_lightEl);
+        // ★This request's rig is now on the scene. The gate waits for a SECOND
+        // application, so the pixels it accepts were rendered after this one —
+        // not with whatever the previous item left behind.
+        if (m_parkTicks < 2) ++m_parkTicks;
+        // ★Log only the frame the lamp actually MOVES on — one line per tuned
+        // item instead of one per frame. The per-frame time series answered its
+        // question (the value holds; the engine never resets it) and would
+        // otherwise bury the log during a precache.
+        if ((std::fabs(m_lightAz) > 0.5f || std::fabs(m_lightEl) > 0.5f)) {
+            RE::NiPoint3 after{};
+            if (const RE::MenuLight* L = AttachedMenuLight()) after = L->translate;
+            if (std::fabs(after.x - g_lightBefore.x) > 0.5f ||
+                std::fabs(after.y - g_lightBefore.y) > 0.5f ||
+                std::fabs(after.z - g_lightBefore.z) > 0.5f) {
+                SKSE::log::info("[LIGHT] '{}' az{:+.0f} el{:+.0f} -> ({:.0f},{:.0f},{:.0f})",
+                    m_current ? m_current->GetName() : "-", m_lightAz, m_lightEl,
+                    after.x, after.y, after.z);
             }
+        }
+
+        if (m_inspectScale > 0.0f) {
+            if (m_scaledNode != model) {
+                // a DIFFERENT node: hand the old one its base back (it may
+                // still be in the scene) before reading this one's base
+                RestoreNodeScale();
+                m_savedNodeScale = model->local.scale;
+                // Backstop: an item node's own scale is ~1. Anything wildly
+                // past that is not a base, it is a zoom that escaped some
+                // path we do not know about — and multiplying it again is
+                // how the runaway starts. Refuse it and say so.
+                if (!(m_savedNodeScale > 0.001f && m_savedNodeScale < 100.0f)) {
+                    SKSE::log::warn("[PREVIEW] implausible node scale {:.3f} on '{}' — using 1.0",
+                        m_savedNodeScale, m_current ? m_current->GetName() : "-");
+                    m_savedNodeScale = 1.0f;
+                }
+                m_scaledNode = model;
+                // ★Verification aid: log ONLY the items whose def actually
+                // moves the lamp. During a full precache that is a handful of
+                // lines among thousands, and it answers the one question that
+                // matters — did each item get ITS angle, or did a neighbour's
+                // setting bleed across because the write landed a frame late.
+                // (the per-frame park log above covers this; nothing extra here)
+            }
+            // recomputed from the base every frame, never from the current
+            // value — re-entry can never compound
             model->local.scale = m_savedNodeScale * m_inspectScale;
-        } else if (m_nodeScaled) {
-            model->local.scale = m_savedNodeScale;
-            m_nodeScaled = false;
+        } else {
+            RestoreNodeScale();
         }
 
         // Rotation lives on the node (the engine leaves it alone). Scale is
@@ -378,7 +650,17 @@ namespace FUI
         // last-ditch guard behind IconCache's queue-side filter
         if (a_item->Is(RE::FormType::LeveledItem)) return;
 
-        if (a_item != m_current) m_captureBoost = 0.0f;
+        // ★★Reset the settle counter ONLY when the target actually changes.
+        // Request() is re-issued every frame while a capture is pending, so
+        // clearing it unconditionally held the count at 0 forever and every
+        // capture timed out with "no model" despite the model being present
+        // and correctly rotated. What the gate needs to know is "has THIS
+        // item's rig been applied", and that only becomes false again when the
+        // item — or its light, see SetLightOffset — changes.
+        if (a_item != m_current) {
+            m_parkTicks = 0;
+            m_captureBoost = 0.0f;
+        }
 
         // Same-nif fast path: enchanted variants share one model file, and the
         // engine DEDUPES such loads anyway — worse, a dedup onto an entry a
@@ -433,8 +715,14 @@ namespace FUI
                     }
                 }
 
+                // BEFORE the unload, while the node is still reachable: give
+                // it its base scale back. Dropping a flag here instead (what
+                // this did) was the bug — a dedup can return this same node,
+                // and its base would then be read back with our zoom already
+                // baked in.
+                RestoreNodeScale();
                 Inv3D::Unload(mgr);
-                Inv3D::Load(mgr, a_item, nullptr);
+                LoadForCapture(mgr, a_item);
                 SKSE::log::info("[PREVIEW] load '{}'", a_item->GetName());
             }
             m_current = a_item;
@@ -444,6 +732,11 @@ namespace FUI
             // SAME item, new def (live editing): re-apply without reloading —
             // rotation is absolute and scale is base-anchored, so this is safe
             m_def = *a_def;
+            // ★fresh ladder for a fresh orientation: a boost escalated by one
+            // rotation (its diagonal touched the box) is meaningless for the
+            // next, and carrying it forward is how one bad angle mid-drag
+            // walked the box to its ceiling and stuck there
+            m_captureBoost = 0.0f;
         }
 
         const float modelScale = (a_modelScale >= 0.0f) ? a_modelScale : kDefaultModelScale;
@@ -454,7 +747,16 @@ namespace FUI
                                (std::max)(4.0f, a_screenSize.y * expand));
         m_captureSize = ImVec2(m_innerSize.x * kSafetyMargin, m_innerSize.y * kSafetyMargin);
         if (m_captureBoost > (std::max)(m_captureSize.x, m_captureSize.y)) {
-            const float grown = (std::min)(m_captureBoost, static_cast<float>(kTexSize));
+            // clamp to the SCREEN as well as the copy texture: the capture
+            // reads backbuffer pixels, and a copy box larger than the screen
+            // is rejected wholesale by D3D — leaving stale pixels behind
+            float lim = static_cast<float>(kTexSize);
+            const auto scr = RE::BSGraphics::Renderer::GetScreenSize();
+            if (scr.width > 0 && scr.height > 0) {
+                lim = (std::min)({ lim, static_cast<float>(scr.width),
+                                   static_cast<float>(scr.height) });
+            }
+            const float grown = (std::min)(m_captureBoost, lim);
             m_captureSize = ImVec2(grown, grown);
             m_innerSize   = ImVec2(grown / kSafetyMargin, grown / kSafetyMargin);
         }
@@ -481,15 +783,29 @@ namespace FUI
         auto* inv = RE::Inventory3DManager::GetSingleton();
         if (!inv) return;
 
-        // Self-heal: if something (e.g. the vanilla menu's deferred teardown)
-        // wiped our loaded model, reload the current item.
+        // Self-heal: a Load that never landed. Two causes -- the vanilla menu's
+        // deferred teardown, and a Load issued on the frame ResetScene rebuilt
+        // the scene (the request hits a scene still standing up and is dropped;
+        // observed 49 times in one user session, always right after a reset).
+        //
+        // ★GI68: the test is "the scene is empty AND the engine is not loading",
+        // not a frame countdown. loadTask being set means the request DID take
+        // and the engine is working on it -- on a hard disk or with 4K textures
+        // that can take many frames, and re-issuing then would only throw the
+        // work away. Asking the engine what it is doing needs no constant and
+        // no guess about how fast the player's disk is.
+        //
+        // A repair sets loadTask, so this fires at most once per frame and stops
+        // by itself the moment the model lands.
         {
             auto& rt = inv->GetRuntimeData();
-            static int s_lastReload = 0;
-            if (m_current && rt.loadedModels.empty() && s_frame - s_lastReload > 60) {
-                Inv3D::Load(inv, m_current, nullptr);
-                s_lastReload = s_frame;
-                SKSE::log::info("[PREVIEW] self-heal reload '{}'", m_current->GetName());
+            if (m_current && rt.loadedModels.empty() && !rt.loadTask) {
+                LoadForCapture(inv, m_current);
+                if (++m_healRun <= 3) {   // log the first few; the rest is noise
+                    SKSE::log::info("[PREVIEW] self-heal reload '{}'", m_current->GetName());
+                }
+            } else {
+                m_healRun = 0;
             }
             if (s_frame % 120 == 0) {
                 const float r = (!rt.loadedModels.empty() && rt.loadedModels.back().spModel)

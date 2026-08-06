@@ -1,11 +1,14 @@
+﻿#include "ui/Badges.h"
 #include "ui/Editor.h"
 #include "ui/Equip.h"
+#include "ui/Fallback.h"
 #include "ui/Grid.h"
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
 #include "ui/Lang.h"
 #include "ui/LootBarter.h"
 #include "ui/Sfx.h"
+#include "game/BagFilter.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
 #include "ui/UIRoot.h"
@@ -14,6 +17,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <deque>
 #include <fstream>
@@ -21,6 +25,8 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -56,7 +62,9 @@ namespace FUI::Grid
             bool                fixed = false;
             bool                overflow = false;
             bool                fav = false;   // vanilla favorite flag (Q menu)
-            std::uint8_t        glow = 0;   // bit1 enchanted, bit2 unique (DESC)
+            // bit1 enchanted, bit2 unique (DESC) -> rarity halo (bits 1|2 only)
+            // bit4 poisoned                      -> top-right droplet marker
+            std::uint8_t        glow = 0;
             int                 coinValue = -1;   // G2/G4: gold value of a coin tile (-1 = not a coin)
             // GI1: which engine sub-stack this tile shows.
             //   uid   = ExtraUniqueID, 0 when the list has none (or none at all)
@@ -69,6 +77,9 @@ namespace FUI::Grid
             std::uint16_t       uid = 0;
             std::uint16_t       sig = 0;   // GI25: content signature (uid-less units)
             int                 xlIdx = -1;
+            // GI62: quarter-turns clockwise (0..3). `mask` is ALREADY rotated by
+            // it -- this is kept only for drawing the sprite at the same angle.
+            int                 rot = 0;
         };
 
         struct LayoutEntry
@@ -80,18 +91,36 @@ namespace FUI::Grid
                                      // split/merge). 0 = unspecified -> the
                                      // reconciler fills it like a fresh pickup
                                      // (legacy saves & never-split forms).
+            // GI62: quarter-turns clockwise (0..3) the player left this tile at.
+            // ★Rotation lives on the SLOT, not on the item -- the engine has no
+            // place to hang per-instance data (ExtraDataList cannot be created),
+            // and the slot is exactly what "this spot on the board" means. It
+            // follows the item into a container because the drop hint carries it,
+            // and it dies when the spot dies (dropped to the world, equipped).
+            int         rot = 0;
         };
 
-        // one drawable grid: main ("") or an open bag (bag item key)
+        // one grid: main (""), a bag (bag item key), or the trash.
+        // ★`open` is the ONLY thing the window state decides. Every bag that
+        //  exists as a tile gets a view and a real placement pass, because its
+        //  cells exist whether or not the player is looking at them; a closed
+        //  bag simply draws no window. Before this, a view was created only for
+        //  OPEN bags, so a closed bag subtracted board space (its contents are
+        //  hidden) without ever contributing any — loot and purchases were
+        //  refused with a half-empty bag on the belt, and right-clicking the
+        //  bag "fixed" it (user report).
         struct View
         {
             std::string      bagKey;   // "" = main
             std::string      bagName;  // window title for bags
+            std::string      accept;   // typed bag: the BagFilter id it takes
+            bool             carried = false;   // its tile is on the cursor
             int              cols = kCols;
             int              minRows = kMinRows;
             int              maxRows = 4096;
             std::vector<int> items;    // indices into g_items
             int              rows = kMinRows;
+            bool             open = true;   // false = holds items, draws no window
         };
 
         struct Held
@@ -142,7 +171,54 @@ namespace FUI::Grid
             // cannot recompute it -- once the unit is mid-flight there is no
             // tile left to ask -- so it travels WITH the carry.
             bool                fav = false;
+            // GI62: quarter-turns clockwise. A/D turn it WHILE carried; `mask`
+            // is re-derived on every turn so the ghost, the collision test and
+            // the drop all see the turned footprint with no further plumbing.
+            int                 rot = 0;
+            // ★The SPRITE's angle, which chases the footprint rather than
+            // matching it. Kept as an unwrapped running total (…-90, 0, 90,
+            // 180, 270…) instead of rot*90: from 270 back to 0 the short way
+            // is forwards, and a wrapped value would spin the item three
+            // quarters backwards to get there.
+            float               rotDeg = 0.0f;    // what is drawn this frame
+            float               rotAim = 0.0f;    // where it is heading
+            float               rotFrom = 0.0f;   // where this turn started
+            float               rotT = 1.0f;      // 0..1 through the turn (1 = settled)
+            int                 rotPrev = 0;      // the footprint it just left
+            // Adopting an angle (lifting a tile that already lies on its side)
+            // must NOT animate -- there is nothing to show, the item was already
+            // like that. Only a keypress starts a turn.
+            void SetRot(int a_rot)
+            {
+                rot = rotPrev = a_rot & 3;
+                rotDeg = rotAim = rotFrom = static_cast<float>(rot) * 90.0f;
+                rotT = 1.0f;
+            }
         };
+
+        // GI64: thousands separators. Five figures of gold are hard to read as a
+        // bare run of digits, and the pouch line prints two of them side by side.
+        [[nodiscard]] std::string Commas(int a_v)
+        {
+            std::string s = std::to_string(a_v);
+            for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) {
+                s.insert(static_cast<std::size_t>(i), ",");
+            }
+            return s;
+        }
+
+        // GI63: the tooltip's hover, stamped with the frame it happened on.
+        struct HoverRec
+        {
+            int       frame = -1;
+            bool      canSplit = false;
+            bool      canCompare = false;
+            bool      canDrop = false;
+            bool      canFav = false;
+            bool      hasVerb = false;
+            Lang::Str verb{};
+        };
+        HoverRec g_hoverPrompt;
 
         // drop candidate under the cursor this frame (set by DrawGridView)
         struct DropTarget
@@ -157,7 +233,8 @@ namespace FUI::Grid
 
         bool g_overloaded = false;      // W2: hard board can't hold everything
         bool g_capacityDirty = true;    // recompute on next CapacityTick
-        int  g_spaceUsed = 0;           // S2: cells occupied on the MAIN board
+        int  g_spaceUsed = 0;           // S2: cells occupied (main board + bags)
+        int  g_spaceTotal = kCols * kMinRows;   // + every owned bag's grid
 
         bool g_pouchOpen = false;       // G2: coin-pouch withdraw window
         int  g_pouchSlider = 0;
@@ -717,6 +794,13 @@ namespace FUI::Grid
         // else the category cap.
         int EffectiveCap(RE::TESBoundObject* a_obj, const GridDef& a_def)
         {
+            // ★A container never stacks. A bag's tile IS the container — its
+            // identity is what holds the contents (LayoutEntry::bag names this
+            // key) — so two of them sharing one tile would make "which bag" a
+            // question with no answer. The coin pouch is the same story: it
+            // carries a stored amount of its own.
+            if (a_def.bag != 0) return 1;
+            if (a_obj && GoldCoins::IsPouch(a_obj->GetFormID())) return 1;
             const int baseCap = StackCapOf(a_obj);
             return (std::max)(1, (baseCap > 1 && a_def.stack > 0) ? a_def.stack : baseCap);
         }
@@ -729,8 +813,55 @@ namespace FUI::Grid
         std::vector<View>                              g_views;    // [0] = main
         std::map<std::string, LayoutEntry>             g_layout;
         std::map<std::string, LayoutEntry>& Layout() { return g_layout; }
+
+        // E4b: bags may nest inside GENERAL bags (manual placement only).
+        // The one thing that must never form is a containment loop — walk
+        // a_outer's chain of containers upward; hitting a_inner means the
+        // drop would put a bag (transitively) inside itself.
+        [[nodiscard]] bool NestsWithin(const std::string& a_inner, std::string a_outer)
+        {
+            for (int guard = 0; guard < 16 && !a_outer.empty(); ++guard) {
+                if (a_outer == a_inner) return true;
+                const auto it = g_layout.find(a_outer);
+                a_outer = it == g_layout.end() ? std::string{} : it->second.bag;
+            }
+            return false;
+        }
+        // ★Typed bags: tile keys minted during THIS rebuild — i.e. things that
+        // just entered the inventory. Rebuilt every pass, never persisted:
+        // being new is a property of this frame, not of the save.
+        std::vector<std::string>                       g_freshTiles;
+        // ★Typed bags: which filters the player currently has a USABLE bag for
+        // — a copy parked in the trash or riding the cursor does not count
+        // (no slot can route to it, so treating it as held just fragments the
+        // main board into unmergeable half-stacks). Used by the stackable
+        // arrival path to decide whether new units may top up an existing
+        // pile or should start a fresh tile the claim can route.
+        std::set<std::string>                          g_typedBagsHeld;
+        // ...and every bag FORM's accept ("" = general purpose), so the fill
+        // loop can tell "a pile inside a bag of the item's own kind" (top up)
+        // from "a pile inside some other bag" (leave it as the player left it).
+        std::map<std::string, std::string>             g_bagAcceptByForm;
+        // ★...and which of those had no room last pass. Skipping the main pile
+        // only pays off if the bag can actually take the arrival; with a FULL
+        // bag it would start a new tile every pickup, each one bouncing back to
+        // main, and the board would fill with half-stacks of the same ore. One
+        // rebuild of lag is harmless here — it self-corrects the moment the bag
+        // has space again.
+        std::set<std::string>                          g_typedBagFull;
         std::set<std::string>                          g_openBags; // remembered (E2)
         std::unordered_set<std::string>                g_prevKeys;
+
+        // ---- GI65: "new since you last looked" -----------------------------
+        // ★A tile is new when BOTH are true: its key did not exist last rebuild,
+        // AND the form's total count went up. Either alone is wrong -- splitting
+        // a stack makes a key without gaining anything, and topping up arrows
+        // 50 -> 70 gains without making a key. Requiring both is what lets this
+        // ignore every in-inventory rearrangement without listing them.
+        std::unordered_set<std::string> g_newTiles;    // marked right now
+        std::unordered_map<RE::FormID, int> g_seenCount;   // counts as of the last look
+        bool g_seenValid = false;   // false until a snapshot exists (fresh game / load)
+        bool g_suppressNew = false; // one rebuild after a load: everything looks new
         bool                                           g_poolTrace = false;   // debug switch: [POOL]/[FAV]/[XL] diagnostics
 
 
@@ -754,6 +885,18 @@ namespace FUI::Grid
         // ordinary merchants. Ownership is in the signature now, so a stolen unit
         // has a pool of its own to be flagged in.
         std::unordered_map<std::string, bool>          g_stolen;
+        // ★★Find by name, WITHOUT filtering. A filter that hides the misses
+        // would also erase the thing a grid inventory is for — remembering
+        // where you put something. Matches keep their place and everything
+        // else dims, so the board you learned stays the board you see.
+        // ★Names are compared ONCE per board change, never per frame: the
+        // result is a set of keys, and drawing only asks the set. Lower-casing
+        // every tile's name each frame would be exactly the per-frame string
+        // work the render path must not do.
+        std::string                     g_search;        // lower-cased, "" = off
+        std::unordered_set<std::string> g_searchHit;     // keys that match
+        std::uint32_t                   g_boardVersion = 0;   // bumped by Rebuild
+        std::uint32_t                   g_searchVersion = 0;  // what the set was built from
         // Phase 7 / GI26: quest object, keyed by POOL like g_stolen. Form-keyed,
         // a single quest-flagged copy locked every copy of that form -- the
         // player could not drop, sell, store or trash any of them.
@@ -772,7 +915,11 @@ namespace FUI::Grid
         // B2: one-shot placement hint for the next ACQUIRE that creates a new
         // tile of this form (partner-drop lands at the drop cell without a
         // premature layout entry). col<0 = no hint.
-        struct DropHint { std::string baseKey; int col = -1; int row = -1; std::string bag; };
+        // GI62: `rot` is the return leg of the same journey NoteStoreSpot makes
+        // outbound -- a sword taken back out of a chest on its side lands on the
+        // board on its side. Without it the turn survived only one direction.
+        struct DropHint { std::string baseKey; int col = -1; int row = -1;
+                          std::string bag; int rot = 0; };
         DropHint                                       g_dropHint;
         std::string                                    g_slotTarget;   // hovered equip slot (C6)
         bool                                           g_needRebuild = false;
@@ -1029,14 +1176,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             li->second.bag.clear();
         }
 
+        // GI62: a_rot < 0 leaves the tile's rotation alone. Only a DROP knows
+        // the angle the player chose, so only a drop passes one; every other
+        // caller (park, restore, split) is moving a tile that keeps its own.
         void PlaceTile(const std::string& a_key, int a_col, int a_row,
-                       const std::string& a_bag, int a_count)
+                       const std::string& a_bag, int a_count, int a_rot = -1)
         {
             auto& le = g_layout[a_key];
             le.col = a_col;
             le.row = a_row;
             le.bag = a_bag;
             le.count = a_count;
+            if (a_rot >= 0) le.rot = a_rot & 3;
         }
 
         bool g_layoutLoaded = false;   // capacity checks run with the menu closed
@@ -1106,7 +1257,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         //     instance keys (every unit reads as plain, uid 0). A v2 save's
         //     gear therefore keeps its saved cells; only units the engine had
         //     uid'd get re-seated once, on the first rebuild.
-        constexpr std::uint32_t kCosaveVersion = 5;   // v5: v4's per-tile fav byte retired (GI33)
+        constexpr std::uint32_t kCosaveVersion = 7;   // v7: GI65 seen-counts baseline
         constexpr std::uint32_t kMaxStr = 512;
         constexpr std::uint32_t kMaxEntries = 65536;
 
@@ -1151,6 +1302,202 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             m.rows.assign(m.h, std::vector<bool>(m.w, true));
             return m;
         }
+
+        // GI62: the footprint turned a_rot quarter-turns CLOCKWISE (0..3).
+        // ★The mask is the ONE source every consumer already reads -- placement,
+        // collision, the drop ghost, the hover hit test and the occupancy shading
+        // all walk it. Rotating HERE is what makes rotation a one-line change at
+        // every one of those sites instead of a special case in each.
+        [[nodiscard]] Mask RotateMask(const Mask& a_mask, int a_rot)
+        {
+            Mask m = a_mask;
+            for (int i = 0; i < (a_rot & 3); ++i) {
+                Mask r;
+                r.w = m.h;
+                r.h = m.w;
+                r.rows.assign(r.h, std::vector<bool>(r.w, false));
+                for (int y = 0; y < m.h; ++y) {
+                    for (int x = 0; x < m.w; ++x) {
+                        if (m.rows[y][x]) r.rows[x][m.h - 1 - y] = true;
+                    }
+                }
+                m = std::move(r);
+            }
+            return m;
+        }
+
+        // A footprint's def + rotation in one call (the pairing is always this).
+        [[nodiscard]] Mask MaskOf(const GridDef& a_def, int a_rot)
+        {
+            return RotateMask(MaskOf(a_def), a_rot);
+        }
+
+
+        // GI62: a tinted image drawn at an angle. The silhouette halo is cut
+        // from the sprite's OWN alpha, so it has to lie at the sprite's angle --
+        // an upright halo under a turned sword reads as a second, wrong-shaped
+        // item behind the first. (The radial style is symmetric and needs none
+        // of this.)
+        void AddImageRot(ImDrawList* a_dl, void* a_tex, const ImVec2& a_c,
+                         const ImVec2& a_size, float a_deg, ImU32 a_tint)
+        {
+            const float hx = a_size.x * 0.5f;
+            const float hy = a_size.y * 0.5f;
+            if (std::fabs(a_deg) < 0.01f) {
+                a_dl->AddImage(reinterpret_cast<ImTextureID>(a_tex),
+                    ImVec2(a_c.x - hx, a_c.y - hy), ImVec2(a_c.x + hx, a_c.y + hy),
+                    ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), a_tint);
+                return;
+            }
+            const float r = a_deg * 3.14159265f / 180.0f;
+            const float cs = std::cos(r);
+            const float sn = std::sin(r);
+            const ImVec2 o[4] = { { -hx, -hy }, { hx, -hy }, { hx, hy }, { -hx, hy } };
+            ImVec2 p[4];
+            for (int i = 0; i < 4; ++i) {
+                p[i] = ImVec2(a_c.x + o[i].x * cs - o[i].y * sn,
+                              a_c.y + o[i].x * sn + o[i].y * cs);
+            }
+            a_dl->AddImageQuad(reinterpret_cast<ImTextureID>(a_tex),
+                p[0], p[1], p[2], p[3],
+                ImVec2(0.0f, 0.0f), ImVec2(1.0f, 0.0f),
+                ImVec2(1.0f, 1.0f), ImVec2(0.0f, 1.0f), a_tint);
+        }
+
+        // ★GI62d: THE PIVOT CELL — the one cell that stays put through a turn.
+        //
+        // An item does not rotate about its geometric centre; it rotates about a
+        // cell, and that cell is what the cursor holds. A 1x2 dagger pivots on
+        // its grip: turn it four times and the blade sweeps up, right, down,
+        // left while the grip never moves -- the four positions together make
+        // the cross. Centring on the middle instead made rot 0 and rot 2 occupy
+        // the SAME two cells, so four presses only ever produced two layouts and
+        // nothing appeared to revolve.
+        //
+        // The pivot is carried THROUGH the rotation like any other cell, which
+        // is why it must be derived from the upright footprint and turned, not
+        // recomputed from the turned one.
+        void PivotCell(const GridDef& a_def, int a_rot, int& a_x, int& a_y)
+        {
+            const Mask m0 = MaskOf(a_def);      // always the UPRIGHT footprint
+            int w = m0.w, h = m0.h;
+            int x = w / 2, y = h / 2;           // middle cell, biased low on even sides
+            for (int i = 0; i < (a_rot & 3); ++i) {
+                const int nx = h - 1 - y;
+                const int ny = x;
+                x = nx;
+                y = ny;
+                std::swap(w, h);
+            }
+            a_x = x;
+            a_y = y;
+        }
+
+        // ★GI62f: the CORNER pivot — a lattice point (a cell corner), not a cell
+        // and not the item's exact centre.
+        //
+        // A 2x3's true centre is half a cell off vertically, so gripping the
+        // centre put the cursor on a cell EDGE and the turn came out half a cell
+        // shy of the cross. Rounding that half-cell OUT to the nearest corner
+        // gives a point the grid can hold in both orientations -- and the four
+        // rotations then fan out around it into the cross the user drew.
+        // 2x4 already had an integral centre, so it is unchanged by this.
+        void CornerPivot(const GridDef& a_def, int a_rot, int& a_x, int& a_y)
+        {
+            const Mask m0 = MaskOf(a_def);
+            int w = m0.w, h = m0.h;
+            int x = (w + 1) / 2, y = (h + 1) / 2;   // round the half-cell out
+            for (int i = 0; i < (a_rot & 3); ++i) {
+                const int nx = h - y;   // corners turn about the lattice, so no -1
+                const int ny = x;
+                x = nx;
+                y = ny;
+                std::swap(w, h);
+            }
+            a_x = x;
+            a_y = y;
+        }
+
+        // Where the cursor grips the item. Every pickup and every turn goes
+        // through this, so the point it names never moves during a rotation.
+        //
+        // ★Two regimes, and the SHORT SIDE decides which (settled with the user
+        // against real items, not derived):
+        //
+        //  short side >= 2  -- turn about the item's true CENTRE. Before and
+        //    after then share the middle block and read as a cross. 2x3 and 2x4
+        //    are this. 0 and 180 degrees land on the same cells, so there are
+        //    two layouts, not four -- that is the accepted trade.
+        //
+        //  short side == 1  -- a bar. Turn about a CELL, so the four rotations
+        //    land on four DIFFERENT neighbours (up, right, down, left) and the
+        //    four together form the cross: a dagger pivoting on its grip. Its
+        //    centre would sit half a cell off the grid anyway.
+        //    1x2, 2x1 and 1x4 are this; 1x3 lands identically either way.
+        //
+        // Both mistakes have been made: the cell pivot everywhere threw 2x4 off
+        // by half a footprint, and the centre everywhere collapsed the dagger's
+        // four positions into two.
+        void HoldByPivot(Held& a_held, const GridDef& a_def)
+        {
+            const Mask m0 = MaskOf(a_def);
+            if ((std::min)(m0.w, m0.h) > 1) {
+                int cx = 0, cy = 0;
+                CornerPivot(a_def, a_held.rot, cx, cy);
+                a_held.offX = static_cast<float>(cx) * CellPx();
+                a_held.offY = static_cast<float>(cy) * CellPx();
+                return;
+            }
+            int px = 0, py = 0;
+            PivotCell(a_def, a_held.rot, px, py);
+            a_held.offX = (static_cast<float>(px) + 0.5f) * CellPx();
+            a_held.offY = (static_cast<float>(py) + 0.5f) * CellPx();
+        }
+
+        // The same grip, for a footprint that is not the carried one (the
+        // departing-shape outline drawn during a turn).
+        void GripOffset(const GridDef& a_def, int a_rot, float& a_offX, float& a_offY)
+        {
+            const Mask m0 = MaskOf(a_def);
+            if ((std::min)(m0.w, m0.h) > 1) {
+                int cx = 0, cy = 0;
+                CornerPivot(a_def, a_rot, cx, cy);
+                a_offX = static_cast<float>(cx) * CellPx();
+                a_offY = static_cast<float>(cy) * CellPx();
+                return;
+            }
+            int px = 0, py = 0;
+            PivotCell(a_def, a_rot, px, py);
+            a_offX = (static_cast<float>(px) + 0.5f) * CellPx();
+            a_offY = (static_cast<float>(py) + 0.5f) * CellPx();
+        }
+
+        // Only items whose FOOTPRINT changes may turn. A square tile would spin
+        // its drawing and pack identically, which reads as the key being broken
+        // ("I pressed D and nothing happened") on the potions and ingots that
+        // make up most of a bag -- and turning a potion label upside down is not
+        // a feature anyone asked for. A free shape always qualifies: even when
+        // its bounding box is square, the cells it covers move.
+        // ★★1.0.5: ask the MASK, not the shape string. "A free shape always
+        // qualifies" was wrong for symmetric ones — a plus (010|111|010) is
+        // identical at all four rotations, so pressing the key did nothing and
+        // produced exactly the "I pressed D and nothing happened" this function
+        // exists to prevent. Comparing a quarter turn against the original
+        // catches every symmetry for free, including squares.
+        [[nodiscard]] bool CanRotate(const GridDef& a_def)
+        {
+            const Mask m0 = MaskOf(a_def);
+            const Mask m1 = RotateMask(m0, 1);
+            if (m0.w != m1.w || m0.h != m1.h) return true;
+            for (int y = 0; y < m0.h; ++y) {
+                for (int x = 0; x < m0.w; ++x) {
+                    if (m0.rows[y][x] != m1.rows[y][x]) return true;
+                }
+            }
+            return false;
+        }
+
+
 
         // Reads the layout BEFORE the caller changes it, so it must run first.
         void NoteVacated(const std::string& a_key, RE::TESBoundObject* a_obj)
@@ -1203,20 +1550,35 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // pass 2: first-fit the rest (row -> col)
             for (auto* it : a_list) {
                 if (it->fixed) continue;
-                if (it->mask.w > a_cols) { it->overflow = true; continue; }
-                bool placed = false;
-                for (int r = 0; r + it->mask.h <= a_maxRows && !placed; ++r) {
-                    for (int c = 0; c <= a_cols - it->mask.w; ++c) {
-                        if (fits(c, r, it->mask)) {
-                            mark(c, r, it->mask);
-                            it->col = c;
-                            it->row = r;
-                            placed = true;
-                            break;
+                auto tryFit = [&](const Mask& m) {
+                    if (m.w > a_cols) return false;
+                    for (int r = 0; r + m.h <= a_maxRows; ++r) {
+                        for (int c = 0; c <= a_cols - m.w; ++c) {
+                            if (fits(c, r, m)) {
+                                mark(c, r, m);
+                                it->col = c;
+                                it->row = r;
+                                return true;
+                            }
                         }
                     }
+                    return false;
+                };
+                if (tryFit(it->mask)) continue;
+                // ★GI62: a turned tile that lost its saved spot stands back UP
+                // rather than falling off the board. The turn is a property of
+                // the spot, so losing the spot loses the turn -- the same rule
+                // every other spot-losing path already follows. Standing a sword
+                // up is a far smaller surprise than it vanishing.
+                if (it->rot != 0) {
+                    Mask upright = MaskOf(it->def);
+                    if (tryFit(upright)) {
+                        it->rot = 0;
+                        it->mask = std::move(upright);
+                        continue;
+                    }
                 }
-                if (!placed) it->overflow = true;
+                it->overflow = true;
             }
             return (std::max)(a_minRows, static_cast<int>(occ.size()));
         }
@@ -1231,19 +1593,29 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         void DrawGridChrome(View& a_view, int a_viewIdx, const ImVec2& base)
         {
             auto* dl = ImGui::GetWindowDrawList();
+            const auto& sk = Theme::S();
             const float gridW = a_view.cols * CellPx();
             const float gridH = a_view.rows * CellPx();
-            // v9: hairline cell grid (acc 13%) inside an acc 30% outer border
-            const ImU32 lineCol = Theme::Acc(0.13f);
-            for (int c = 1; c < a_view.cols; ++c) {
-                dl->AddLine(ImVec2(base.x + c * CellPx(), base.y),
-                    ImVec2(base.x + c * CellPx(), base.y + gridH), lineCol);
+            DrawCellLattice(dl, base, a_view.cols, a_view.rows);
+            // ★GI78: NOT on the main board. This rect is anchored to `base`,
+            // which is the grid's content origin and therefore SCROLLS. On the
+            // scrolling board it lands exactly on the board edge at scroll 0
+            // (two 20% layers on one pixel row = 36%, the thicker look), slides
+            // out of view in the middle, and comes back at the bottom — so the
+            // border appeared to thin out and thicken as the player wheeled.
+            // The board's own edge is drawn in Draw() at a FIXED position and
+            // owns that line; bag and partner views have no such pass and still
+            // need this one.
+            // ★No outer frame when the board is tiles-on-panel: the cells
+            // already say where it ends, and an accent ring there is the
+            // darkest token in the skin drawn over the brightest ground.
+            // ★Also skipped when the board is CARVED: that pass already runs
+            // its lines along the outer edge, and an accent ring on top would
+            // be a third stroke there — plus it is the same near-invisible
+            // rust the carve was brought in to replace.
+            if (a_viewIdx != 0 && !sk.engravedCells && !sk.translucent) {
+                dl->AddRect(base, ImVec2(base.x + gridW, base.y + gridH), Theme::Acc(0.20f));
             }
-            for (int r = 1; r < a_view.rows; ++r) {
-                dl->AddLine(ImVec2(base.x, base.y + r * CellPx()),
-                    ImVec2(base.x + gridW, base.y + r * CellPx()), lineCol);
-            }
-            dl->AddRect(base, ImVec2(base.x + gridW, base.y + gridH), Theme::Acc(0.30f));
 
             // GI28: the cell the last action aimed to empty, fading out. If the
             // flash and the gap are not the same cell, the bug is on screen.
@@ -1280,19 +1652,88 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         {
             auto* dl = ImGui::GetWindowDrawList();
             const auto& sk = Theme::S();
-            const ImU32 shadeCol = Theme::Col(sk.shade);
+            // ★Alpha 1.0 on a light panel, matching the doll: Equip draws a
+            // worn slot with Col(shade, 1.0f) while this used the skin's own
+            // alpha, so the same colour said "occupied" loudly on one half of
+            // the window and almost nothing on the other.
+            const ImU32 shadeCol = Theme::OccupiedGround();
+            // ★GI69: the NEW mark rides along here — a flat wash over the whole
+            // cell instead of light bleeding in from the tile's border.
+            //
+            // Three border treatments were tried and all failed the same way.
+            // A glow that starts at the edge means two adjacent new tiles each
+            // light the seam from their own side, so the dark grid hairline
+            // ends up sandwiched between two bright bands and reads STRONGER
+            // than anywhere else on the board — the exact opposite of the
+            // intent. Halving the depth on a shared side fixed the width but
+            // not that contrast; insetting the start only moved it. The seam is
+            // not a tuning problem, it is what "draw on the border" costs.
+            //
+            // A wash has no seam to get wrong: a tile looks identical whether
+            // it stands alone or sits in the middle of a freshly looted block,
+            // and every new tile keeps its own mark (which the alternative --
+            // outlining only the outside of a group -- gives up).
+            constexpr ImU32 kNewCol = IM_COL32(242, 245, 250, 22);
+            // ★An OPEN bag tints its own tile, so "which of these five bags is
+            // the window I am looking at" is answerable on the board instead of
+            // by opening each one. Same wash treatment as the NEW mark, and for
+            // the same reason — see the note above on why a border fails.
+            //
+            // ★The COLOUR belongs to the skin, not to this file. It was a
+            // constant tuned against the dark skins, which on a light-panelled
+            // skin lands close enough to the cell to vanish — the mark existed
+            // but answered nothing.
+            const ImU32 kOpenBagCol = Theme::Col(sk.bagOpen);
+            // The fill must not cover the grid's own chrome. A hairline sits ON
+            // the boundary, so it needs 1px clearance on BOTH sides; a groove
+            // is carved AFTER the cell, so the leading edge takes none and the
+            // trailing edge takes the full groove.
+            const float shadeIn0 = sk.engravedCells ? 0.0f : 1.0f;
+            const float shadeIn1 = sk.engravedCells
+                ? Theme::kGrooveW * Theme::Scale() * 0.5f : 1.0f;
+            // ★★1.0.5 — TRIED AND REVERTED: making a multi-cell item one
+            // seamless surface (skip the inset where the neighbour is the same
+            // item) and drawing the seam back on top as a black low-alpha line.
+            //
+            // It failed on COLOUR. Leaving the groove uncovered is not merely
+            // "not painting" — it is what lets the SKIN's own divider show
+            // through, whatever that skin decided a divider looks like: a
+            // carved groove here, bare panel there, an accent hairline on
+            // glass. Any line drawn back on top has to pick one colour, and one
+            // colour cannot be all of those. Black darkens correctly on every
+            // ground but stops matching the lattice in the empty cells beside
+            // it, so an item's inner seams and the board's own grid no longer
+            // look like the same grid.
+            //
+            // The inset below is therefore positional on purpose. The rule is
+            // not "where does this item end" but "where does a groove exist",
+            // and a groove exists between any two cells of the board.
             for (int idx : a_view.items) {
                 const auto& it = g_items[idx];
                 if (it.overflow || it.col < 0) continue;
+                const bool isNew = g_newTiles.contains(it.key);
+                const bool bagOpen = it.def.bag != 0 && g_openBags.contains(it.key);
                 for (int y = 0; y < it.mask.h; ++y) {
                     for (int x = 0; x < it.mask.w; ++x) {
                         if (!it.mask.rows[y][x]) continue;
                         const ImVec2 p0(base.x + (it.col + x) * CellPx(),
                                         base.y + (it.row + y) * CellPx());
                         const ImVec2 p1(p0.x + CellPx(), p0.y + CellPx());
-                        // 1px inset: the fill must not cover the grid hairlines
-                        dl->AddRectFilled(ImVec2(p0.x + 1.0f, p0.y + 1.0f),
-                            ImVec2(p1.x - 1.0f, p1.y - 1.0f), shadeCol);
+                        // ...and the fill follows the SAME half-groove rule, or
+                        // the shade sits off-centre from the face beneath it
+                        const int gc = it.col + x, gr = it.row + y;
+                        const ImVec2 q0(
+                            p0.x + (gc > 0 ? shadeIn1 : shadeIn0),
+                            p0.y + (gr > 0 ? shadeIn1 : shadeIn0));
+                        const ImVec2 q1(
+                            p1.x - (gc + 1 < a_view.cols ? shadeIn1 : shadeIn0),
+                            p1.y - (gr + 1 < a_view.rows ? shadeIn1 : shadeIn0));
+                        dl->AddRectFilled(q0, q1, shadeCol);
+                        // (rarity is a corner wedge drawn once per item in
+                        //  pass 4 now — nothing rarity-related belongs in this
+                        //  per-cell loop any more. See Grid.h.)
+                        if (bagOpen) dl->AddRectFilled(q0, q1, kOpenBagCol);
+                        if (isNew)   dl->AddRectFilled(q0, q1, kNewCol);
                     }
                 }
             }
@@ -1307,97 +1748,254 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // GI50: EXACTLY the retired hover border's recipe (single-layer
         // Theme::CornerFade, default 0.32 fade) so the rings inherit that
         // sleek look -- only the colors differ: temper white, poison green.
-        void DrawStatusRings(ImDrawList* a_dl, std::uint8_t a_bits,
-                             const ImVec2& a_min, const ImVec2& a_max)
+        // ---- GI66: tile markers, one shared spec -----------------------------
+        // ★Every marker on a tile is the same WIDTH and carries the same black
+        // rim. Before this the tray shapes were sized from a half-radius and the
+        // poison state was a border ring instead of a marker at all, so nothing
+        // agreed with anything. One width and one rim is what makes four
+        // different shapes read as one family.
+        // ★★1.0.5 — every metric below is a FRACTION OF THE CELL, not a pixel
+        // count scaled by the UI factor.
+        //
+        // They used to be `constant * Theme::Scale()`, which follows the UI
+        // scale but ignores the CELL scale — and the cell follows both. Shrink
+        // the board to 0.60 and the tile loses a quarter of its width while
+        // every marker stays put, so the tray grows relative to the item it is
+        // annotating until it no longer fits. Anchoring to CellPx() makes the
+        // proportion a property of the design instead of an accident of which
+        // slider was moved.
+        //
+        // The divisor is the DEFAULT cell (48 x 0.80 = 38.4), so these are the
+        // same pixel sizes as before at default settings: mark 8, rim 1.5,
+        // gap 3, inset 4, wedge 14.
+        constexpr float kCellRef   = 48.0f * 0.80f;
+        // ★1.5 -> 1.0, with the half pixel handed to the shape: the marker's
+        // OUTER size is rim + box, so 8.0/1.5 and 8.5/1.0 occupy exactly the
+        // same 9.5px while the coloured part grows. A thinner outline that also
+        // shrank the mark would have made the whole thing quieter, which was
+        // not the point.
+        constexpr float kMarkFrac  =  8.5f / kCellRef;   // marker box
+        constexpr float kRimFrac   =  1.0f / kCellRef;   // black outline
+        constexpr float kGapFrac   =  3.0f / kCellRef;   // between tray markers
+        constexpr float kInsetFrac =  4.0f / kCellRef;   // from the tile edge
+
+        // ★A hairline that lands under a pixel does not get crisper, it gets
+        // grey: ImGui antialiases without snapping. Below CELL ~0.75 the
+        // fraction would do exactly that, so the outline holds at one pixel.
+        [[nodiscard]] float RimPx() { return (std::max)(1.0f, CellPx() * kRimFrac); }
+        // ★The wedge is bigger than a tray marker because a triangle carries
+        // about half the area of the square bounding it, and because the rim is
+        // inset on all three sides — that costs rim*(2+sqrt2) of leg, leaving a
+        // coloured triangle the size of a tray marker.
+        constexpr float kWedgeFrac = 14.0f / kCellRef;
+
+
+        // Poison: a droplet in the tile's free corner (top-right). It replaced a
+        // green border ring -- the ring shared its whole edge with the "new item"
+        // inner glow, and shared its colour with nothing, so it read as damage to
+        // the tile rather than as a property of the item.
+        // The point sits kTipD radii above the centre, so the whole drop is
+        // 2.6r tall against 2r wide -- the proportion that reads as a droplet
+        // rather than as a balloon or a spike.
+        constexpr float kDropTipD = 1.6f;
+        [[nodiscard]] constexpr float DropH(float a_w) { return a_w * 0.5f * (kDropTipD + 1.0f); }
+
+        // a_centre is the round part's centre; the point reaches DropH above it.
+        void DrawPoisonDrop(ImDrawList* a_dl, const ImVec2& a_centre, float a_w)
         {
-            const bool poison = (a_bits & 0x4) != 0;
-            const bool temper = (a_bits & 0x8) != 0;
-            if ((!poison && !temper) || !a_dl) return;
-            const ImU32 cTemper = IM_COL32(236, 239, 244, 235);   // white
-            const ImU32 cPoison = IM_COL32(96, 205, 110, 235);
-            // user spec (both set): left+top = temper, right+bottom = poison
-            const ImU32 tl = temper ? cTemper : cPoison;
-            const ImU32 br = poison ? cPoison : cTemper;
-            Theme::CornerFadeEdges(a_dl, a_min, a_max, tl, tl, br, br, 0.32f);
+            const float r = a_w * 0.5f;
+            const float rim = RimPx();
+            // ★Where the arc must stop is the TANGENT point, not a guessed
+            // angle: from a tip d away, the tangents touch at acos(r/d) either
+            // side of straight up. Guessing leaves a visible corner where the
+            // straight edge meets the curve.
+            const float half = std::acos(1.0f / kDropTipD) * 57.2957795f;
+            const float start = 270.0f + half;
+            const float sweep = 360.0f - 2.0f * half;
+            ImVec2 p[18];
+            int n = 0;
+            for (int i = 0; i <= 14; ++i) {
+                const float t = (start + sweep * static_cast<float>(i) / 14.0f) *
+                                0.017453292f;
+                p[n++] = ImVec2(a_centre.x + r * std::cos(t),
+                                a_centre.y + r * std::sin(t));
+            }
+            p[n++] = ImVec2(a_centre.x, a_centre.y - r * kDropTipD);   // the point
+            a_dl->AddConvexPolyFilled(p, n, IM_COL32(79, 194, 98, 255));
+            a_dl->AddPolyline(p, n, IM_COL32(11, 11, 11, 255), ImDrawFlags_Closed, rim);
+            // the liquid highlight -- what makes it read as a DROP at 10px
+            a_dl->AddCircleFilled(ImVec2(a_centre.x - r * 0.30f, a_centre.y + r * 0.12f),
+                                  r * 0.30f, IM_COL32(255, 255, 255, 110));
+        }
+        // pass 4: per-tile sprite + badges/markers + hover/click input
+        // ★★1.0.5 — WHICH ITEM OWNS THE CELL UNDER THE CURSOR (-1 = none).
+        //
+        // ImGui hit-boxes are rectangles, so one InvisibleButton per item means
+        // a free-form tile claims its own empty notch. Filtering the button's
+        // result by the mask (MaskHit) stops the wrong tile from answering, but
+        // it cannot hand the hit to the RIGHT one: ImGui gives hover to exactly
+        // one widget per frame, and when that widget is the L-shape the click
+        // lands on nobody. Observed in game — an item placed in the notch shows
+        // its own tooltip yet neither tile can be picked up.
+        //
+        // A cell has exactly ONE owner, so asking the GRID instead of asking
+        // each widget removes the ambiguity at the source. This is also what
+        // ends the machine-gun hover blip (LootBarter.cpp:313): the id stops
+        // alternating because only one tile ever considers itself hovered.
+        //
+        // O(items in this view), once per frame.
+        [[nodiscard]] int OwnerAt(const View& a_view, const ImVec2& a_base,
+                                  const ImVec2& a_pt)
+        {
+            const float c = CellPx();
+            if (c <= 0.0f) return -1;
+            const int cx = static_cast<int>(std::floor((a_pt.x - a_base.x) / c));
+            const int cy = static_cast<int>(std::floor((a_pt.y - a_base.y) / c));
+            if (cx < 0 || cy < 0 || cx >= a_view.cols || cy >= a_view.rows) return -1;
+            for (int idx : a_view.items) {
+                if (idx < 0 || idx >= static_cast<int>(g_items.size())) continue;
+                const auto& it = g_items[idx];
+                if (it.overflow || it.col < 0) continue;
+                const int mx = cx - it.col, my = cy - it.row;
+                if (mx < 0 || my < 0 || mx >= it.mask.w || my >= it.mask.h) continue;
+                if (it.mask.rows[my][mx]) return idx;
+            }
+            return -1;
         }
 
-        void DrawGlowPass(View& a_view, const ImVec2& base)
+        // ★Where a corner mark belongs on a free-form footprint: the outermost
+        // OCCUPIED cell in the requested direction, not the bounding box's
+        // corner. A favourite diamond on an empty notch reads as belonging to
+        // whatever item is sitting in that notch (user-reported, with a
+        // screenshot of exactly that).
+        //   a_bottom = false -> top row first (rarity wedge, top-right)
+        //   a_bottom = true  -> bottom row first (marker tray, bottom-right)
+        [[nodiscard]] ImVec2 AnchorCell(const Mask& a_mask, const ImVec2& a_p0,
+                                        bool a_bottom)
         {
-            auto* cache = IconCache::GetSingleton();
-            auto* dl = ImGui::GetWindowDrawList();
-            // rarity glow pass — a SEPARATE pass before the icons: silhouette
-            // halos bleed past their own footprint, so they must all land
-            // UNDER every sprite ([tile bg -> all glows -> all items]).
-            // enchanted = blue, unique (DESC) = gold, both = red; alphas
-            // luminance-matched (mockup: blue 32% / gold 22% / red 29%).
-            for (int idx : a_view.items) {
-                const auto& it = g_items[idx];
-                if (!it.glow || it.overflow || it.col < 0) continue;
-                const ImVec2 p0(base.x + it.col * CellPx(), base.y + it.row * CellPx());
-                const float  w = it.mask.w * CellPx();
-                const float  h = it.mask.h * CellPx();
-                // GI46: rings first -- bits 4|8 are STATUS, not rarity, and the
-                // halo switch below must never see them (poison-only used to
-                // fall into the "both rarities" red default here).
-                DrawStatusRings(dl, it.glow, p0, ImVec2(p0.x + w, p0.y + h));
-                const std::uint8_t haloBits = it.glow & 0x3;
-                if (!haloBits) continue;
-                // brightness slider (settings) scales the base alphas
-                const auto ga = [](int a_a) {
-                    return static_cast<std::uint32_t>((std::min)(255.0f,
-                        a_a * Theme::GlowGain()));
-                };
-                ImU32 tint;
-                switch (haloBits) {
-                case 1:  tint = IM_COL32(90, 160, 255, ga(82)); break;   // 32%
-                case 2:  tint = IM_COL32(255, 190, 70, ga(56)); break;   // 22%
-                default: tint = IM_COL32(255, 80, 60, ga(74));  break;   // 29%
+            for (int i = 0; i < a_mask.h; ++i) {
+                const int y = a_bottom ? a_mask.h - 1 - i : i;
+                for (int x = a_mask.w - 1; x >= 0; --x) {
+                    if (a_mask.rows[y][x]) {
+                        return ImVec2(a_p0.x + x * CellPx(), a_p0.y + y * CellPx());
+                    }
                 }
-                const auto*  icon = cache->Get(it.obj);
+            }
+            return a_p0;
+        }
 
-                if (Theme::GlowStyle() == 1 && icon && icon->glowSrv) {
-                    // A: silhouette halo — the icon's own blurred alpha, so
-                    // the glow hugs the sprite outline even when the item
-                    // fills its tile (gloves) or is a thin blade (1x4).
-                    // The glow canvas maps its core onto the icon draw rect;
-                    // the baked gpad margin extends past it (the halo).
-                    const float target = (std::max)(w, h) * 0.95f * it.def.scale;
-                    const float ms = static_cast<float>((std::max)(icon->w, icon->h));
-                    const float dw = icon->w / ms * target;
-                    const float dh = icon->h / ms * target;
-                    const ImVec2 c(p0.x + w * 0.5f, p0.y + h * 0.5f);
-                    const float sx = dw / static_cast<float>(icon->gw - icon->gpad * 2);
-                    const float sy = dh / static_cast<float>(icon->gh - icon->gpad * 2);
-                    dl->AddImage(reinterpret_cast<ImTextureID>(icon->glowSrv),
-                        ImVec2(c.x - dw * 0.5f - icon->gpad * sx,
-                               c.y - dh * 0.5f - icon->gpad * sy),
-                        ImVec2(c.x + dw * 0.5f + icon->gpad * sx,
-                               c.y + dh * 0.5f + icon->gpad * sy),
-                        ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), tint);
-                } else if (void* gtex = UIRoot::GlowTexture()) {
-                    // B (!glowstyle=0 revert / glow sprite unavailable):
-                    // stretched radial across the footprint. GI49 option A:
-                    // 22% overscan -- on big footprints the sprite swallowed
-                    // the bright core, leaving only the dim tail visible, so
-                    // the halo bleeds slightly into the neighbouring cells
-                    // (same philosophy as the silhouette style's gpad margin).
-                    const float outX = w * 0.11f;
-                    const float outY = h * 0.11f;
-                    dl->AddImage(reinterpret_cast<ImTextureID>(gtex),
-                        ImVec2(p0.x - outX, p0.y - outY),
-                        ImVec2(p0.x + w + outX, p0.y + h + outY),
-                        ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), tint);
+        // ★★1.0.5 — the footprint's OUTLINE, following the mask.
+        //
+        // Every occupied cell contributes the edges its neighbours do not
+        // cover. No closed loop is assembled on purpose: a staircase touches
+        // itself diagonally, so a lattice point can carry four edges and
+        // "which edge continues this loop" has no single answer. Drawing the
+        // edges themselves sidesteps that entirely — and a ring's inner
+        // boundary comes out for free, since those edges have no neighbour
+        // either.
+        //
+        // Corners are filled by extending each segment half a thickness at
+        // both ends, which is what a closed polyline's miter join does.
+        //
+        // ★A solid rectangle yields exactly its four outer edges at exactly
+        // the cell boundary, which is where AddRect drew them — so the 99%
+        // case is unchanged.
+        void DrawMaskOutline(ImDrawList* a_dl, const Mask& a_mask,
+                             const ImVec2& a_p0, ImU32 a_col, float a_thick)
+        {
+            if (!a_dl) return;
+            const float c = CellPx();
+            const float e = a_thick * 0.5f;
+            auto solid = [&](int a_x, int a_y) {
+                return a_x >= 0 && a_y >= 0 && a_x < a_mask.w && a_y < a_mask.h &&
+                       a_mask.rows[a_y][a_x];
+            };
+            for (int y = 0; y < a_mask.h; ++y) {
+                for (int x = 0; x < a_mask.w; ++x) {
+                    if (!a_mask.rows[y][x]) continue;
+                    const float x0 = a_p0.x + x * c, y0 = a_p0.y + y * c;
+                    const float x1 = x0 + c, y1 = y0 + c;
+                    if (!solid(x, y - 1)) {
+                        a_dl->AddLine(ImVec2(x0 - e, y0), ImVec2(x1 + e, y0), a_col, a_thick);
+                    }
+                    if (!solid(x, y + 1)) {
+                        a_dl->AddLine(ImVec2(x0 - e, y1), ImVec2(x1 + e, y1), a_col, a_thick);
+                    }
+                    if (!solid(x - 1, y)) {
+                        a_dl->AddLine(ImVec2(x0, y0 - e), ImVec2(x0, y1 + e), a_col, a_thick);
+                    }
+                    if (!solid(x + 1, y)) {
+                        a_dl->AddLine(ImVec2(x1, y0 - e), ImVec2(x1, y1 + e), a_col, a_thick);
+                    }
                 }
             }
         }
 
-        // pass 4: per-tile sprite + badges/markers + hover/click input
+        // ★★1.0.5 M1 — where a sprite sits on a free-form footprint.
+        //
+        // The sprite is a rectangle and the footprint is not, so the two need a
+        // meeting point. Two numbers do it:
+        //
+        //   centre  the centroid of the OCCUPIED cells, not the box's middle.
+        //           On an L the mass is toward the bend, and an axe sprite —
+        //           itself L-shaped, haft plus head — lands on it.
+        //   fill    sqrt(occupied / box). A linear factor on the size, taken
+        //           from an area ratio, so a footprint using 5 of 9 cells draws
+        //           its icon at 75% instead of spilling across the four it does
+        //           not own.
+        //
+        // ★No clipping. Clipping cuts the blade off a shape whose sprite is
+        // centred on the box, which reads worse than the overflow it fixes —
+        // moving and sizing the sprite is the fix, cutting it is not.
+        //
+        // ★A solid rectangle has every cell set: the centroid IS the box's
+        // middle and fill is exactly 1, so the arithmetic below reduces to what
+        // it replaced. The 99% case is untouched by construction, not by luck.
+        struct MaskFit
+        {
+            ImVec2 centre;
+            float  fill = 1.0f;
+        };
+
+        [[nodiscard]] MaskFit FitOf(const Mask& a_mask, const ImVec2& a_p0)
+        {
+            const float c = CellPx();
+            float sx = 0.0f, sy = 0.0f;
+            int n = 0;
+            for (int y = 0; y < a_mask.h; ++y) {
+                for (int x = 0; x < a_mask.w; ++x) {
+                    if (!a_mask.rows[y][x]) continue;
+                    sx += static_cast<float>(x) + 0.5f;
+                    sy += static_cast<float>(y) + 0.5f;
+                    ++n;
+                }
+            }
+            const int box = (std::max)(1, a_mask.w * a_mask.h);
+            if (n == 0) {
+                return { ImVec2(a_p0.x + a_mask.w * c * 0.5f,
+                                a_p0.y + a_mask.h * c * 0.5f), 1.0f };
+            }
+            return { ImVec2(a_p0.x + sx / static_cast<float>(n) * c,
+                            a_p0.y + sy / static_cast<float>(n) * c),
+                     std::sqrt(static_cast<float>(n) / static_cast<float>(box)) };
+        }
+
         void DrawItemsPass(View& a_view, const ImVec2& base)
         {
             auto* cache = IconCache::GetSingleton();
             auto* dl = ImGui::GetWindowDrawList();
             const auto& io = ImGui::GetIO();
             const auto& sk = Theme::S();
+            // ★One lookup for the whole pass: the cell under the cursor has a
+            // single owner, and only that tile may consider itself hovered.
+            // ImGui's own gate is applied ONCE here, at window level — a popup
+            // on top, or another window in front, and nothing in this grid is
+            // hovered. AllowWhenBlockedByActiveItem so that the tile's own
+            // InvisibleButton going active (the frame a drag starts) does not
+            // make the grid drop its hover.
+            const bool winHov = ImGui::IsWindowHovered(
+                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            const int ownerIdx = winHov ? OwnerAt(a_view, base, io.MousePos) : -1;
             // items
             for (int idx : a_view.items) {
                 const auto& it = g_items[idx];
@@ -1426,18 +2024,62 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         iconPtr = cache->Get(it.obj);
                     }
                 }
+                // ★GI51: a tile is drawable from the moment it exists. A 3D
+                // capture RAISES the quality; it is not the precondition for
+                // showing anything. Before this, an item with no capture yet
+                // was an empty frame — and a heavily modded load order is
+                // mostly such items for the first several minutes, which is
+                // the single most reported complaint. The capture is still
+                // queued: the category icon holds the seat, it doesn't take it.
+                bool viaFallback = false;
+                Fallback::KeyXform fbx;   // GI60: the icon key's own transform
+                if (!iconPtr) {
+                    cache->QueueCapture(iconObj);
+                    const auto fb = Fallback::GetDrawn(iconObj);
+                    iconPtr = fb.icon;
+                    fbx = fb.x;
+                    viaFallback = iconPtr != nullptr;
+                }
+                // An item def that names a value beats the icon default; an
+                // untouched field (1 / 0 / 0) means "follow the icon".
+                const float fSc = it.def.fscale != 1.0f ? it.def.fscale : fbx.scale;
+                const float fRot = it.def.frot != 0.0f ? it.def.frot : fbx.rot;
+                const float fOfs = it.def.fx != 0.0f ? it.def.fx : fbx.x;
                 if (const auto* icon = iconPtr) {
-                    // alpha-trimmed sprite: aspect-preserving fit — long axis
-                    // = footprint long axis * def.scale (draw-time zoom:
-                    // linear, instant, structurally clip-free)
-                    const float target = (std::max)(w, h) * 0.95f * it.def.scale;
-                    const float ms = static_cast<float>((std::max)(icon->w, icon->h));
-                    const float dw = icon->w / ms * target;
-                    const float dh = icon->h / ms * target;
-                    const ImVec2 c(p0.x + w * 0.5f, p0.y + h * 0.5f);
-                    UIRoot::DrawItemIcon(dl, icon->srv,
-                        ImVec2(c.x - dw * 0.5f, c.y - dh * 0.5f),
-                        ImVec2(c.x + dw * 0.5f, c.y + dh * 0.5f));
+                    // M1: mask-aware centre + size. fill == 1 and centre ==
+                    // box middle for every solid rectangle.
+                    const MaskFit fit = FitOf(it.mask, p0);
+                    float dw, dh;
+                    if (viaFallback) {
+                        // ★A category icon is a SQUARE 128px drawing, not an
+                        // alpha-trimmed model shot. Fitting it to the LONG axis
+                        // (correct for a capture, which is trimmed to the
+                        // model's real bounds) blew a square up to the long side
+                        // of a 1x2 cell and it spilled over the neighbours — you
+                        // could no longer tell which cell the item was in.
+                        // CONTAIN it instead, at the same ratio the container
+                        // window uses, so one item is one size everywhere.
+                        const float sc = (std::min)(w / static_cast<float>(icon->w),
+                                                    h / static_cast<float>(icon->h)) *
+                                         0.85f * fSc * fit.fill;
+                        dw = icon->w * sc;
+                        dh = icon->h * sc;
+                    } else {
+                        // alpha-trimmed sprite: aspect-preserving fit — long
+                        // axis = footprint long axis * def.scale (draw-time
+                        // zoom: linear, instant, structurally clip-free)
+                        const float target =
+                            (std::max)(w, h) * 0.95f * it.def.scale * fit.fill;
+                        const float ms = static_cast<float>((std::max)(icon->w, icon->h));
+                        dw = icon->w / ms * target;
+                        dh = icon->h / ms * target;
+                    }
+                    const ImVec2 nudge = viaFallback ? RotatedOffset(fOfs, it.rot)
+                                                     : ImVec2(0.0f, 0.0f);
+                    const ImVec2 c(fit.centre.x + nudge.x, fit.centre.y + nudge.y);
+                    const float  deg = (viaFallback ? fRot : 0.0f) + it.rot * 90.0f;
+                    DrawItemShadow(dl, icon->srv, c, dw, dh, deg);
+                    UIRoot::DrawItemIconRot(dl, icon->srv, c, ImVec2(dw, dh), deg);
                     // Phase 5/6: in barter, dim what can't be sold — coins
                     // (mirror) and items the merchant won't buy (category /
                     // stolen). g_stolen holds only the stolen forms.
@@ -1447,18 +2089,68 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h),
                             IM_COL32(8, 8, 8, 150));
                     }
+                    // ★A search dims the misses instead of hiding them — same
+                    // wash as "the merchant won't buy this", a shade lighter so
+                    // the two states stay distinguishable when they overlap.
+                    if (SearchMisses(it.key)) {
+                        // ★Per CELL: over the bounding box this dimmed the
+                        // empty notch too, darkening whatever item was sitting
+                        // in it — a filter that hides items it did not match.
+                        for (int my = 0; my < it.mask.h; ++my) {
+                            for (int mx = 0; mx < it.mask.w; ++mx) {
+                                if (!it.mask.rows[my][mx]) continue;
+                                const ImVec2 c0(p0.x + mx * CellPx(),
+                                                p0.y + my * CellPx());
+                                dl->AddRectFilled(c0,
+                                    ImVec2(c0.x + CellPx(), c0.y + CellPx()),
+                                    IM_COL32(6, 6, 10, 168));
+                            }
+                        }
+                    }
                 } else {
-                    // Not captured yet -> queue and show the placeholder frame.
-                    // Without this the grid was the ONLY panel that could not
-                    // heal a cache miss on its own (Equip and LootBarter both
-                    // re-queue here), so switching the icon STYLE emptied every
-                    // tile until the menu was closed and reopened: a style flip
-                    // changes which sprite Get() looks for, and captures were
-                    // only ever queued from Rebuild.
-                    cache->QueueCapture(iconObj);
-                    dl->AddRect(ImVec2(p0.x + 4, p0.y + 4), ImVec2(p0.x + w - 4, p0.y + h - 4),
-                        Theme::Acc(0.35f), 3.0f);
+                    // Neither a capture nor a category icon (asset folder
+                    // missing, or a form no rule matches) -> placeholder frame.
+                    // The queue request already happened above, which is what
+                    // lets the grid heal a cache miss on its own: a style flip
+                    // changes which sprite Get() looks for, and captures used
+                    // to be queued only from Rebuild.
+                    // ★Follows the mask: a rectangle here framed cells the item
+                    // does not own, and this frame is precisely what a player
+                    // stares at while a heavily modded load order catches up on
+                    // captures — the one moment the footprint is all there is
+                    // to look at. The 4px inset and the rounding are gone with
+                    // the rectangle; an outline that traces the shape says more
+                    // than a rounded box that does not.
+                    DrawMaskOutline(dl, it.mask, p0, Theme::Acc(0.35f), 1.0f);
                 }
+
+                // GI8: extension overlay (socket wells). Between the sprite and
+                // the corner chrome, so the count badge and marker tray stay
+                // readable on top of it.
+                if (!Editor::IsEditMode()) {
+                    Badges::TileShape shape;
+                    shape.w = it.mask.w;
+                    shape.h = it.mask.h;
+                    shape.cells = 0;
+                    for (int my = 0; my < it.mask.h && my < 8; ++my) {
+                        for (int mx = 0; mx < it.mask.w && mx < 8; ++mx) {
+                            if (it.mask.rows[my][mx]) shape.cells |= 1ull << (my * 8 + mx);
+                        }
+                    }
+                    // ★The grid already decided who owns the cell under the
+                    // cursor (see ownerIdx). Asking the mouse about the
+                    // bounding box answered yes on the empty notch of a
+                    // free-form tile, so a socket lit up for a cell this item
+                    // does not even occupy.
+                    const bool bh = (idx == ownerIdx);
+                    Badges::Draw(dl, p0, w, h, shape,
+                                 0x14u,   // the player's own grid
+                                 it.obj->GetFormID(), it.uid, bh);
+                }
+
+                // (★GI69: the NEW mark moved to pass 2 -- it is a wash on the
+                // cell now, not a glow on the border, so it belongs UNDER the
+                // sprite with the rest of the cell shading.)
 
                 // Mabinogi-style TOP-LEFT badge: stack count — or, on a coin
                 // tile, the gold value it represents (G2)
@@ -1476,63 +2168,83 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
                 // marker tray (BOTTOM-RIGHT, user-picked system 3): one row of
                 // shape+colour coded state markers, anchored right, fixed order
-                // favorite ◆(hi) · quest ▲(ivory) · stolen ●(crimson). The
-                // top-left stays reserved for the count/coin badge.
-                {
-                    const RE::FormID mfid = it.obj->GetFormID();
-                    const bool isQuest = g_questItem.contains(PoolOfKey(it.key));
-                    const bool isStolen = g_stolen.contains(PoolOfKey(it.key));
-                    if (it.fav || isQuest || isStolen) {
-                        const float S = Theme::Scale();
-                        const float r = 4.0f * S;          // marker half-size
-                        const float gapM = 4.0f * S;
-                        const ImU32 oc = IM_COL32(0, 0, 0, 255);
-                        float cx = p0.x + w - r - 4.0f;    // rightmost marker centre
-                        const float cy = p0.y + h - r - 4.0f;
-                        // draw right-to-left so the visual order stays fav-quest-stolen
-                        if (isStolen) {
-                            dl->AddCircleFilled(ImVec2(cx, cy), r, IM_COL32(206, 64, 52, 255));
-                            dl->AddCircle(ImVec2(cx, cy), r, oc, 0, 1.0f);
-                            cx -= 2.0f * r + gapM;
-                        }
-                        if (isQuest) {
-                            const ImVec2 a(cx, cy - r - 1.0f);
-                            const ImVec2 b(cx - r, cy + r * 0.8f);
-                            const ImVec2 c(cx + r, cy + r * 0.8f);
-                            // ivory reads on the (all-dark) skins
-                            dl->AddTriangleFilled(a, b, c,
-                                IM_COL32(236, 232, 220, 255));
-                            dl->AddTriangle(a, b, c, oc, 1.0f);
-                            cx -= 2.0f * r + gapM;
-                        }
-                        if (it.fav) {
-                            const float d = r * 1.25f;   // diamond half-diagonal
-                            const ImVec2 q0(cx, cy - d), q1(cx + d, cy);
-                            const ImVec2 q2(cx, cy + d), q3(cx - d, cy);
-                            dl->AddQuadFilled(q0, q1, q2, q3, Theme::Col(sk.hi, 1.0f));
-                            dl->AddQuad(q0, q1, q2, q3, oc, 1.0f);
-                        }
-                    }
-                }
+                // favorite ◆(hi) · poison ●(green drop) · stolen ●(crimson).
+                // The top-left stays reserved for the count/coin badge.
+                // ★★1.0.5: the QUEST triangle is gone — the property it marked
+                // is already enforced (a quest item refuses to be dropped or
+                // sold and says so), the items are rare, and it cost a marker
+                // slot on every tile that had one. Poison came down from the
+                // top-right corner to join the row. Everything is drawn by the
+                // shared tray now; see Grid.h.
+                // ★★1.0.5 — anchored to an OCCUPIED cell, not the bounding
+                // box. On a free-form footprint the box's corner can be an
+                // empty notch, and a favourite diamond parked there reads as
+                // belonging to whatever item is placed in that notch (user
+                // screenshot). Solid rectangles are unaffected: their corner
+                // cell IS the box corner.
+                const ImVec2 trayCell = AnchorCell(it.mask, p0, /*bottom*/ true);
+                DrawMarkerTray(dl, trayCell,
+                               ImVec2(trayCell.x + CellPx(), trayCell.y + CellPx()),
+                               it.fav,
+                               g_stolen.contains(PoolOfKey(it.key)),
+                               (it.glow & 0x4) != 0);
+
+                // ★1.0.5 rarity: one wedge at the footprint's top-right, over
+                // the sprite. Drawn here rather than in the occupancy pass so a
+                // multi-cell item gets ONE mark instead of one per cell.
+                const ImVec2 wedgeCell = AnchorCell(it.mask, p0, /*bottom*/ false);
+                DrawRarityWedge(dl, wedgeCell,
+                                ImVec2(wedgeCell.x + CellPx(), wedgeCell.y + CellPx()),
+                                it.glow);
 
                 // H1: edit-mode selection highlight (skin sel colour)
+                // ★★1.0.5 — the GRID always uses an even outline, on every skin.
+                // It used to branch on sk.cornerFade (corner-fade skins got the
+                // doubled 1px-inset fade instead). Two reasons it does not:
+                //
+                //   1. A cell's ground is a hard-edged rectangle here, so an
+                //      even line sits on it more naturally than a fade whose
+                //      whole idea is soft, empty edges.
+                //   2. Free-form footprints (PLAN_POLYOMINO) turn "the four
+                //      corners" into a question — a T has six convex corners
+                //      and two concave ones, a ring has two separate outlines.
+                //      An even line generalises to a polyline for free; a
+                //      corner fade has to be told which ends of which edge are
+                //      convex before it can draw anything.
+                //
+                // The EQUIP doll keeps the corner fade (Equip.cpp): its slots
+                // are always rectangles, and that fade is those skins' look.
+                //
+                // ★★And it follows the MASK, not the bounding box — a selection
+                // ring around empty cells says the item is somewhere it is not.
+                // This is the payoff of the even-line decision: a polyline
+                // traces any shape, a corner fade would first have to be told
+                // which ends of which edge are convex.
                 if (Editor::IsSelected(BaseKey(it.key))) {
-                    if (sk.cornerFade) {
-                        // v10.4: crimson corner fade, doubled 1px-inset for the
-                        // same visual weight as the old 2px outline
-                        const ImU32 selCol = Theme::Col(sk.sel, 1.0f);
-                        Theme::CornerFade(dl, p0, ImVec2(p0.x + w, p0.y + h), selCol);
-                        Theme::CornerFade(dl, ImVec2(p0.x + 1, p0.y + 1),
-                            ImVec2(p0.x + w - 1, p0.y + h - 1), selCol);
-                    } else {
-                        dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h),
-                            Theme::Col(sk.sel, 1.0f), 0.0f, 0, 2.0f);
-                    }
+                    DrawMaskOutline(dl, it.mask, p0, Theme::Col(sk.sel, 1.0f), 2.0f);
                 }
 
                 // hover / pickup / bag-toggle surface
                 ImGui::SetCursorScreenPos(p0);
                 ImGui::InvisibleButton(("##it_" + it.key).c_str(), ImVec2(w, h));
+                // ★★The button still exists — it reserves the rect and gives
+                // this tile an ImGui id (drag, tooltips and Sfx all key off
+                // it) — but it is NOT what decides the hit. The GRID decides:
+                // `ownerIdx` is the item owning the cell under the cursor, and
+                // only that tile answers. That is what lets an item sitting in
+                // an L's notch be hovered AND clicked, which one-button-per-
+                // item cannot do no matter how its result is filtered.
+                //
+                // ★IsItemHovered() is deliberately NOT part of this. ANDing it
+                // in would re-introduce the very bug: on the frame ImGui hands
+                // hover to the overlapping L, the item that actually owns the
+                // cell reads false and the click is swallowed by both. ImGui's
+                // gate is applied once per pass instead (`winHov` above).
+                const bool mine = (idx == ownerIdx);
+                auto tileHovered = [&] { return mine; };
+                auto tileClicked = [&](ImGuiMouseButton a_btn) {
+                    return mine && ImGui::IsMouseClicked(a_btn);
+                };
                 // overlay chrome (popups/settings/EDIT panel) extends beyond
                 // the ImGui window rect — block hover/interaction underneath
                 const bool ovl = UIRoot::MouseInOverlay();
@@ -1545,14 +2257,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (iconObj != it.obj) UIRoot::OpenInspect(iconObj, FormKey(iconObj));
                     else                   UIRoot::OpenInspect(it.obj, BaseKey(it.key));
                 };
-                if (!g_held && !ovl && ImGui::IsItemHovered() &&
+                if (!g_held && !ovl && tileHovered() &&
                     ImGui::IsKeyPressed(ImGuiKey_C, false) &&
                     !ImGui::GetIO().WantTextInput) {
                     inspectHere();
                 }
-                if (!g_held && !ovl && ImGui::IsItemHovered()) {   // v9 hover tint
-                    dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), Theme::Acc(0.10f));
+                if (!g_held && !ovl && tileHovered()) {   // v9 hover tint
+                    // ★The tint follows the MASK, not the box: on an L the
+                    // empty notch used to light up with the item.
+                    for (int my = 0; my < it.mask.h; ++my) {
+                        for (int mx = 0; mx < it.mask.w; ++mx) {
+                            if (!it.mask.rows[my][mx]) continue;
+                            const ImVec2 c0(p0.x + mx * CellPx(), p0.y + my * CellPx());
+                            dl->AddRectFilled(c0,
+                                ImVec2(c0.x + CellPx(), c0.y + CellPx()),
+                                Theme::Acc(0.10f));
+                        }
+                    }
                     Sfx::HoverNote(ImGui::GetItemID());   // cursor entered this tile
+                    g_newTiles.erase(it.key);   // GI65: looked at = no longer new
                 }
                 if (Editor::IsEditMode()) {
                     // H1: clicks select for editing (no carry, no equip).
@@ -1561,18 +2284,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // Pouch: edit the CURRENTLY DISPLAYED variant (N/S/M/F)
                     // — set the stored amount to a band to tune that band's
                     // icon; the tile always shows what is being edited.
-                    if (!ovl && ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                    if (!ovl && tileClicked(ImGuiMouseButton_Left)) {
                         if (iconObj != it.obj) {
                             Editor::Select(iconObj, FormKey(iconObj));
                         } else {
                             Editor::Select(it.obj, BaseKey(it.key));
                         }
                     }
-                    if (!ovl && ImGui::IsItemHovered()) {
+                    if (!ovl && tileHovered()) {
+                        // EDIT mode's name box is a tooltip too — same ground,
+                        // same hairline, same ink as the item tooltip
+                        Theme::PushTipStyle();
                         ImGui::SetTooltip("%s", it.obj->GetName());
+                        Theme::PopTipStyle();
                     }
                 } else if (!g_held && !ovl) {
-                    if (ImGui::IsItemHovered()) {   // tooltip suppressed while carrying
+                    if (tileHovered()) {   // tooltip suppressed while carrying
                         const RE::FormID fid = it.obj->GetFormID();
                         const bool isCoin = GoldCoins::IsCoinForm(fid) &&
                                             !GoldCoins::IsPouch(fid);
@@ -1586,10 +2313,30 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             }
                             // D1: a player TILE is exactly one unit — read its
                             // own sub-stack, not "any list on the entry"
+                            // ★GI63: a coin tile has to hand over ITS OWN value.
+                            // Passing -1 made the tooltip think the tile held no
+                            // gold, so "can this be split" was false on every
+                            // coin -- the one item type where splitting is the
+                            // main thing you do with it.
                             DrawItemTooltip(it.obj, it.count,
-                                GoldCoins::IsPouch(fid) ? GoldCoins::PouchStored() : -1,
+                                GoldCoins::IsPouch(fid) ? GoldCoins::PouchStored()
+                                                        : it.coinValue,
                                 price, false, nullptr, ExtraScope::kUnit,
-                                it.uid, it.xlIdx);
+                                it.uid, it.xlIdx, 0, 0,
+                                TileContext{ it.key, it.def.bag != 0,
+                                             it.inBag == kTrashKey, false, false });
+                        } else {
+                            // ★GI63: a coin draws no tooltip on purpose -- the
+                            // amount badge already says everything a card could.
+                            // But the prompt bar reads the TOOLTIP's record, so
+                            // skipping it left gold as the one thing you could
+                            // hover with no keys shown at all. Record it here.
+                            //   no verb  -- coins have no right-click action
+                            //   no star  -- a coin is a mirror of the ledger
+                            //   no compare, and split only above 1 gold
+                            g_hoverPrompt = { ImGui::GetFrameCount(),
+                                              it.coinValue > 1, false,
+                                              true, false, false, {} };
                         }
                         // D1: vanilla-style discard — hover + R drops ONE unit
                         // (spam R for more; carry-outside stays the full-stack drop).
@@ -1637,7 +2384,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             g_needRebuild = true;
                         }
                     }
-                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {   // C1: pickup
+                    if (tileClicked(ImGuiMouseButton_Left)) {   // C1: pickup
                         const RE::FormID lfid = it.obj->GetFormID();
                         const bool coin = GoldCoins::IsCoinForm(lfid) && !GoldCoins::IsPouch(lfid);
                         if (io.KeyShift && coin && it.coinValue > 1) {
@@ -1658,14 +2405,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // outside every window to discard just that many.
                             LootBarter::OpenSlider(it.obj, it.count, LootBarter::XferDir::kPickup, it.key);
                         } else {
+                            // ★GI62c/d: the cursor takes the item by its PIVOT
+                            // CELL, wherever it was clicked. Holding the clicked
+                            // point (the old F7 behaviour) meant the first A/D
+                            // had to re-grab, so the item slid AND turned in one
+                            // instant -- and a turn that travels is not read as
+                            // a turn. Gripping the pivot from the start makes
+                            // every rotation a clean revolution about one cell.
                             g_held = Held{ it.key, it.obj, it.mask, it.count, it.def.bag != 0,
-                                           it.def.scale,
-                                           io.MousePos.x - p0.x, io.MousePos.y - p0.y, true };
+                                           it.def.scale, 0.0f, 0.0f, true };
                             g_held->coinValue = it.coinValue;   // G4: -1 for non-coins
                             g_held->xlIdx = it.xlIdx;           // GI1
                             g_held->uid = it.uid;
                             g_held->sig = it.sig;               // GI25
                             g_held->fav = it.fav;               // GI36
+                            g_held->SetRot(it.rot);               // GI62: lift it as it lies
+                            HoldByPivot(*g_held, it.def);         // GI62d
                             if (g_poolTrace) {
                                 const auto le = g_layout.count(it.key) ? g_layout[it.key]
                                                                       : LayoutEntry{};
@@ -1675,7 +2430,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             if (g_sound) g_sound(it.obj, true);
                             g_needRebuild = true;   // cells free next frame (C1)
                         }
-                    } else if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    } else if (tileClicked(ImGuiMouseButton_Right)) {
                         // bag / pouch right-click is ALWAYS manage (toggle /
                         // withdraw), mode-independent — trade & storage happen
                         // by drag only (confirmed spec). Everything else
@@ -1782,6 +2537,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     }
                                 }
                             }
+                        } else if (auto* bk = it.obj->As<RE::TESObjectBOOK>();
+                                   bk && !bk->TeachesSpell()) {
+                            // Books and notes had no reachable action at all:
+                            // right-click fell through to equip, which rejects
+                            // them, so a quest note could be carried but never
+                            // read (user report). Spell tomes keep the equip
+                            // path -- that branch LEARNS them.
+                            RequestBookRead(bk, it.uid, it.sig);
                         } else {   // D3: right-click = equip (refresh even on reject)
                             if (g_poolTrace) {
                                 const auto le = g_layout.count(it.key) ? g_layout[it.key]
@@ -1820,6 +2583,68 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
         }
 
+        // GI62: A / D turn the carried item one quarter (A anticlockwise,
+        // D clockwise). Rotation exists ONLY while carried, which is what keeps
+        // it simple: the slot a turn applies to is never in question -- it is
+        // the one the player is about to drop onto, and the drop already proves
+        // the turned footprint fits before it lands.
+        //
+        // ★Runs at the TOP of the frame, before any grid computes its drop
+        // candidate. Turning it at FinishFrame (after every grid drew) would
+        // leave the ghost and the collision test a frame behind the sprite.
+        void RotateHeldItem()
+        {
+            if (!g_held) return;
+            auto& held = *g_held;
+
+            // ★GI62b: the sprite EASES to the new angle while the footprint
+            // snapped to it instantly. Both halves of that matter. The snap is
+            // what the drop is judged against, so it can never lag; the ease is
+            // the only thing that says "this turned" rather than "this became a
+            // different shape". Without it a 1x2 reads as a silent swap of width
+            // for height -- on an even-sided footprint the before and after
+            // share just one cell, so there is no visible pivot to infer a
+            // rotation from (an odd 1x3 keeps its middle cell and reads as a
+            // cross, which is why only the long items felt like they turned).
+            if (held.rotT < 1.0f) {
+                constexpr float kTurnSec = 0.18f;
+                const float dt = (std::min)(ImGui::GetIO().DeltaTime, 0.1f);
+                held.rotT = (std::min)(1.0f, held.rotT + dt / kTurnSec);
+                // ease-out-back: overshoots ~9 degrees, then settles. A plain
+                // decay curve was tried first -- it eases INTO the target and
+                // the last 20 degrees crawl, which reads as the sprite drifting
+                // rather than being turned. The small overshoot is what makes
+                // the eye register a quarter-turn as an event.
+                constexpr float c1 = 1.70158f;
+                constexpr float c3 = c1 + 1.0f;
+                const float p = held.rotT - 1.0f;
+                const float e = 1.0f + c3 * p * p * p + c1 * p * p;
+                held.rotDeg = held.rotFrom + (held.rotAim - held.rotFrom) * e;
+                if (held.rotT >= 1.0f) held.rotDeg = held.rotAim;
+            }
+
+            if (ImGui::GetIO().WantTextInput) return;
+            // A/D also step the quantity slider. The two cannot overlap in
+            // practice (the slider resolves BEFORE a fragment reaches the
+            // cursor), but one keypress must never mean two things.
+            if (LootBarter::SliderActive()) return;
+            const bool ccw = ImGui::IsKeyPressed(ImGuiKey_A, false);
+            const bool cw  = ImGui::IsKeyPressed(ImGuiKey_D, false);
+            if (ccw == cw) return;   // neither, or both in the same frame
+            const auto def = Grid::ResolveDef(held.obj);
+            if (!CanRotate(def)) return;   // square footprint: nothing would move
+            held.rotPrev = held.rot;
+            held.rot = (held.rot + (cw ? 1 : -1) + 4) & 3;
+            // Start THIS turn from whatever is on screen right now -- pressing D
+            // twice quickly picks up mid-swing instead of jumping back.
+            held.rotFrom = held.rotDeg;
+            held.rotAim += cw ? 90.0f : -90.0f;   // unwrapped: always the short way
+            held.rotT = 0.0f;
+            held.mask = MaskOf(def, held.rot);
+            HoldByPivot(held, def);   // GI62d: the pivot cell does not move
+            Sfx::Focus();
+        }
+
         // pass 5: carried item -> drop candidate + placement ghost (C2)
         void ComputeDropCandidate(View& a_view, int a_viewIdx, const ImVec2& base)
         {
@@ -1845,7 +2670,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 g_target.col = col;
                 g_target.row = row;
 
-                const bool bagInBag = held.isBag && !a_view.bagKey.empty();   // E4
+                // E4b: a bag may be dropped into a GENERAL bag (user request:
+                // stow spare bags). Still refused: the trash (delete via drop
+                // stays a non-goal), typed bags (they hold their filter, not
+                // luggage), and any drop that would loop the containment chain.
+                const bool bagInBag = held.isBag && !a_view.bagKey.empty() &&
+                                      (a_view.bagKey == kTrashKey ||
+                                       !a_view.accept.empty() ||
+                                       NestsWithin(held.key, a_view.bagKey));
                 const bool sizeOk = held.mask.w <= a_view.cols && held.mask.h <= a_view.rows;
 
                 for (int idx : a_view.items) {
@@ -1864,7 +2696,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     }
                     if (hit) g_target.blockers.push_back(idx);
                 }
-                g_target.valid = !bagInBag && sizeOk && g_target.blockers.empty();
+                // ★Typed bag: a hand drop obeys the same rule the routing does.
+                // Without this the automatic half looks finished while the bag
+                // still holds anything you drag in — and the code elsewhere
+                // ASSUMES a typed bag's contents match its filter (the "bag is
+                // full" signal is measured from its own kind overflowing).
+                const bool wrongKind = !a_view.accept.empty() && held.obj &&
+                                       BagFilter::FilterOf(held.obj) != a_view.accept;
+                g_target.valid = !bagInBag && !wrongKind && sizeOk &&
+                                 g_target.blockers.empty();
 
                 // ghost: green = ok, red = badspot
                 const ImU32 ghost = g_target.valid ? IM_COL32(90, 170, 90, 90)
@@ -1874,6 +2714,41 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         if (!held.mask.rows[y][x]) continue;
                         const ImVec2 p0(base.x + (col + x) * CellPx(), base.y + (row + y) * CellPx());
                         dl->AddRectFilled(p0, ImVec2(p0.x + CellPx(), p0.y + CellPx()), ghost);
+                    }
+                }
+
+                // ★GI62b: while the turn plays, OUTLINE the footprint it just
+                // left. Filled cells say "here is where it goes"; the outline
+                // says "here is where it was", and the two together are the
+                // rotation. This is what carries the odd cases: 1x3 turns into
+                // a cross on its own, but 2x3 and 1x2 have no shared middle
+                // cell, so without the departing shape beside the new one there
+                // is nothing on screen that reads as a turn rather than a
+                // resize. Anchored the way the OLD footprint would be anchored
+                // under this very cursor, so the pair keeps the exact offset
+                // the item actually moved by.
+                if (held.rotT < 1.0f && held.rotPrev != held.rot) {
+                    const auto pdef = Grid::ResolveDef(held.obj);
+                    const Mask pm = MaskOf(pdef, held.rotPrev);
+                    float pox = 0.0f, poy = 0.0f;
+                    GripOffset(pdef, held.rotPrev, pox, poy);   // GI62d: same grip
+                    const int pc = (std::max)(0, (std::min)(a_view.cols - pm.w,
+                        static_cast<int>(std::lround(
+                            (io.MousePos.x - base.x - pox) / CellPx()))));
+                    const int pr = (std::max)(0, (std::min)(a_view.rows - pm.h,
+                        static_cast<int>(std::lround(
+                            (io.MousePos.y - base.y - poy) / CellPx()))));
+                    const float fade = 1.0f - held.rotT;
+                    const ImU32 line = IM_COL32(225, 205, 150,
+                        static_cast<int>(170.0f * fade));
+                    for (int y = 0; y < pm.h; ++y) {
+                        for (int x = 0; x < pm.w; ++x) {
+                            if (!pm.rows[y][x]) continue;
+                            const ImVec2 q0(base.x + (pc + x) * CellPx(),
+                                            base.y + (pr + y) * CellPx());
+                            dl->AddRect(q0, ImVec2(q0.x + CellPx(), q0.y + CellPx()),
+                                line, 0.0f, 0, 2.0f);
+                        }
                     }
                 }
             }
@@ -1888,7 +2763,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
             DrawGridChrome(a_view, a_viewIdx, base);      // pass 1
             DrawOccupancyPass(a_view, base);              // pass 2
-            DrawGlowPass(a_view, base);                   // pass 3
+            // (the old pass 3 — rarity HALO — is gone: rarity is drawn as the
+            //  cell's ground inside DrawOccupancyPass now. See Grid.h.)
             DrawItemsPass(a_view, base);                  // pass 4
             ComputeDropCandidate(a_view, a_viewIdx, base);// pass 5
         }
@@ -1916,6 +2792,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     {
         return g_held.has_value();
     }
+
+    bool HeldCanRotate()
+    {
+        return g_held && CanRotate(ResolveDef(g_held->obj));
+    }
+
+    HoverPrompt HoveredPrompt()
+    {
+        if (g_hoverPrompt.frame != ImGui::GetFrameCount()) return {};
+        return { true, g_hoverPrompt.canSplit, g_hoverPrompt.canCompare,
+                 true, g_hoverPrompt.canDrop, g_hoverPrompt.canFav,
+                 g_hoverPrompt.hasVerb, g_hoverPrompt.verb };
+    }
+
+    bool IsPouchOpen() { return g_pouchOpen; }
 
     // GI17: "is THIS unit the one on the cursor". The form-level question was
     // never enough once a partner stack became several cells: lifting one of
@@ -2016,22 +2907,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
     void BeginPartnerCarry(RE::TESBoundObject* a_obj, int a_count, int a_value,
                            float a_offX, float a_offY,
-                           std::uint16_t a_uid, int a_xlIdx, int a_ord)
+                           std::uint16_t a_uid, int a_xlIdx, int a_ord, int a_rot)
     {
         if (!a_obj || g_held) return;
         const GridDef def = g_resolver ? g_resolver(a_obj) : GridDef{};
-        Mask m = MaskOf(def);
+        // GI62: lift it as it lies on the other side, so a sword stored on its
+        // side comes back across still on its side.
+        const int rot = CanRotate(def) ? (a_rot & 3) : 0;
+        Mask m = MaskOf(def, rot);
         Held h;
         h.key = "##partner";   // not a real grid tile
         h.obj = a_obj;
+        h.SetRot(rot);
         h.mask = std::move(m);
         h.count = a_count;
         h.isBag = def.bag != 0;
         h.defScale = def.scale;
         // F7: pick up where clicked (player-tile parity); centre fallback
         // for swap pickups (no meaningful click point)
-        h.offX = a_offX >= 0.0f ? a_offX : h.mask.w * CellPx() * 0.5f;
-        h.offY = a_offY >= 0.0f ? a_offY : h.mask.h * CellPx() * 0.5f;
+        HoldByPivot(h, def);   // GI62d: gripped by the pivot cell, like a tile
+        if (a_offX >= 0.0f) h.offX = a_offX;   // explicit grab point (legacy path)
+        if (a_offY >= 0.0f) h.offY = a_offY;
         h.justPicked = true;
         h.fromPartner = true;
         h.partnerValue = a_value;
@@ -2073,6 +2969,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // must not decide whether the doll shows a star.
         auto* p = RE::PlayerCharacter::GetSingleton();
         return PoolHasStar(LiveEntryOf(p, a_obj), a_uid, a_sig);
+    }
+
+    // ★1.0.5: the doll needs this for the same reason it needs the star —
+    // wearing a stolen item must not make it stop looking stolen. Keyed the way
+    // the grid keys it (pool prefix), so the tile and the slot agree.
+    bool IsPoolStolen(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                      std::uint16_t a_sig)
+    {
+        if (!a_obj) return false;
+        return g_stolen.contains(PoolPrefix(FormKey(a_obj), a_uid, a_sig));
     }
 
     void ForgetTile(const std::string& a_key)
@@ -2458,7 +3364,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 break;
                             }
                         }
-                        if (a_mutate) g_layout[key] = LayoutEntry{ -1, -1, {}, 1 };
+                        if (a_mutate) {
+                            g_layout[key] = LayoutEntry{ -1, -1, {}, 1 };
+                            // ★Typed bags: THIS is the moment a tile first
+                            // exists, and the only moment routing is allowed to
+                            // choose for the player (PLAN_TYPED_BAGS §4-1).
+                            // Deciding later would need a "has the user placed
+                            // this yet" test, and every candidate for that test
+                            // (col < 0, empty bag) is also true of a tile the
+                            // user is merely carrying.
+                            g_freshTiles.push_back(key);
+                        }
                     }
                     if (a_mutate && g_poolTrace) {
                         const auto le = g_layout.count(key) ? g_layout[key] : LayoutEntry{};
@@ -2601,6 +3517,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         it.col = li->second.col;
                         it.row = li->second.row;
                         it.inBag = li->second.bag;
+                        // ★GI62: the capacity sim has to see the board as it IS.
+                        // A turned sword occupies different cells than an upright
+                        // one, and a sim that disagrees with the screen answers
+                        // "no room" for a gap the player can plainly see (or the
+                        // reverse, which lets an item in that then overflows).
+                        if (CanRotate(it.def) && li->second.rot != 0) {
+                            it.rot = li->second.rot & 3;
+                            it.mask = MaskOf(it.def, it.rot);
+                        }
                         // F2: an ordinal key colliding with a PARKED tile's key
                         // must not import its trash assignment into the sim
                         if (it.inBag == kTrashKey) { it.inBag.clear(); it.col = -1; it.row = -1; }
@@ -2609,8 +3534,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             it.row = -1;
                         }
                     }
-                    if (it.def.bag != 0) it.inBag.clear();   // E3: bags live in main
                     a_out.tiles.push_back(std::move(it));
+                }
+            }
+            // E4b: a bag KEEPS its place inside a general bag (manual
+            // nesting). Out of anything else — typed bag, stale key — it
+            // reflows to main (the old per-tile E3 clear, now scoped to what
+            // nesting does not allow). A LOCAL map, not g_bagAcceptByForm:
+            // this sim also runs at load time before any display rebuild has
+            // filled the global, and an empty map here would silently move
+            // every nested bag onto the sim's main board (rule 97).
+            {
+                std::map<std::string, std::string> bagAccept;   // bag tile key -> accept
+                for (const auto& it : a_out.tiles) {
+                    if (it.def.bag != 0) bagAccept[it.key] = it.def.accept;
+                }
+                for (auto& it : a_out.tiles) {
+                    if (it.def.bag == 0 || it.inBag.empty()) continue;
+                    const auto ba = bagAccept.find(it.inBag);
+                    if (ba == bagAccept.end() || !ba->second.empty()) it.inBag.clear();
                 }
             }
             // E4 mirror: a DANGLING bag ref (no tile AND no owned form) means
@@ -2632,6 +3574,37 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // per-form caches (g_gold / g_values / g_stolen / g_questItem).
         void CollectDisplayTiles(RE::PlayerCharacter* player)
         {
+            // ★Typed bags: one pass to learn which filters the player has a bag
+            // for, BEFORE any tile is built — the stackable path needs to know
+            // while it is deciding where new units go, and the bag tiles do not
+            // exist yet at that moment.
+            g_typedBagsHeld.clear();
+            g_bagAcceptByForm.clear();
+            // Copies that no routing can reach: parked in the trash (queued
+            // for deletion — CollectBagSlots skips them) or riding the cursor
+            // (no place on the board). A filter whose every bag is unreachable
+            // must NOT count as held, or the skip below keeps starting fresh
+            // tiles that nothing can claim — one orphan half-stack per pickup.
+            std::map<std::string, int> unreachable;
+            for (const auto& [k, le] : g_layout) {
+                if (le.bag == kTrashKey) ++unreachable[BaseKey(k)];
+            }
+            if (g_held && g_held->isBag && g_held->obj) {
+                ++unreachable[FormKey(g_held->obj)];
+            }
+            for (auto& [obj, pair] : player->GetInventory()) {
+                if (!obj || pair.first <= 0) continue;
+                const GridDef d = g_resolver ? g_resolver(obj) : GridDef{};
+                if (!d.bag) continue;
+                const std::string fk = FormKey(obj);
+                g_bagAcceptByForm[fk] = d.accept;
+                if (d.accept.empty()) continue;
+                const auto u = unreachable.find(fk);
+                if (pair.first > (u == unreachable.end() ? 0 : u->second)) {
+                    g_typedBagsHeld.insert(d.accept);
+                }
+            }
+
             // ---- collect ----
             for (auto& [obj, pair] : player->GetInventory()) {
                 const int count = pair.first;
@@ -2862,14 +3835,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
                 // emit one tile Item at a saved (or fresh, col<0) spot
                 auto makeTile = [&](const std::string& key, int cnt, int col, int row,
-                                    const std::string& bag, int xlIdx = -1) {
+                                    const std::string& bag, int xlIdx = -1, int rot = 0) {
                     Item it;
                     it.key = key;
                     it.obj = obj;
                     it.glow = glow;
                     it.count = cnt;
                     it.def = gdef;
-                    it.mask = MaskOf(it.def);
+                    // GI62: the footprint the player left this tile at. Everything
+                    // downstream -- placement, collision, hit test, ghost, shading
+                    // -- reads `mask` and needs no further knowledge of rotation.
+                    it.rot = CanRotate(it.def) ? (rot & 3) : 0;
+                    it.mask = MaskOf(it.def, it.rot);
                     it.col = col;
                     it.row = row;
                     it.inBag = bag;
@@ -2882,14 +3859,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             xe && xe->enchantment) {
                             it.glow |= 1;
                         }
-                        // GI46: unit status rings (poison green / temper steel)
+                        // GI66: poison only. The temper bit was computed here
+                        // too and nothing reads it any more -- temper lives in
+                        // the name, the damage number and the price, and marking
+                        // it as well meant marking almost every weapon past
+                        // mid-game.
                         if (const auto* xp = xl->GetByType<RE::ExtraPoison>();
                             xp && xp->poison) {
                             it.glow |= 4;
-                        }
-                        if (const auto* xh = xl->GetByType<RE::ExtraHealth>();
-                            xh && xh->health > 1.0f) {
-                            it.glow |= 8;
                         }
                     }
                     // GI40: the star belongs to the POOL, not to one list.
@@ -2911,8 +3888,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // board the moment space frees up and the extra rows collapse.
                     if (it.inBag.empty() && it.row >= kMinRows) { it.col = -1; it.row = -1; }
                     // E3: bags live in main — except a parked (empty) bag in
-                    // the trash (F2 allows trashing an empty bag)
-                    if (it.def.bag != 0 && it.inBag != kTrashKey) it.inBag.clear();
+                    // the trash (F2 allows trashing an empty bag), and (E4b) a
+                    // bag stowed by hand inside a GENERAL bag. Anything else a
+                    // bag ref points at (typed bag, stale key) reflows to main.
+                    if (it.def.bag != 0 && it.inBag != kTrashKey && !it.inBag.empty()) {
+                        const auto ba = g_bagAcceptByForm.find(BaseKey(it.inBag));
+                        if (ba == g_bagAcceptByForm.end() || !ba->second.empty()) {
+                            it.inBag.clear();
+                        }
+                    }
                     g_items.push_back(std::move(it));
                 };
 
@@ -3050,7 +4034,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     }
                     for (const auto& k : parked) {
                         const auto& le = g_layout[k];
-                        makeTile(k, (std::max)(1, le.count), le.col, le.row, kTrashKey, -1);
+                        makeTile(k, (std::max)(1, le.count), le.col, le.row, kTrashKey, -1, le.rot);
                     }
 
                     for (const auto& u : units_v) {
@@ -3074,10 +4058,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             le.col = g_dropHint.col;
                             le.row = g_dropHint.row;
                             le.bag = g_dropHint.bag;
+                            le.rot = g_dropHint.rot;   // GI62
                             g_layout[u.key] = le;   // persist the placement
                             g_dropHint = {};
+                            // ★Typed bags: hand-placed — the pool walk already
+                            // listed this unit as fresh, so unlist it or the
+                            // claim overrides the very cell the hint just set.
+                            std::erase(g_freshTiles, u.key);
                         }
-                        makeTile(u.key, 1, le.col, le.row, le.bag, u.xlIdx);
+                        makeTile(u.key, 1, le.col, le.row, le.bag, u.xlIdx, le.rot);
                     }
                     continue;   // form handled
                 }
@@ -3117,6 +4106,28 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // F2: never absorb fresh pickups into a tile parked in
                         // the trash (it's queued for deletion, not storage)
                         if (s.le.bag == kTrashKey) continue;
+                        // ★Typed bags: do NOT top up a pile the player is
+                        // keeping outside the item's own bag. Without this,
+                        // picking up 5 ore with 6 already piled puts 4 into
+                        // that pile and only the leftover into the bag — the
+                        // feature appears to work while most of the haul still
+                        // lands outside it. The pile stays exactly as the
+                        // player left it (§4-1) — and that promise covers a
+                        // pile parked in a GENERAL bag the same as one on the
+                        // main board; only a pile already inside a bag of the
+                        // item's own kind may absorb arrivals.
+                        if (!g_typedBagsHeld.empty()) {
+                            const auto& f = BagFilter::FilterOf(obj);
+                            if (g_typedBagsHeld.contains(f) && !g_typedBagFull.contains(f)) {
+                                bool intoOwnBag = false;
+                                if (!s.le.bag.empty()) {
+                                    const auto ba = g_bagAcceptByForm.find(BaseKey(s.le.bag));
+                                    intoOwnBag = ba != g_bagAcceptByForm.end() &&
+                                                 ba->second == f;
+                                }
+                                if (!intoOwnBag) continue;
+                            }
+                        }
                         const int room = cap - (std::max)(0, s.le.count);
                         if (room <= 0) continue;
                         const int add = (std::min)(room, diff);
@@ -3130,15 +4141,35 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         ns.le.col = -1; ns.le.row = -1; ns.le.count = cnt;
                         // B2: partner-drop hint — the first NEW tile of this form
                         // lands at the drop cell (one-shot, then back to first-fit)
+                        bool viaHint = false;
                         if (g_dropHint.col >= 0 && g_dropHint.baseKey == baseKey) {
                             ns.le.col = g_dropHint.col;
                             ns.le.row = g_dropHint.row;
                             ns.le.bag = g_dropHint.bag;
+                            ns.le.rot = g_dropHint.rot;   // GI62
                             g_dropHint = {};
+                            viaHint = true;
                         }
                         g_layout[ns.key] = ns.le;   // reserve so NextTileKey advances
+                        // ★Typed bags: the STACKABLE arrival point. Every one
+                        // of the six filters (ore, ingredients, potions, soul
+                        // gems, keys, hides) is stackable, so this — not the
+                        // gear path above — is where their new tiles are born.
+                        // Hooking only the gear path made the claim look
+                        // completely dead: "0 fresh tiles" on every rebuild.
+                        // ★A tile born from a drop HINT is the player's own
+                        // hand choosing a cell — routing must not override
+                        // that, so it never counts as fresh.
+                        if (!viaHint) g_freshTiles.push_back(ns.key);
                         slots.push_back(std::move(ns));
                         diff -= cnt;
+                    }
+                    // ★The hint is spent by the ARRIVAL, not only by a minted
+                    // tile: when the fill loop absorbed everything into piles
+                    // no tile was made, and a hint left armed here fires on the
+                    // NEXT pickup of this form — teleporting it to a stale cell.
+                    if (g_dropHint.col >= 0 && g_dropHint.baseKey == baseKey) {
+                        g_dropHint = {};
                     }
                 } else if (diff < 0) {
                     // CONSUME: drain partial tiles first (bottom-right), then full
@@ -3179,7 +4210,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 for (auto& s : slots) {
                     if (s.le.count <= 0) { g_layout.erase(s.key); continue; }
                     g_layout[s.key].count = s.le.count;   // persist owned count now
-                    makeTile(s.key, s.le.count, s.le.col, s.le.row, s.le.bag);
+                    makeTile(s.key, s.le.count, s.le.col, s.le.row, s.le.bag, -1, s.le.rot);
                 }
 
                 // ---- self-check: STACKABLES ------------------------------------
@@ -3235,7 +4266,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (g_items[i].def.bag != 0) bags[g_items[i].key] = i;
             }
             for (auto it = g_openBags.begin(); it != g_openBags.end();) {
-                if (!bags.contains(*it)) it = g_openBags.erase(it);
+                // a carried bag is still in `bags` (it stays in g_items), so it
+                // survives this prune on its own — the guard is belt and braces
+                const bool carried = g_held && g_held->key == *it;
+                if (!bags.contains(*it) && !carried) it = g_openBags.erase(it);
                 else ++it;
             }
             for (auto& it : g_items) {
@@ -3253,6 +4287,163 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return bags;
         }
 
+        // ★The bags that can actually hold something, derived from the board —
+        //  never from `g_openBags`, which only says which bag WINDOWS are up.
+        //  Every capacity question (the real placement, the accept-probe, the
+        //  overload check, the take-all budget) goes through this one list, so
+        //  a verdict of "it fits" can never disagree with where the item then
+        //  lands. Key-sorted: the sims and the placement must walk candidate
+        //  bags in the same order, or the same loot picks a different bag.
+        struct BagSlot
+        {
+            std::string key;
+            int         cols = 1;
+            int         rows = 1;
+            std::string accept;   // "" = general purpose (takes overflow only)
+            int         col = -1;   // the bag TILE's own cell, for fill order
+            int         row = -1;
+            // NOTE deliberately no `carried` flag: a bag riding the cursor
+            // never enters this list at all (see the g_held skip below) — the
+            // held bag's window is a separate View built in BuildViewsAndSpill.
+        };
+
+        std::vector<BagSlot> CollectBagSlots(const std::vector<Item>& a_tiles)
+        {
+            std::vector<BagSlot> out;
+            for (const auto& it : a_tiles) {
+                if (it.def.bag == 0) continue;               // not a bag
+                if (it.key == kTrashKey) continue;           // F2: never a target
+                if (it.inBag == kTrashKey) continue;         // parked for deletion
+                if (g_held && g_held->key == it.key) continue;   // riding the cursor
+                out.push_back({ it.key, (std::max)(1, it.def.bw),
+                                        (std::max)(1, it.def.bh),
+                                it.def.accept, it.col, it.row });
+            }
+            // ★Fill order is the bag's own place on the board, top-left first,
+            // so two bags of the same kind fill in the order the player sees
+            // them. Key order (the old rule) is a FormID string — stable, but
+            // it means the second satchel can fill before the first for no
+            // reason the player can observe. Key breaks ties so an unplaced bag
+            // still lands somewhere deterministic.
+            std::sort(out.begin(), out.end(), [](const BagSlot& a, const BagSlot& b) {
+                const int ar = a.row < 0 ? 9999 : a.row;
+                const int br = b.row < 0 ? 9999 : b.row;
+                if (ar != br) return ar < br;
+                const int ac = a.col < 0 ? 9999 : a.col;
+                const int bc = b.col < 0 ? 9999 : b.col;
+                if (ac != bc) return ac < bc;
+                return a.key < b.key;
+            });
+            return out;
+        }
+
+        // ★Typed bags, the claim (PLAN_TYPED_BAGS §3-2). Runs on tiles that
+        // were minted THIS rebuild and nothing else: routing decides where a
+        // new item lands, it does not hold items in place afterwards. Dragging
+        // an ore back to the main board therefore sticks, which is what makes
+        // rearranging a bag possible at all.
+        // ★"모으기" (PLAN_TYPED_BAGS §4-1a). Routing only ever decides where a
+        // NEW item lands; it deliberately never drags placed items around, or
+        // rearranging a bag would be impossible. That leaves one real gap — a
+        // bag you just acquired starts empty, and anything scattered while
+        // tidying stays scattered. This is the answer to both, and it is a
+        // BUTTON rather than an automatic sweep so nothing ever moves without
+        // the player asking.
+        //
+        // Marks only; the normal placement pass seats them and bounces what
+        // does not fit back to main, so a full bag partially collects for free.
+        int CollectIntoBag(const std::string& a_bagKey, const std::string& a_accept)
+        {
+            if (a_bagKey.empty() || a_accept.empty()) return 0;
+            auto* p = RE::PlayerCharacter::GetSingleton();
+            int moved = 0;
+            for (auto& it : g_items) {
+                if (!it.obj) continue;
+                if (it.inBag == a_bagKey) continue;      // already home
+                if (it.inBag == kTrashKey) continue;     // queued for deletion
+                if (it.def.bag) continue;                // E4: no bag inside a bag
+                if (it.coinValue >= 0) continue;         // coins answer to the ledger
+                if (g_held && g_held->key == it.key) continue;   // riding the cursor
+                // ONLY from main and general-purpose bags. Pulling out of
+                // another TYPED bag would let two bags fight over the same item
+                // every time either button is pressed.
+                if (!it.inBag.empty()) {
+                    const auto src = std::find_if(g_views.begin(), g_views.end(),
+                        [&](const View& v) { return v.bagKey == it.inBag; });
+                    if (src != g_views.end() && !src->accept.empty()) continue;
+                }
+                if (BagFilter::FilterOf(it.obj) != a_accept) continue;
+                // entry-level quest check, same deliberate choice as the claim:
+                // one flagged unit keeps the whole (interchangeable) form out
+                if (p) {
+                    if (auto* e = LiveEntry(p, it.obj); e && e->IsQuestObject()) continue;
+                }
+                it.inBag = a_bagKey;
+                it.col = -1;
+                it.row = -1;
+                auto& le = g_layout[it.key];
+                le.bag = a_bagKey;
+                le.col = -1;
+                le.row = -1;
+                ++moved;
+            }
+            if (moved > 0) {
+                SKSE::log::info("[BAGCLAIM] collect '{}': {} tile(s)", a_accept, moved);
+                RequestRebuild();
+            }
+            return moved;
+        }
+
+        void ClaimIntoTypedBags(const std::vector<BagSlot>& a_slots)
+        {
+            std::vector<const BagSlot*> typed;
+            for (const auto& s : a_slots) {
+                // a bag the player is holding never enters a_slots at all
+                // (CollectBagSlots skips it), so everything here has a place
+                // on the board and is safe to route into
+                if (!s.accept.empty()) typed.push_back(&s);
+            }
+            if (g_freshTiles.empty() || typed.empty()) return;
+
+            auto* p = RE::PlayerCharacter::GetSingleton();
+            for (const auto& key : g_freshTiles) {
+                auto it = std::find_if(g_items.begin(), g_items.end(),
+                    [&](const Item& t) { return t.key == key; });
+                if (it == g_items.end() || !it->obj) continue;
+                if (!it->inBag.empty()) continue;      // already spoken for
+                if (it->def.bag) continue;             // E4: no bag inside a bag
+                if (it->coinValue >= 0) continue;      // coins answer to the ledger
+
+                // Quest items stay on the main board. Hiding one inside a bag
+                // makes it hard to find, and it cannot be dropped or sold, so
+                // the bag buys the player nothing (PLAN §4-4).
+                // ENTRY-level IsQuestObject on purpose (elsewhere quest state is
+                // per sub-stack): stackable units are interchangeable, so when
+                // ANY unit is quest-flagged the only safe call covers the form.
+                if (p) {
+                    if (auto* entry = LiveEntry(p, it->obj); entry && entry->IsQuestObject()) {
+                        continue;
+                    }
+                }
+
+                const auto& filter = BagFilter::FilterOf(it->obj);
+                if (filter.empty()) continue;
+                for (const auto* s : typed) {
+                    if (s->accept != filter) continue;
+                    if (s->key == it->key) continue;
+                    it->inBag = s->key;
+                    g_layout[it->key].bag = s->key;
+                    SKSE::log::info("[BAGCLAIM] {} -> {} ({})",
+                        it->obj->GetName() ? it->obj->GetName() : "?", s->key, filter);
+                    // First bag of that kind in board order. If it turns out to
+                    // be full, the placement pass hands the tile to the next one
+                    // (see BuildViewsAndSpill) — capacity is not knowable here,
+                    // so the fall-through lives where the seating happens.
+                    break;
+                }
+            }
+        }
+
         // B: purchase-payment spill accounting — 1x1 dummies re-fill the
         // coin cells the payment dissolved this frame
         std::vector<Item> MakePaidGoldDummies()
@@ -3265,7 +4456,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const int paidGold = g_paidGold;
             g_paidGold = 0;
             std::vector<Item> dummies;
-            if (paidGold > 0 && !g_openBags.empty()) {
+            // (bag PRESENT, not bag window open — see CollectBagSlots)
+            if (paidGold > 0 && !CollectBagSlots(g_items).empty()) {
                 const int walking = GoldCoins::WalkingGoldValue();
                 const int n = (std::max)(0,
                     GoldCoins::CoinTilesFor(walking + paidGold) - GoldCoins::CoinTilesFor(walking));
@@ -3286,31 +4478,120 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         void BuildViewsAndSpill(std::map<std::string, int>& bags,
                                 std::vector<Item>& dummies)
         {
-            // ---- views: open bags first (their overflow falls back to main) ----
+            // ---- views: EVERY present bag (their overflow falls back to main).
+            //      Closed ones get the same placement pass and are simply not
+            //      drawn — see the View::open comment.
             std::vector<Item*> mainList;
-            for (const auto& bagKey : g_openBags) {
-                const auto& bagItem = g_items[bags[bagKey]];
+            const auto slots = CollectBagSlots(g_items);
+            // BEFORE the views place anything: the claim only sets inBag, and
+            // the existing per-view pass below is what actually seats the tile
+            // — including bouncing it back to main when the bag is full, which
+            // is exactly decision 1 and needs no code of its own.
+            ClaimIntoTypedBags(slots);
+            // re-derive "which typed bags are full" from THIS pass's placement;
+            // the stackable fill loop read the previous pass's answer earlier
+            g_typedBagFull.clear();
+            // ★Fullness is per BAG, not per filter. Two ore bags are two
+            // shelves: one being full says nothing about the other, and the
+            // filter-level flag made a full first bag send everything to the
+            // main pile while the second sat empty.
+            std::set<std::string> bagFull;
+            for (std::size_t si = 0; si < slots.size(); ++si) {
+                const auto& slot = slots[si];
+                const auto bi = bags.find(slot.key);
+                if (bi == bags.end()) continue;
+                const auto& bagItem = g_items[bi->second];
                 View v;
-                v.bagKey = bagKey;
-                v.bagName = bagItem.obj->GetName();
-                v.cols = (std::max)(1, bagItem.def.bw);
-                v.minRows = (std::max)(1, bagItem.def.bh);
+                v.bagKey = slot.key;
+                v.bagName = bagItem.obj ? bagItem.obj->GetName() : "";
+                v.accept = slot.accept;
+                v.cols = slot.cols;
+                v.minRows = slot.rows;
                 v.maxRows = v.minRows;   // fixed-height grid (B1/E5)
+                v.open = g_openBags.contains(slot.key);
                 std::vector<Item*> list;
                 for (int i = 0; i < static_cast<int>(g_items.size()); ++i) {
-                    if (g_items[i].inBag == bagKey) list.push_back(&g_items[i]);
+                    if (g_items[i].inBag == slot.key) list.push_back(&g_items[i]);
                 }
                 v.rows = PlaceItems(list, v.cols, v.minRows, v.maxRows);
                 for (auto* it : list) {
                     if (it->overflow) {   // bag full/shrunk: falls back to main (E4)
+                        bagFull.insert(slot.key);
                         it->col = -1;
                         it->row = -1;
-                        it->inBag.clear();
+                        // ★Try the NEXT bag of the same kind before giving up on
+                        // bags entirely (decision 4 promised board order, and
+                        // order without fall-through means the second bag is
+                        // never used). Slots are already in board order and
+                        // later ones are built after this one, so handing the
+                        // tile forward is enough — that view collects by inBag.
+                        std::string next;
+                        if (!slot.accept.empty()) {
+                            for (std::size_t sj = si + 1; sj < slots.size(); ++sj) {
+                                if (slots[sj].accept == slot.accept &&
+                                    bags.contains(slots[sj].key)) {
+                                    next = slots[sj].key;
+                                    break;
+                                }
+                            }
+                        }
+                        it->inBag = next;   // "" = fall back to the main board
+                        if (!next.empty()) g_layout[it->key].bag = next;
+                        else               g_layout[it->key].bag.clear();
                     } else {
                         v.items.push_back(static_cast<int>(it - g_items.data()));
                     }
                 }
                 g_views.push_back(std::move(v));
+            }
+
+            // ★A bag on the cursor keeps its window open (user report: picking
+            // up an open bag to move it closed the window and hid its contents,
+            // which reads as "moving a bag empties it").
+            //
+            // It needs a view of its own because the carried tile is NOT in
+            // g_items at all — the display collector excludes the carried unit,
+            // so every earlier attempt to flag it while walking the tiles was
+            // marking something that was never there. Its CONTENTS are still
+            // in g_items with inBag set, which is what makes this possible.
+            if (g_held && g_held->isBag && g_openBags.contains(g_held->key)) {
+                const GridDef hd = g_resolver ? g_resolver(g_held->obj) : GridDef{};
+                View v;
+                v.bagKey = g_held->key;
+                v.bagName = g_held->obj ? g_held->obj->GetName() : "";
+                v.accept = hd.accept;
+                v.carried = true;   // nothing routes into a bag with no place yet
+                v.cols = (std::max)(1, hd.bw);
+                v.minRows = (std::max)(1, hd.bh);
+                v.maxRows = v.minRows;
+                v.open = true;
+                std::vector<Item*> list;
+                for (int i = 0; i < static_cast<int>(g_items.size()); ++i) {
+                    if (g_items[i].inBag == v.bagKey) list.push_back(&g_items[i]);
+                }
+                v.rows = PlaceItems(list, v.cols, v.minRows, v.maxRows);
+                for (auto* it : list) {
+                    if (it->overflow) continue;   // stays hidden; the drop reflows it
+                    v.items.push_back(static_cast<int>(it - g_items.data()));
+                }
+                g_views.push_back(std::move(v));
+            }
+
+            // A filter only counts as full when EVERY bag that accepts it is.
+            // Until then the stackable path must keep starting fresh tiles, or
+            // arrivals would merge into the main pile with space still on the
+            // second shelf.
+            {
+                std::map<std::string, std::pair<int, int>> perAccept;   // total, full
+                for (const auto& slot : slots) {
+                    if (slot.accept.empty() || !bags.contains(slot.key)) continue;
+                    auto& t = perAccept[slot.accept];
+                    ++t.first;
+                    if (bagFull.contains(slot.key)) ++t.second;
+                }
+                for (const auto& [acc, t] : perAccept) {
+                    if (t.first > 0 && t.first == t.second) g_typedBagFull.insert(acc);
+                }
             }
 
             // F2: the trash is one more grid view — a fixed 6x4 virtual bag.
@@ -3351,7 +4632,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // re-placement (the old split pre-assigned inBag, then the view loop
             // re-placed and bounced it back to main). Fresh buys/loot drain into
             // bag space; coins (gold ledger) and bag items (no nesting) never spill.
-            if (!g_openBags.empty()) {
+            const bool anyBag = std::any_of(g_views.begin(), g_views.end(),
+                [](const View& v) { return !v.bagKey.empty() && v.bagKey != kTrashKey; });
+            if (anyBag) {
                 std::vector<Item*> probe;
                 probe.reserve(dummies.size() + mainList.size());
                 for (auto& d : dummies) probe.push_back(&d);   // freed coin cells first
@@ -3360,21 +4643,51 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 for (auto* cand : probe) {
                     // real items only (dummies have no obj); coins keep the ledger
                     if (!(cand->obj && cand->overflow && cand->coinValue < 0)) continue;
-                    for (auto& v : g_views) {   // g_views holds only bag views here
-                        if (v.bagKey.empty()) continue;
-                        if (v.bagKey == kTrashKey) continue;   // F2: never spill INTO the trash
-                        std::vector<Item*> test;
-                        test.reserve(v.items.size() + 1);
-                        for (int idx : v.items) test.push_back(&g_items[idx]);
-                        cand->col = -1;
-                        cand->row = -1;
-                        test.push_back(cand);
-                        const int rows = PlaceItems(test, v.cols, v.minRows, v.maxRows);
-                        if (!cand->overflow) {
-                            cand->inBag = v.bagKey;
-                            v.items.push_back(static_cast<int>(cand - g_items.data()));
-                            v.rows = rows;
-                            break;   // committed into this bag
+                    // E4: a bag never auto-nests. The sims already refuse this
+                    // (ComputeOverloaded checks def.bag, MaxAcceptUnits gates on
+                    // it) — this pass silently allowed it, which was the one
+                    // door out of three that disagreed (rule 97). Nesting is a
+                    // MANUAL act: the player drops a bag into a general bag.
+                    if (cand->def.bag != 0) continue;
+                    // ★Open shelves first. Which bag takes the overflow does not
+                    // change WHETHER it fits (same acceptance set, so the sims
+                    // agree either way) — but an item the player can see land
+                    // beats one that vanishes into a closed bag. Only when no
+                    // open bag has room does it go somewhere closed, and that
+                    // bag's tile is then marked NEW so the board says where.
+                    bool placed = false;
+                    for (int pass = 0; pass < 2 && !placed; ++pass) {
+                        for (auto& v : g_views) {   // g_views holds only bag views here
+                            if (v.bagKey.empty()) continue;
+                            if (v.bagKey == kTrashKey) continue;   // F2: never spill INTO the trash
+                            if (v.carried) continue;   // it is on the cursor, not on the board
+                            if ((pass == 0) != v.open) continue;   // pass 0 = open bags
+                            // ★A typed bag is not overflow space. Without this a
+                            // general spill drops a sword into the ore bag the
+                            // moment the board is full, and the bag stops meaning
+                            // what its name says.
+                            if (!v.accept.empty() &&
+                                v.accept != BagFilter::FilterOf(cand->obj)) {
+                                continue;
+                            }
+                            std::vector<Item*> test;
+                            test.reserve(v.items.size() + 1);
+                            for (int idx : v.items) test.push_back(&g_items[idx]);
+                            cand->col = -1;
+                            cand->row = -1;
+                            test.push_back(cand);
+                            const int rows = PlaceItems(test, v.cols, v.minRows, v.maxRows);
+                            if (!cand->overflow) {
+                                cand->inBag = v.bagKey;
+                                v.items.push_back(static_cast<int>(cand - g_items.data()));
+                                v.rows = rows;
+                                // arrival into a CLOSED bag is invisible — light
+                                // the bag's own tile (the NEW wash: clears on
+                                // hover, exactly the "look in here" it means)
+                                if (!v.open) g_newTiles.insert(v.bagKey);
+                                placed = true;
+                                break;   // committed into this bag
+                            }
                         }
                     }
                 }
@@ -3446,15 +4759,45 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     le.row = it.row;
                     le.bag = it.inBag;
                     le.count = it.count;   // G4: keep owned count in sync with placement
+                    le.rot = it.rot;       // GI62 (pass 2 may have stood it back up)
                 }
             }
 
             // An applied entry has covered the one rebuild it existed for.
             std::erase_if(g_pendingEquip, [](const OffBoardUnit& u) { return u.applied; });
+
+            // ---- GI65: mark tiles that are new since the last look ----------
+            // Runs BEFORE prevKeys is rebuilt, because "did this key exist last
+            // time" is the question. Gold is skipped: coin tiles are a mirror of
+            // the ledger and split and merge on their own as you spend, so they
+            // would light up constantly while meaning nothing.
+            if (g_seenValid && !g_suppressNew) {
+                std::unordered_map<RE::FormID, int> live;
+                for (const auto& it : g_items) {
+                    if (it.obj) live[it.obj->GetFormID()] += it.count;
+                }
+                for (const auto& v : g_views) {
+                    for (int idx : v.items) {
+                        const auto& it = g_items[idx];
+                        if (!it.obj || g_prevKeys.contains(it.key)) continue;
+                        const RE::FormID fid = it.obj->GetFormID();
+                        if (GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid)) continue;
+                        const auto seen = g_seenCount.find(fid);
+                        const int had = seen == g_seenCount.end() ? 0 : seen->second;
+                        if (live[fid] > had) g_newTiles.insert(it.key);
+                    }
+                }
+            }
+            g_suppressNew = false;
+
             g_prevKeys.clear();
             for (const auto& v : g_views) {
                 for (int idx : v.items) g_prevKeys.insert(g_items[idx].key);
             }
+            // a tile that left takes its mark with it
+            std::erase_if(g_newTiles, [](const std::string& k) {
+                return !g_prevKeys.contains(k);
+            });
 
             PruneStaleInstanceLayouts();   // GI1
 
@@ -3462,13 +4805,30 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 IconCache::GetSingleton()->QueueCapture(it.obj);
             }
 
-            // S2: cells occupied on the main board (growth rows included, so the
-            // used value can exceed the total while overloaded — e.g. 147 / 140)
+            // S2: cells occupied / available across the whole carry — the main
+            // board PLUS every bag the player owns (open or closed: a closed
+            // bag still holds its contents, so leaving it out of the total made
+            // the stats panel under-report the pack, user report). The trash is
+            // excluded from both halves: it is a deletion queue, not storage.
+            // Growth rows are included in `used`, so it can exceed the total
+            // while overloaded — e.g. 147 / 140.
             g_spaceUsed = 0;
-            if (!g_views.empty()) {
-                for (int idx : g_views.front().items) {
-                    g_spaceUsed += MaskCells(g_items[idx].mask.rows);
-                }
+            g_spaceTotal = kCols * kMinRows;
+            for (const auto& v : g_views) {
+                if (v.bagKey == kTrashKey) continue;
+                // ★Typed bags are excluded from BOTH halves. Their cells cannot
+                // hold general loot, so counting them as free space answers the
+                // question "can I pick more up" with a yes that is wrong — and
+                // the overload verdict reads the same total, so a full board
+                // would report itself fine while an empty ore bag padded the
+                // number. Their contents leave `used` for the same reason: what
+                // is not in the total must not be in the tally either, or the
+                // panel drifts toward used > total for no visible cause.
+                // Deliberately NOT shown anywhere else: a typed bag answers for
+                // its own space inside its own window.
+                if (!v.accept.empty()) continue;
+                for (int idx : v.items) g_spaceUsed += MaskCells(g_items[idx].mask.rows);
+                if (!v.bagKey.empty()) g_spaceTotal += v.cols * v.minRows;
             }
 
             SKSE::log::info("[GRID] rebuilt: {} items, {} views, gold {}",
@@ -3479,6 +4839,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
     void Rebuild()
     {
+        // ★The search set is keyed by tile, so any rebuild can invalidate it.
+        // Bumping a counter here and recomputing lazily beats calling into the
+        // search from every one of this function's exits.
+        ++g_boardVersion;
+        // typed bags: "arrived this pass" is per-rebuild state and must not
+        // survive into the next one, or a tile keeps being re-routed forever
+        g_freshTiles.clear();
+        // ★g_typedBagFull is deliberately NOT cleared here. The fill loop reads
+        // it EARLY in this rebuild and the bag placement writes it LATE, so
+        // clearing at the top would guarantee the fill loop never sees a full
+        // bag — the mitigation would be dead code that still compiles. It is
+        // re-derived once per pass in BuildViewsAndSpill instead, which is what
+        // makes the lag exactly one rebuild.
+
         // F2 safety net: with the trash CLOSED no layout entry may stay
         // assigned to it (a crash / mid-menu save could persist one via the
         // cosave; the item would render nowhere). Reflow them to first-fit.
@@ -4013,25 +5387,28 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             else leftover.push_back(&p);
         }
 
-        // B: spill leftover probes into OPEN bags with room (a bag item never
-        // nests inside another bag) — mirrors the Rebuild spill pass.
+        // B: spill leftover probes into bags with room, open or closed (a bag
+        // item never nests inside another bag) — mirrors the Rebuild spill
+        // pass, and must walk the SAME list in the SAME order as it does.
         if (aDef.bag == 0) {
-            for (const auto& bagKey : g_openBags) {
+            // ★Typed bags: the SAME accept rule as the real spill. Without it
+            // this sim seated a sword probe in the empty ore bag, said "fits",
+            // and the pickup it green-lit then overflowed for real — accept
+            // verdicts must never disagree with where the item can land.
+            const auto& fl = BagFilter::FilterOf(a_obj);
+            for (const auto& slot : CollectBagSlots(tmp)) {
                 if (leftover.empty()) break;
-                auto bagIt = std::find_if(tmp.begin(), tmp.end(),
-                    [&](const Item& it) { return it.key == bagKey && it.def.bag != 0; });
-                if (bagIt == tmp.end()) continue;
+                if (!slot.accept.empty() && slot.accept != fl) continue;
                 std::vector<Item*> blist;
                 for (auto& it : tmp) {
-                    if (it.inBag == bagKey) blist.push_back(&it);
+                    if (it.inBag == slot.key) blist.push_back(&it);
                 }
                 for (auto* p : leftover) {   // reset from the main-board sim
                     p->col = -1;
                     p->row = -1;
                     blist.push_back(p);
                 }
-                PlaceItems(blist, (std::max)(1, bagIt->def.bw),
-                           (std::max)(1, bagIt->def.bh), (std::max)(1, bagIt->def.bh));
+                PlaceItems(blist, slot.cols, slot.rows, slot.rows);
                 std::vector<Item*> still;
                 for (auto* p : leftover) {
                     if (!p->overflow) ++fitTiles;
@@ -4113,9 +5490,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
             PlaceItems(list, kCols, kMinRows, kMinRows);   // hard board
 
-            // B: hard-board overflow drains into OPEN bags (mirrors Rebuild's
-            // spill) — an item that a bag can hold is NOT overloaded. Coins and
-            // bag items can't spill: their overflow is a genuine overload.
+            // B: hard-board overflow drains into bag space, open or closed
+            // (mirrors Rebuild's spill) — an item a bag can hold is NOT
+            // overloaded. Coins and bag items can't spill: their overflow is a
+            // genuine overload. This MUST agree with MaxAcceptUnits, or an item
+            // it just accepted is judged overloaded the same frame (crimson
+            // space + the forced-walk debuff).
             std::vector<Item*> spill;
             bool hardOverflow = false;
             for (auto& it : tmp) {
@@ -4127,28 +5507,30 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     hardOverflow = true;
                 }
             }
-            for (const auto& bagKey : g_openBags) {
+            for (const auto& slot : CollectBagSlots(tmp)) {
                 if (spill.empty()) break;
-                const Item* bagItem = nullptr;
-                for (auto& it : tmp) {
-                    if (it.key == bagKey && it.def.bag != 0) { bagItem = &it; break; }
-                }
-                if (!bagItem) continue;
-                const int bw = (std::max)(1, bagItem->def.bw);
-                const int bh = (std::max)(1, bagItem->def.bh);
                 std::vector<Item*> occ;
                 for (auto& it : tmp) {
-                    if (it.inBag == bagKey) occ.push_back(&it);
+                    if (it.inBag == slot.key) occ.push_back(&it);
                 }
                 for (auto sit = spill.begin(); sit != spill.end();) {
                     Item* cand = *sit;
+                    // ★Typed bags: same accept rule as the real spill — an
+                    // empty ore bag must not absolve a board overflowing with
+                    // swords, or the debuff turns off while the overflow row
+                    // is visibly full.
+                    if (!slot.accept.empty() && cand->obj &&
+                        slot.accept != BagFilter::FilterOf(cand->obj)) {
+                        ++sit;
+                        continue;
+                    }
                     std::vector<Item*> test = occ;
                     cand->col = -1;
                     cand->row = -1;
                     test.push_back(cand);
-                    PlaceItems(test, bw, bh, bh);
+                    PlaceItems(test, slot.cols, slot.rows, slot.rows);
                     if (!cand->overflow) {
-                        cand->inBag = bagKey;
+                        cand->inBag = slot.key;
                         occ.push_back(cand);
                         sit = spill.erase(sit);
                     } else {
@@ -4164,22 +5546,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
     int SpaceUsed() { return g_spaceUsed; }
 
-    int SpaceTotal() { return kCols * kMinRows; }
-
-    int BagFreeCells()
-    {
-        // B: free cells across every OPEN bag (from the last rebuild) — the
-        // R-key "take everything that fits" budget adds this so a full main
-        // board still drains loot into bag space.
-        int free = 0;
-        for (const auto& v : g_views) {
-            if (v.bagKey.empty()) continue;   // main board
-            int used = 0;
-            for (int idx : v.items) used += MaskCells(g_items[idx].mask.rows);
-            free += (std::max)(0, v.cols * v.minRows - used);
-        }
-        return free;
-    }
+    // ⛔The old companion `BagFreeCells()` is gone. It existed because the
+    //  total counted only the main board, so the take-all budget had to add
+    //  bag room back by hand — two implementations of "how much room is
+    //  there", and the one that mattered silently skipped closed bags AND
+    //  counted the trash as storage. There is now one answer: total - used.
+    int SpaceTotal() { return g_spaceTotal; }
 
     void PickupPartial(RE::TESBoundObject* a_obj, int a_count,
                        const std::string& a_srcKey, int a_srcTotal)
@@ -4241,7 +5613,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return;
         }
 
+        int srcRot = 0;
         if (auto li = g_layout.find(a_srcKey); li != g_layout.end()) {
+            srcRot = li->second.rot;   // GI62: a fragment leaves as its stack lies
             li->second.count -= a_count;
             if (li->second.count <= 0) g_layout.erase(li);   // took the whole tile
         }
@@ -4249,12 +5623,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         Held h;
         h.key.clear();            // assigned on drop (new tile) or absorbed (merge)
         h.obj = a_obj;
-        h.mask = MaskOf(d);
+        h.SetRot(CanRotate(d) ? srcRot : 0);
+        h.mask = MaskOf(d, h.rot);
         h.count = a_count;
         h.isBag = d.bag != 0;
         h.defScale = d.scale;
-        h.offX = h.mask.w * CellPx() * 0.5f;
-        h.offY = h.mask.h * CellPx() * 0.5f;
+        HoldByPivot(h, d);   // GI62d
         h.justPicked = true;
         h.preSplit = true;
         for (const auto& si : g_items) {   // GI36: carry the source tile's star
@@ -4518,15 +5892,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
         }
         if (!a_obj->Is(RE::FormType::Book) && HasDescCached(a_obj)) glow |= 2;
-        // GI46: per-unit STATUS bits (drawn as border rings, not halos)
+        // GI66: per-unit STATUS bit. Poison is drawn as the top-right droplet,
+        // NOT as a halo -- the switch above must never see this bit.
         if (a_xl) {
             if (const auto* xp = a_xl->GetByType<RE::ExtraPoison>();
                 xp && xp->poison) {
                 glow |= 4;
-            }
-            if (const auto* xh = a_xl->GetByType<RE::ExtraHealth>();
-                xh && xh->health > 1.0f) {
-                glow |= 8;
             }
         }
         return glow;
@@ -4537,101 +5908,414 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // Mabinogi-style: hugging the corner, full black outline so the count
         // reads on any icon underneath (all skins are dark-grounded)
         const ImVec2 tp(a_tileMin.x + 2.0f, a_tileMin.y - 1.0f);
-        const ImU32 oc = IM_COL32(0, 0, 0, 255);
-        for (int oy = -1; oy <= 1; ++oy) {
-            for (int ox = -1; ox <= 1; ++ox) {
-                if (ox == 0 && oy == 0) continue;
-                a_dl->AddText(ImVec2(tp.x + ox, tp.y + oy), oc, a_text);
+        // ★Eight passes of black is a LOT of edge, and it is there because the
+        // count sits on an item picture, not on the panel. But on a pale skin
+        // the figure itself is dark, so the ring merges with it into a smudge
+        // — the same trap the title fell into. Skins whose ink is dark get the
+        // figure alone; the picture under it is what they contrast against.
+        if (!Theme::S().lightPanel || Theme::InkNeedsOutline()) {
+            const ImU32 oc = IM_COL32(0, 0, 0, 255);
+            for (int oy = -1; oy <= 1; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    if (ox == 0 && oy == 0) continue;
+                    a_dl->AddText(ImVec2(tp.x + ox, tp.y + oy), oc, a_text);
+                }
             }
         }
-        a_dl->AddText(tp, Theme::Col(Theme::S().hi, 1.0f), a_text);
+        // the count already carries a full black outline, so the fill can be
+        // the plain emphasis colour on any panel — light or dark
+        a_dl->AddText(tp, Theme::Val(), a_text);
+    }
+
+    // ★See Grid.h. Drawn immediately before the sprite it belongs to, from the
+    // same dw/dh/centre — a separate pass would have to recompute that sizing,
+    // and two copies of it drifting apart puts the shadow off the item.
+    void DrawItemShadow(ImDrawList* a_dl, void* a_srv, const ImVec2& a_centre,
+                        float a_dw, float a_dh, float a_deg)
+    {
+        if (!a_dl || !a_srv) return;
+        const float opac = Theme::ShadowOpacity();
+        if (opac <= 0.002f) return;
+
+        const float S    = Theme::Scale();
+        const float blur = Theme::ShadowBlur() * S;
+        // DISTANCE falls toward the lower right, the direction the capture rig
+        // already lights from (az -37, el +34 — the lamp is up and to the LEFT,
+        // so this is where the item's own shading says its shadow goes). At 0
+        // the offset vanishes and the spread is ambient, which is also what
+        // keeps the shadow symmetric under the 90-degree tile rotations.
+        const float off = Theme::ShadowDist() * S * 0.70710678f;
+        const ImVec2 c(a_centre.x + off, a_centre.y + off);
+        const ImVec2 sz(a_dw, a_dh);
+
+        if (blur < 0.05f) {
+            const int a = static_cast<int>(opac * 255.0f + 0.5f);
+            if (a > 0) AddImageRot(a_dl, a_srv, c, sz, a_deg, IM_COL32(0, 0, 0, a));
+            return;
+        }
+
+        // ★★The blur is N stamps of the sprite itself on a ring of radius
+        // `blur`, not a sample of a pre-blurred texture. The baked silhouette
+        // this used to read from went through a 96px canvas — 300px capture
+        // DOWN to 96, blurred, then back UP to the tile — and that round trip
+        // put a FLOOR under the softness. Four attempts at tuning its radius
+        // all landed in the same place, because the number being tuned was
+        // never what made it soft. Stamping the sprite runs at full capture
+        // resolution: blur 0 is the exact outline, and every value above it
+        // spreads by the pixels it says.
+        //
+        // Cheap despite the count: consecutive stamps share one texture, so
+        // ImGui merges them into a single draw command — the cost is vertices
+        // (17 quads instead of 1), not draw calls.
+        //
+        // ★Two rings, the inner one at 0.55r and rotated half a step, once the
+        // radius is wide enough for a single ring to read as eight petals
+        // rather than as a blur. Below that the inner ring would sit on top of
+        // the centre stamp and buy nothing.
+        constexpr int kSpokes = 8;
+        const bool    twoRing = blur >= 1.5f;
+        const int     taps    = 1 + kSpokes * (twoRing ? 2 : 1);
+
+        // ★Stacked alpha is NOT additive: N layers of `a` come out at
+        // 1-(1-a)^N. Dividing the target by N would leave the middle of the
+        // shadow far too dark, so invert the compositing instead — then the
+        // fully-covered interior lands exactly on OPACITY and the fringe, which
+        // only some of the stamps reach, falls off on its own.
+        const float per = 1.0f - std::pow(1.0f - opac, 1.0f / static_cast<float>(taps));
+        const int   pa  = static_cast<int>(per * 255.0f + 0.5f);
+        if (pa <= 0) return;
+        const ImU32 col = IM_COL32(0, 0, 0, pa);
+
+        AddImageRot(a_dl, a_srv, c, sz, a_deg, col);
+        constexpr float kStep = 6.28318531f / static_cast<float>(kSpokes);
+        for (int i = 0; i < kSpokes; ++i) {
+            const float t = static_cast<float>(i) * kStep;
+            AddImageRot(a_dl, a_srv,
+                ImVec2(c.x + std::cos(t) * blur, c.y + std::sin(t) * blur),
+                sz, a_deg, col);
+        }
+        if (!twoRing) return;
+        const float ir = blur * 0.55f;
+        for (int i = 0; i < kSpokes; ++i) {
+            const float t = (static_cast<float>(i) + 0.5f) * kStep;
+            AddImageRot(a_dl, a_srv,
+                ImVec2(c.x + std::cos(t) * ir, c.y + std::sin(t) * ir),
+                sz, a_deg, col);
+        }
+    }
+
+    // ★★See Grid.h. ONE wedge per item, at the footprint's top-right.
+    // Black underneath so the colour reads on a pale sheet as well as on a
+    // dark panel — the same trick every marker on this tile already uses.
+    void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
+                         const ImVec2& a_boxMax, std::uint8_t a_haloBits)
+    {
+        const std::uint8_t bits = a_haloBits & 0x3;
+        if (!a_dl || !bits) return;
+        const float cell = CellPx();
+        const float d    = cell * kWedgeFrac;
+        const float rim  = RimPx();
+        // ★★Pull in to the SHADED area, not to the tile rectangle. The occupied
+        // cell's fill steps back from the hairline (DrawOccupancyPass: shadeIn),
+        // so a wedge anchored to the raw box straddles the grid line and looks
+        // pasted on top of the board rather than set into the item's own ground.
+        // Same rule the fill uses, so the two edges land together.
+        const float in  = Theme::S().engravedCells
+                        ? Theme::kGrooveW * Theme::Scale() * 0.5f : 1.0f;
+        const float x1  = a_boxMax.x - in;
+        const float y0  = a_boxMin.y + in;
+        // ★GI67: unique wins outright over enchanted — see DrawMarkerTray.
+        const ImU32 col = (bits & 0x2) ? IM_COL32(232, 182, 74, 255)    // unique
+                                       : IM_COL32(79, 143, 240, 255);   // enchanted
+
+        // outer: the full wedge, in black. Both legs are d, so the top and the
+        // right side are the same length — it is a right ISOSCELES triangle.
+        a_dl->AddTriangleFilled(ImVec2(x1 - d, y0), ImVec2(x1, y0),
+                                ImVec2(x1, y0 + d), IM_COL32(11, 11, 11, 255));
+
+        // ★★inner: inset on ALL THREE sides, not scaled from the shared corner.
+        // The first cut drew a smaller triangle sharing the right-angle vertex,
+        // which puts the whole difference on the hypotenuse — an outline on one
+        // side only. Offsetting every edge inward by rim moves the right angle
+        // by (rim, rim) and costs rim*(2 + sqrt2) of leg: rim off the top, rim
+        // off the right, and rim*sqrt2 where the hypotenuse advances.
+        const float di = d - rim * (2.0f + 1.41421356f);
+        if (di > 0.5f) {
+            const float ix = x1 - rim;
+            const float iy = y0 + rim;
+            a_dl->AddTriangleFilled(ImVec2(ix - di, iy), ImVec2(ix, iy),
+                                    ImVec2(ix, iy + di), col);
+        }
+    }
+
+    // ★See Grid.h. Shared by the grid, the equipment doll and the partner
+    // window so one item cannot look like two different items.
+    void DrawMarkerTray(ImDrawList* a_dl, const ImVec2& a_boxMin, const ImVec2& a_boxMax,
+                        bool a_fav, bool a_stolen, bool a_poisoned)
+    {
+        if (!a_dl || (!a_fav && !a_stolen && !a_poisoned)) return;
+        const float cell  = CellPx();
+        const float mw    = cell * kMarkFrac;
+        const float r     = mw * 0.5f;
+        const float rim   = RimPx();
+        const float gap   = cell * kGapFrac;
+        const float inset = cell * kInsetFrac;
+        const ImU32 oc    = IM_COL32(11, 11, 11, 255);
+
+        float       cx = a_boxMax.x - r - inset;   // rightmost marker centre
+        const float cy = a_boxMax.y - r - inset;
+
+        if (a_stolen) {
+            a_dl->AddCircleFilled(ImVec2(cx, cy), r, IM_COL32(206, 64, 52, 255));
+            a_dl->AddCircle(ImVec2(cx, cy), r, oc, 0, rim);
+            cx -= mw + gap;
+        }
+        if (a_poisoned) {
+            // ★Sized from the shared HEIGHT, not the shared width: the point
+            // adds kDropTipD*r on top of the circle, so a droplet drawn at the
+            // others' width would stand 30% taller than the row. Width follows
+            // from that, which is why it is the narrow one.
+            const float dw = mw / ((1.0f + kDropTipD) * 0.5f);
+            // the drop's bounding centre sits 0.3*radius above its circle
+            // centre — offset so all three share one centre line
+            DrawPoisonDrop(a_dl, ImVec2(cx, cy + dw * 0.5f * (kDropTipD - 1.0f) * 0.5f), dw);
+            cx -= mw + gap;
+        }
+        if (a_fav) {
+            // ★★Fixed white, not sk.hi. The favourite mark used to take the
+            // skin's bright accent, which is near-white on four skins, dark
+            // ochre on the parchment one and teal on Simple — the same flag
+            // reading as a different thing per skin. It is the player's own
+            // mark; it should not change meaning with the wallpaper.
+            constexpr ImU32 kFavCol = IM_COL32(245, 242, 234, 255);
+            const ImVec2 q0(cx, cy - r), q1(cx + r, cy);
+            const ImVec2 q2(cx, cy + r), q3(cx - r, cy);
+            a_dl->AddQuadFilled(q0, q1, q2, q3, kFavCol);
+            a_dl->AddQuad(q0, q1, q2, q3, oc, rim);
+        }
     }
 
     void DrawGlow(ImDrawList* a_dl, RE::TESBoundObject* a_obj, std::uint8_t a_bits,
                   const ImVec2& a_iconMin, const ImVec2& a_iconMax,
-                  const ImVec2& a_boxMin, const ImVec2& a_boxMax)
+                  const ImVec2& a_boxMin, const ImVec2& a_boxMax, int a_rot)
     {
-        if (!a_bits || !a_dl) return;
-        const auto ga = [](int a_a) {
-            return static_cast<std::uint32_t>((std::min)(255.0f,
-                a_a * Theme::GlowGain()));
-        };
-        // GI46: bits 1|2 = rarity HALO (permanent identity), bits 4|8 = status
-        // RINGS (poison / temper -- transient, drawn as border strokes so they
-        // never fight the halo). The halo switch must see ONLY its own bits, or
-        // a poison-only tile would fall into the "both rarities" red default.
-        const std::uint8_t haloBits = a_bits & 0x3;
-        if (haloBits) {
-        ImU32 tint;
-        switch (haloBits) {
-        case 1:  tint = IM_COL32(90, 160, 255, ga(82)); break;   // enchanted
-        case 2:  tint = IM_COL32(255, 190, 70, ga(56)); break;   // unique
-        default: tint = IM_COL32(255, 80, 60, ga(74));  break;   // both
-        }
-        const auto* icon = IconCache::GetSingleton()->Get(a_obj);
-        if (Theme::GlowStyle() == 1 && icon && icon->glowSrv &&
-            icon->gw > icon->gpad * 2 && icon->gh > icon->gpad * 2) {
-            const float dw = a_iconMax.x - a_iconMin.x;
-            const float dh = a_iconMax.y - a_iconMin.y;
-            const float sx = dw / static_cast<float>(icon->gw - icon->gpad * 2);
-            const float sy = dh / static_cast<float>(icon->gh - icon->gpad * 2);
-            a_dl->AddImage(reinterpret_cast<ImTextureID>(icon->glowSrv),
-                ImVec2(a_iconMin.x - icon->gpad * sx, a_iconMin.y - icon->gpad * sy),
-                ImVec2(a_iconMax.x + icon->gpad * sx, a_iconMax.y + icon->gpad * sy),
-                ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), tint);
-        } else if (void* gtex = UIRoot::GlowTexture()) {
-            // GI49 option A: 22% overscan (see DrawGlowPass) -- the radial
-            // halo draws larger than the footprint so its bright core is not
-            // swallowed by the sprite on multi-cell items
-            const float outX = (a_boxMax.x - a_boxMin.x) * 0.11f;
-            const float outY = (a_boxMax.y - a_boxMin.y) * 0.11f;
-            a_dl->AddImage(reinterpret_cast<ImTextureID>(gtex),
-                ImVec2(a_boxMin.x - outX, a_boxMin.y - outY),
-                ImVec2(a_boxMax.x + outX, a_boxMax.y + outY),
-                ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), tint);
-        }
-        }   // haloBits
+        // ★★1.0.5: this used to paint the whole cell (and before that, a halo).
+        // Both are gone — see Grid.h. What remains is the corner wedge, kept
+        // behind the old name so the doll and the partner window keep their one
+        // call site for "mark this item's rarity".
+        (void)a_obj; (void)a_iconMin; (void)a_iconMax; (void)a_rot;
+        DrawRarityWedge(a_dl, a_boxMin, a_boxMax, a_bits);
+    }
 
-        // GI46: status rings -- shared implementation (see DrawStatusRings)
-        DrawStatusRings(a_dl, a_bits, a_boxMin, a_boxMax);
+    namespace
+    {
+        // one queued read at a time — the Book Menu is modal anyway
+        struct PendingRead
+        {
+            RE::FormID    form = 0;
+            std::uint16_t uid = 0;
+            std::uint16_t sig = 0;
+        };
+        std::optional<PendingRead> g_pendingRead;
+    }
+
+    void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig)
+    {
+        if (!a_book) return;
+        g_pendingRead = PendingRead{ a_book->GetFormID(), a_uid, a_sig };
+    }
+
+    void ProcessBookRead()
+    {
+        if (!g_pendingRead) return;
+        const auto req = *g_pendingRead;
+        g_pendingRead.reset();
+
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* book = RE::TESForm::LookupByID<RE::TESObjectBOOK>(req.form);
+        if (!player || !book) return;
+        // already reading something — don't stack Book Menus
+        if (auto* ui = RE::UI::GetSingleton();
+            ui && ui->IsMenuOpen(RE::BookMenu::MENU_NAME)) {
+            return;
+        }
+
+        // The engine's own reader. Handing it the sub-stack keeps a
+        // per-instance name (quest alias / player rename) on the page, and
+        // ref = nullptr is exactly how vanilla opens a book held in the
+        // inventory rather than one lying in the world.
+        auto* xl = ExtraForPool(LiveEntryOf(player, book), req.uid, req.sig);
+        RE::BSString desc;
+        book->GetDescription(desc, book);
+        RE::BookMenu::OpenBookMenu(desc, xl, nullptr, book,
+                                   RE::NiPoint3{}, RE::NiMatrix3{}, 1.0f, true);
+        SKSE::log::info("[BOOK] open '{}' ({:08X})", DisplayNameOf(book, xl), req.form);
+    }
+
+    std::string DefKeyOf(RE::TESForm* a_form)
+    {
+        return a_form ? FormKey(a_form) : std::string{};
+    }
+
+    const char* DisplayNameOf(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl,
+                              RE::InventoryEntryData* a_entry)
+    {
+        if (!a_obj) return "";
+        // ExtraTextDisplayData is where a per-instance name lives — a quest
+        // alias substitution, or a name the player typed. Both are invisible
+        // to TESForm::GetName(), which returns the raw record text.
+        if (a_xl) {
+            if (const char* n = a_xl->GetDisplayName(a_obj); n && *n) return n;
+        } else if (a_entry) {
+            if (const char* n = a_entry->GetDisplayName(); n && *n) return n;
+        }
+        const char* base = a_obj->GetName();
+        return base ? base : "";
+    }
+
+    namespace
+    {
+        // Vanilla builds an effect line from the magic effect's DESCRIPTION
+        // (MGEF > DNAM) with its <mag> / <dur> / <area> tags filled in. Replace
+        // every occurrence; the tags are lowercase in the game data, but match
+        // case-insensitively so hand-edited mod records still resolve.
+        void FillTag(std::string& a_s, std::string_view a_tag, std::string_view a_val)
+        {
+            const auto same = [](char a_l, char a_r) {
+                return std::tolower(static_cast<unsigned char>(a_l)) ==
+                       std::tolower(static_cast<unsigned char>(a_r));
+            };
+            std::size_t i = 0;
+            while (a_tag.size() <= a_s.size() && i <= a_s.size() - a_tag.size()) {
+                if (std::equal(a_tag.begin(), a_tag.end(), a_s.begin() + i, same)) {
+                    a_s.replace(i, a_tag.size(), a_val);
+                    i += a_val.size();
+                } else {
+                    ++i;
+                }
+            }
+        }
+    }
+
+    // ★ONE board for the whole screen. The partner window used to draw its
+    // own hairline lattice, so a skin that carves or tiles its cells (SIMPLE,
+    // the two Glass skins) got that treatment on the player's half and a bare
+    // accent hairline on the merchant's — the two halves of the same screen
+    // read as different UIs. The lattice is a SKIN decision, so it lives in
+    // one function and every board asks for it.
+    void DrawCellLattice(ImDrawList* dl, const ImVec2& base, int a_cols, int a_rows)
+    {
+        const auto& sk = Theme::S();
+        const float gridW = a_cols * CellPx();
+        const float gridH = a_rows * CellPx();
+        if (sk.engravedCells) {
+            // ★TILES ON THE PANEL, not a carved lattice. The divider is
+            // the WINDOW itself: the gap between cells is simply left
+            // unpainted, which is the only value that actually equals the
+            // panel — painting the panel's own colour there would stack a
+            // second coat and come out darker, not identical.
+            // ★The cell face carries the alpha the OLD two-layer stack
+            // composited to (groove .85 under face .85 = .9775). Taking the
+            // groove away without that would have lightened every cell,
+            // and only the divider was meant to change.
+            const float g = Theme::kGrooveW * Theme::Scale();
+            const ImU32 face  = Theme::Col(sk.cellBg);
+            const ImU32 inner = Theme::Col(sk.cellGroove, sk.cellGroove.w * 0.85f);
+            for (int r = 0; r < a_rows; ++r) {
+                for (int c = 0; c < a_cols; ++c) {
+                    // ★A groove exists BETWEEN cells, never outside the
+                    // board, and each of the two neighbours gives HALF of
+                    // it. Taking the whole groove off one side shifted
+                    // every cell face up-left by g/2 while the item icon
+                    // still centred on the true cell — so the whole grid
+                    // looked offset and the icons looked pushed right.
+                    const float l = (c > 0) ? g * 0.5f : 0.0f;
+                    const float t = (r > 0) ? g * 0.5f : 0.0f;
+                    const float rr = (c + 1 < a_cols) ? g * 0.5f : 0.0f;
+                    const float bb = (r + 1 < a_rows) ? g * 0.5f : 0.0f;
+                    const ImVec2 p0(base.x + c * CellPx() + l, base.y + r * CellPx() + t);
+                    const ImVec2 p1(base.x + (c + 1) * CellPx() - rr,
+                                    base.y + (r + 1) * CellPx() - bb);
+                    dl->AddRectFilled(p0, p1, face);
+                    dl->AddLine(ImVec2(p0.x, p0.y + 0.5f), ImVec2(p1.x, p0.y + 0.5f), inner);
+                    dl->AddLine(ImVec2(p0.x + 0.5f, p0.y), ImVec2(p0.x + 0.5f, p1.y), inner);
+                }
+            }
+        } else if (sk.translucent) {
+            // ★★A TRANSLUCENT panel cannot say "cell" with colour. The
+            // hairline below is the accent at 13%, and on Glass that
+            // accent is a rust red — over a dark cave there is nothing
+            // for it to differ from, so the board simply vanished
+            // ("타일 색상이 구분이 안된다"). Anything painted here
+            // composites with whatever the player is standing in front
+            // of, and that changes every frame.
+            // A CARVED line does not depend on the ground: a dark stroke
+            // and a light one side by side means at least one of the two
+            // is always unlike what is behind it. Same trick the SIMPLE
+            // board uses, minus the filled face — the see-through panel
+            // is the whole point of these skins.
+            // Cell edges: the cell's top and left go DARK and its bottom
+            // and right go LIGHT, which is the sunken read (light from
+            // the top-left, rule 105).
+            const float thin = 1.0f - sk.winBg.w;   // .42 Dark / .62 Clear
+            // ★Strength follows the panel's own alpha: the line is drawn
+            // ON the panel, and the less panel there is the harder it has
+            // to work. Derived, so a future translucent skin needs no new
+            // number of its own.
+            const ImU32 dk = IM_COL32(0, 0, 0,
+                static_cast<int>(255.0f * (0.34f + 0.50f * thin) + 0.5f));
+            const ImU32 lt = IM_COL32(255, 255, 255,
+                static_cast<int>(255.0f * (0.07f + 0.31f * thin) + 0.5f));
+            // 0..cols inclusive: the outermost cells need their carve too,
+            // or the top row and left column read as half-finished
+            for (int c = 0; c <= a_cols; ++c) {
+                const float x = base.x + c * CellPx();
+                dl->AddLine(ImVec2(x - 0.5f, base.y), ImVec2(x - 0.5f, base.y + gridH), lt);
+                dl->AddLine(ImVec2(x + 0.5f, base.y), ImVec2(x + 0.5f, base.y + gridH), dk);
+            }
+            for (int r = 0; r <= a_rows; ++r) {
+                const float y = base.y + r * CellPx();
+                dl->AddLine(ImVec2(base.x, y - 0.5f), ImVec2(base.x + gridW, y - 0.5f), lt);
+                dl->AddLine(ImVec2(base.x, y + 0.5f), ImVec2(base.x + gridW, y + 0.5f), dk);
+            }
+        } else {
+        // ★A faint ground under every cell, on light panels only. Without it a
+        // pale sheet and a pale item picture have nothing between them — the
+        // white sacks in the screenshot sat ON the paper with no cell to sit
+        // IN. Dark skins never needed it: their panel already is the ground.
+        if (sk.cellBg.w > 0.0f) {
+            const ImU32 face = Theme::Col(sk.cellBg);
+            for (int r = 0; r < a_rows; ++r) {
+                for (int c = 0; c < a_cols; ++c) {
+                    const ImVec2 p0(base.x + c * CellPx(), base.y + r * CellPx());
+                    dl->AddRectFilled(p0,
+                        ImVec2(p0.x + CellPx() - 1.0f, p0.y + CellPx() - 1.0f), face);
+                }
+            }
+        }
+        // v9: hairline cell grid inside an acc 20% outer border
+        // ★Alpha .13 is tuned for a bright accent on a dark panel. On a light
+        // panel acc IS the dark colour, but it is being laid over a pale sheet
+        // where 13% of anything is invisible — the board had no cells at all.
+        const ImU32 lineCol = Theme::Acc(sk.lightPanel ? 0.30f : 0.13f);
+        for (int c = 1; c < a_cols; ++c) {
+            dl->AddLine(ImVec2(base.x + c * CellPx(), base.y),
+                ImVec2(base.x + c * CellPx(), base.y + gridH), lineCol);
+        }
+        for (int r = 1; r < a_rows; ++r) {
+            dl->AddLine(ImVec2(base.x, base.y + r * CellPx()),
+                ImVec2(base.x + gridW, base.y + r * CellPx()), lineCol);
+        }
+        }
     }
 
     void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count, int a_coinValue,
                          int a_price, bool a_isBuy, RE::TESObjectREFR* a_owner,
                          ExtraScope a_scope, std::uint16_t a_uid, int a_xlIdx,
-                         std::uint16_t a_sig, int a_hand)
+                         std::uint16_t a_sig, int a_hand, const TileContext& a_tile)
     {
         if (!a_obj) return;
         const auto& sk = Theme::S();
-        ImGui::BeginTooltip();
-        if (a_count > 1) {
-            ImGui::TextColored(sk.hi, "%s  x%d", a_obj->GetName(), a_count);
-        } else {
-            ImGui::TextColored(sk.hi, "%s", a_obj->GetName());
-        }
-        if (a_coinValue >= 0) {   // G2: represented / stored gold
-            ImGui::TextColored(sk.hi, "%dG", a_coinValue);
-        }
-
-        // one effect per line: "Name 50 (10s)" — shared by potions/enchants
-        auto effectLine = [&](RE::Effect* a_e, const ImVec4& a_col) {
-            if (!a_e || !a_e->baseEffect) return;
-            const char* n = a_e->baseEffect->GetName();
-            if (!n || !*n) return;
-            const float mag = a_e->effectItem.magnitude;
-            const std::uint32_t dur = a_e->effectItem.duration;
-            char b[160];
-            if (mag > 0.0f && dur > 0) {
-                std::snprintf(b, sizeof(b), "%s %.0f (%us)", n, mag, dur);
-            } else if (mag > 0.0f) {
-                std::snprintf(b, sizeof(b), "%s %.0f", n, mag);
-            } else if (dur > 0) {
-                std::snprintf(b, sizeof(b), "%s (%us)", n, dur);
-            } else {
-                std::snprintf(b, sizeof(b), "%s", n);
-            }
-            ImGui::TextColored(a_col, "%s", b);
-        };
 
         // The OWNER's inventory entry: poison/charge/soul/crafted-enchant extras
         // all live there, not on the base form.
@@ -4663,6 +6347,120 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             break;
         case ExtraScope::kAny:  break;
         }
+
+        Theme::PushTipStyle();
+        ImGui::BeginTooltip();
+        // ★GI61: a UNIT-scoped tile with no extra list means this unit HAS
+        // none — NOT "look the name up somewhere else". An entry's display
+        // name is its FIRST sub-stack's, so handing the entry over here made
+        // every plain dagger borrow the tempered one's name ("Fine Dagger"
+        // x3) while the temper badge and the rest of the tooltip, which read
+        // the unit's own extra data, correctly showed only one. Only an
+        // AGGREGATE cell may fall back to the entry.
+        const char* nm = DisplayNameOf(a_obj, scoped,
+            a_scope == ExtraScope::kAny ? entry : nullptr);
+        if (a_count > 1) {
+            ImGui::TextColored(Theme::TipVal(), "%s  x%d", nm, a_count);
+        } else {
+            ImGui::TextColored(Theme::TipVal(), "%s", nm);
+        }
+        const bool isPouch = GoldCoins::IsPouch(a_obj->GetFormID());
+        if (a_coinValue >= 0) {   // G2: represented / stored gold
+            // GI64: the pouch prints "stored / cap". Without the cap there was
+            // no way to learn the limit short of filling it.
+            if (isPouch) {
+                ImGui::TextColored(Theme::TipVal(), "%s / %s G", Commas(a_coinValue).c_str(),
+                    Commas(GoldCoins::PouchCap()).c_str());
+            } else {
+                ImGui::TextColored(Theme::TipVal(), "%dG", a_coinValue);
+            }
+        }
+
+        // GI64: what this thing is FOR. Only the two items whose behaviour is
+        // ours rather than the game's -- everything else explains itself through
+        // its own stats.
+        const char* rmb = UIRoot::KeyLabel(UIRoot::Act::kSecondary);
+        if (isPouch) {
+            ImGui::Separator();
+            ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::PouchLine1));
+            ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::PouchLine2));
+            ImGui::TextColored(Theme::TipSub(), Lang::T(Lang::Str::PouchLine3), rmb);
+        } else if (a_tile.isBag) {
+            const auto bd = ResolveDef(a_obj);
+            const int bw = (std::max)(1, bd.bw);
+            const int bh = (std::max)(1, bd.bh);
+            ImGui::TextColored(Theme::TipHead(), "%s · ", Lang::T(Lang::Str::BagLabel));
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::TextColored(Theme::TipVal(), Lang::T(Lang::Str::BagCells), bw, bh, bw * bh);
+            ImGui::Separator();
+            // ★A typed bag says so BEFORE the player tries (rule 75). The red
+            // ghost on a bad drop is the answer at the moment of failure; this
+            // is the answer while they are still deciding.
+            if (!bd.accept.empty()) {
+                ImGui::TextColored(Theme::TipBad(), Lang::T(Lang::Str::BagOnly), BagFilter::DisplayName(bd.accept));
+            } else {
+                ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::BagLine1));
+            }
+            ImGui::TextColored(Theme::TipSub(), Lang::T(Lang::Str::BagLine2), rmb);
+        }
+
+        // One effect per line — shared by potions/ingredients and enchantments.
+        // Matching vanilla means matching BOTH halves of what its item card
+        // does: WHICH effects are shown, and WHAT each line says. This used to
+        // key off the effect NAME, which is the opposite set from vanilla's:
+        // enchantment effects mostly have no name and only a description, so
+        // an enchanted robe printed a hidden helper effect ("Fortify Health
+        // 25") and none of the two lines the game itself shows.
+        auto effectLine = [&](RE::Effect* a_e, const ImVec4& a_col) {
+            auto* base = a_e ? a_e->baseEffect : nullptr;
+            if (!base) return;
+            // The engine hides these from every item card and the magic menu:
+            // enchantments carry helper effects not meant to be read.
+            using EFlag = RE::EffectSetting::EffectSettingData::Flag;
+            if (base->data.flags.all(EFlag::kHideInUI)) return;
+
+            // GetMagnitude()/GetDuration()/GetArea() honour the kNoMagnitude /
+            // kNoDuration / kNoArea flags, so a magnitude-less effect can't
+            // print a stray 0.
+            const float         mag  = a_e->GetMagnitude();
+            const std::uint32_t dur  = a_e->GetDuration();
+            const std::uint32_t area = a_e->GetArea();
+
+            std::string line;
+            if (const char* d = base->magicItemDescription.c_str(); d && *d) {
+                line = d;
+                char v[32];
+                std::snprintf(v, sizeof(v), "%.0f", mag);
+                FillTag(line, "<mag>", v);
+                std::snprintf(v, sizeof(v), "%u", dur);
+                FillTag(line, "<dur>", v);
+                std::snprintf(v, sizeof(v), "%u", area);
+                FillTag(line, "<area>", v);
+            }
+            if (line.empty()) {
+                // No description (common on crafted and mod-added effects):
+                // fall back to the old "Name 50 (10s)" form.
+                const char* n = base->GetName();
+                if (!n || !*n) return;
+                char b[160];
+                if (mag > 0.0f && dur > 0) {
+                    std::snprintf(b, sizeof(b), "%s %.0f (%us)", n, mag, dur);
+                } else if (mag > 0.0f) {
+                    std::snprintf(b, sizeof(b), "%s %.0f", n, mag);
+                } else if (dur > 0) {
+                    std::snprintf(b, sizeof(b), "%s (%us)", n, dur);
+                } else {
+                    std::snprintf(b, sizeof(b), "%s", n);
+                }
+                line = b;
+            }
+            // Descriptions are sentences — wrap them at the same width as the
+            // flavour text below rather than stretching the tooltip.
+            ImGui::PushTextWrapPos(300.0f * Theme::Scale());
+            ImGui::TextColored(a_col, "%s", line.c_str());
+            ImGui::PopTextWrapPos();
+        };
+
         auto extraOf = [&]<class T>() -> T* {
             if (a_scope != ExtraScope::kAny) return scoped ? scoped->GetByType<T>() : nullptr;
             if (!entry || !entry->extraLists) return nullptr;
@@ -4693,7 +6491,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const int d = a_mine - cmpVal;
             const ImVec4 c = d > 0 ? ImVec4(0.47f, 0.78f, 0.47f, 1.0f)
                            : d < 0 ? ImVec4(0.8f, 0.32f, 0.28f, 1.0f)
-                                   : sk.inkDim;
+                                   : Theme::TipSub();
             ImGui::SameLine();
             ImGui::TextColored(c, "(%+d)", d);
         };
@@ -4715,7 +6513,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     cmpIsWeap = true;
                 }
             }
-            ImGui::TextColored(sk.inkDim, "%s %d", Lang::T(Lang::Str::Damage), dmg);
+            ImGui::TextColored(Theme::TipSub(), "%s %d", Lang::T(Lang::Str::Damage), dmg);
             diffText(dmg);
         } else if (auto* armo = a_obj->As<RE::TESObjectARMO>()) {
             int arm = static_cast<int>(armo->GetArmorRating());
@@ -4738,13 +6536,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     break;
                 }
             }
-            ImGui::TextColored(sk.inkDim, "%s %d", Lang::T(Lang::Str::Armor), arm);
+            ImGui::TextColored(Theme::TipSub(), "%s %d", Lang::T(Lang::Str::Armor), arm);
             diffText(arm);
         } else {
             RE::MagicItem* magic = a_obj->As<RE::AlchemyItem>();
             if (!magic) magic = a_obj->As<RE::IngredientItem>();
             if (magic) {
-                for (auto* e : magic->effects) effectLine(e, sk.inkDim);
+                for (auto* e : magic->effects) effectLine(e, Theme::TipSub());
             }
         }
 
@@ -4756,7 +6554,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // binding visible at all (before this, tempering showed NOTHING).
         if (const auto* xh = extraOf.operator()<RE::ExtraHealth>();
             xh && xh->health > 1.0f) {
-            ImGui::TextColored(sk.sel, "%s +%d%%", Lang::T(Lang::Str::TemperLabel),
+            ImGui::TextColored(Theme::TipGood(), "%s +%d%%", Lang::T(Lang::Str::TemperLabel),
                 static_cast<int>(std::lroundf((xh->health - 1.0f) * 100.0f)));
         }
 
@@ -4765,7 +6563,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             book && book->TeachesSpell()) {
             if (auto* spell = book->GetSpell()) {
                 const bool known = player && player->HasSpell(spell);
-                ImGui::TextColored(sk.sel, "%s: %s%s%s%s",
+                ImGui::TextColored(Theme::TipGood(), "%s: %s%s%s%s",
                     Lang::T(Lang::Str::Teaches), spell->GetName(),
                     known ? " (" : "", known ? Lang::T(Lang::Str::Known) : "",
                     known ? ")" : "");
@@ -4780,20 +6578,35 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 ench = ef->formEnchanting;
                 maxCharge = ef->amountofEnchantment;
             }
-            if (auto* xe = extraOf.operator()<RE::ExtraEnchantment>();
-                xe && xe->enchantment) {
-                ench = xe->enchantment;
-                maxCharge = xe->charge;
+            // ★An enchantment stuck on the ITEM is used only when the record
+            // carries none. The engine refuses to re-enchant something that is
+            // already enchanted, so the two do not normally coexist — and where
+            // they do, the record is what the thing IS. Vanilla's own item card
+            // reads it that way (measured on a robe carrying both).
+            //
+            // Letting the attached one win is not a cosmetic choice: any mod
+            // that rides an enchantment slot as a MARKER — our own socket
+            // extension does exactly that on already-enchanted gear — would
+            // otherwise blank out the item's real description, since a marker
+            // effect is deliberately hidden from the UI. One robe in a test save
+            // showed "Increases your Health by 25 points." in place of both of
+            // its actual effects.
+            if (!ench) {
+                if (auto* xe = extraOf.operator()<RE::ExtraEnchantment>();
+                    xe && xe->enchantment) {
+                    ench = xe->enchantment;
+                    maxCharge = xe->charge;
+                }
             }
             if (ench) {
-                for (auto* e : ench->effects) effectLine(e, sk.sel);
+                for (auto* e : ench->effects) effectLine(e, Theme::TipGood());
                 // charge (weapons drain per hit; armour enchants don't)
                 if (a_obj->Is(RE::FormType::Weapon) && maxCharge > 0) {
                     float cur = static_cast<float>(maxCharge);
                     if (auto* xc = extraOf.operator()<RE::ExtraCharge>()) {
                         cur = xc->charge;
                     }
-                    ImGui::TextColored(sk.inkDim, "%s %d / %d",
+                    ImGui::TextColored(Theme::TipSub(), "%s %d / %d",
                         Lang::T(Lang::Str::ChargeLabel),
                         static_cast<int>(cur), static_cast<int>(maxCharge));
                 }
@@ -4802,7 +6615,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         // applied poison (weapons)
         if (auto* xp = extraOf.operator()<RE::ExtraPoison>(); xp && xp->poison) {
-            ImGui::TextColored(sk.sel, "%s: %s (x%u)",
+            ImGui::TextColored(Theme::TipGood(), "%s: %s (x%u)",
                 Lang::T(Lang::Str::PoisonLabel), xp->poison->GetName(), xp->count);
         }
 
@@ -4819,7 +6632,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 };
                 const auto idx = (std::min)(static_cast<size_t>(lvl),
                     std::size(kSoulNames) - 1);
-                ImGui::TextColored(sk.inkDim, "%s: %s",
+                ImGui::TextColored(Theme::TipSub(), "%s: %s",
                     Lang::T(Lang::Str::SoulLabel), Lang::T(kSoulNames[idx]));
             }
         }
@@ -4832,7 +6645,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 desc->GetDescription(out, a_obj->As<RE::TESForm>());
                 if (out.size() > 0 && out.c_str() && *out.c_str()) {
                     ImGui::PushTextWrapPos(300.0f * Theme::Scale());
-                    ImGui::TextColored(sk.inkDim, "%s", out.c_str());
+                    ImGui::TextColored(Theme::TipSub(), "%s", out.c_str());
                     ImGui::PopTextWrapPos();
                 }
             }
@@ -4841,7 +6654,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // weight is meaningless under the space system (W1) — value only.
         // GI43: THIS unit's value (temper folded in, vanilla parity) -- the
         // scoped list is already resolved above; kAny falls back to the base.
-        ImGui::TextColored(sk.inkDim, "%s %d",
+        ImGui::TextColored(Theme::TipSub(), "%s %d",
             Lang::T(Lang::Str::Value), UnitValueWith(a_obj, scoped));
 
         // Phase 4: barter price (buy on the merchant side, sell on the player
@@ -4851,15 +6664,111 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const bool broke = a_isBuy
                 ? g_gold < a_price
                 : (a_price > 0 && LootBarter::MerchantGold() < a_price);
-            ImGui::TextColored(broke ? ImVec4(0.8f, 0.32f, 0.28f, 1.0f) : sk.hi,
+            ImGui::TextColored(broke ? ImVec4(0.8f, 0.32f, 0.28f, 1.0f) : Theme::TipVal(),
                 "%s: %d",
                 Lang::T(a_isBuy ? Lang::Str::BuyLabel : Lang::Str::SellLabel), a_price);
         }
-        // discoverability: the 3D inspect key is quest-critical (claw glyphs)
-        ImGui::TextColored(sk.inkDim, "%s", Lang::T(Lang::Str::InspectKeyHint));
+        // ── GI50 → GI64: what this tile answers to ──────────────────────────
+        // All of it was undiscoverable, so it used to be printed right here.
+        // It is now RESOLVED here and DRAWN by the screen-bottom prompt bar:
+        // the right-click verb changes with the mode and the tile kind (a dozen
+        // actions), splitting is a modifier nobody would try, compare had no
+        // reason to ever be pressed -- but none of that is a property of the
+        // item, and printing it beside every tooltip put the same six lines on
+        // screen no matter what was hovered.
+        {
+            using Act = UIRoot::Act;
+            const RE::FormID fid = a_obj->GetFormID();
+            const bool isCoin  = GoldCoins::IsCoinForm(fid) && !isPouch;
+            const auto mode    = LootBarter::CurrentMode();
+            const std::string pool = a_tile.key.empty()
+                ? std::string{} : PoolOfKey(std::string(a_tile.key));
+            const bool quest  = !pool.empty() && g_questItem.contains(pool);
+            const bool stolen = !pool.empty() && g_stolen.contains(pool);
+
+            ImGui::Separator();
+
+            // Restrictions first — without these the only feedback is a fail
+            // sound AFTER the action has already been refused.
+            if (quest) {
+                ImGui::TextColored(ImVec4(0.8f, 0.32f, 0.28f, 1.0f), "%s",
+                    Lang::T(Lang::Str::BadgeQuest));
+            }
+            if (stolen) {
+                ImGui::TextColored(ImVec4(0.8f, 0.32f, 0.28f, 1.0f), "%s",
+                    Lang::T(Lang::Str::BadgeStolen));
+            }
+            if (mode == LootBarter::Mode::kBarter && !a_tile.partner &&
+                !isCoin && !LootBarter::MerchantBuys(a_obj, stolen)) {
+                ImGui::TextColored(ImVec4(0.8f, 0.32f, 0.28f, 1.0f), "%s",
+                    Lang::T(Lang::Str::BadgeWontBuy));
+            }
+
+            // Line 1: the two primary actions. Branch order mirrors the click
+            // handlers exactly — if one moves, this must move with it.
+            bool hasVerb = true;
+            Lang::Str verb = Lang::Str::ActEquip;
+            if (a_tile.equipSlot) {
+                verb = Lang::Str::ActUnequip;
+            } else if (a_tile.parked) {
+                verb = Lang::Str::ActRestore;
+            } else if (a_tile.isBag) {
+                verb = g_openBags.contains(std::string(a_tile.key))
+                     ? Lang::Str::ActCloseBag : Lang::Str::ActOpenBag;
+            } else if (isPouch) {
+                verb = Lang::Str::ActWithdraw;
+            } else if (a_tile.partner) {
+                verb = mode == LootBarter::Mode::kBarter     ? Lang::Str::ActBuy
+                     : mode == LootBarter::Mode::kPickpocket ? Lang::Str::ActSteal
+                                                             : Lang::Str::ActTakeIt;
+            } else if (isCoin) {
+                hasVerb = false;   // coins are mirror artefacts — drag only
+            } else if (LootBarter::IsLootMode(mode)) {
+                verb = Lang::Str::ActStoreIn;
+            } else if (mode == LootBarter::Mode::kPickpocket) {
+                verb = Lang::Str::ActPlant;
+            } else if (mode == LootBarter::Mode::kBarter) {
+                verb = Lang::Str::ActSell;
+            } else if (auto* bk = a_obj->As<RE::TESObjectBOOK>()) {
+                verb = bk->TeachesSpell() ? Lang::Str::ActLearn : Lang::Str::ActRead;
+            } else if (a_obj->Is(RE::FormType::AlchemyItem) ||
+                       a_obj->Is(RE::FormType::Ingredient)) {
+                verb = Lang::Str::ActUse;   // drunk / eaten, not worn
+            }
+
+            // ★GI64: nothing is PRINTED here any more. The verb is still worked
+            // out, because the prompt bar needs it -- but the bar is where it is
+            // shown. Keeping a copy in the tooltip meant "RMB equip" appeared
+            // twice on screen at once, once beside the item and once along the
+            // bottom, which is exactly the duplication the bar was built to end.
+            //
+            // The tooltip is now purely what the item IS; every key that does
+            // something lives in one place.
+
+            // ★GI63: EVERY key line left this tooltip for the bottom bar. What
+            // remains here is only what differs per item -- name, effects,
+            // poison, temper, weight, price -- and those lines now start right
+            // under the name instead of below two rows of keys that read the
+            // same on every tile in the game.
+            //
+            // The conditions still have to be computed HERE, because they are
+            // things only the tooltip's context knows: a quest item cannot be
+            // dropped, a coin cannot be starred, the doll and the partner board
+            // do not handle those keys at all.
+            const bool canSplit = !a_tile.equipSlot &&
+                (a_count > 1 || isPouch || (isCoin && a_coinValue > 1));
+            const bool canCompare = a_obj->Is(RE::FormType::Weapon) ||
+                                    a_obj->Is(RE::FormType::Armor);
+            const bool sideBoard = a_tile.partner || a_tile.equipSlot;
+            g_hoverPrompt = { ImGui::GetFrameCount(), canSplit, canCompare,
+                              !sideBoard && !quest,                    // canDrop
+                              !sideBoard && !isCoin && !isPouch,       // canFav
+                              hasVerb, verb };
+        }
         const ImVec2 tipPos = ImGui::GetWindowPos();
         const ImVec2 tipSize = ImGui::GetWindowSize();
         ImGui::EndTooltip();
+        Theme::PopTipStyle();
 
         // SHIFT compare: the equipped counterpart's card beside the tooltip.
         // Drawn on the FOREGROUND draw list — always above every window (a
@@ -4912,6 +6821,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
     void Draw()
     {
+        RotateHeldItem();   // GI62: A / D, before any grid reads the footprint
         if (g_views.empty()) return;
         const float gridW = g_views[0].cols * CellPx();
         // exact width; overflow rows (scripted adds) still wheel-scroll, the
@@ -4920,7 +6830,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // overflow rows spill OVER the GOLD bar strip below (user-reported) —
         // now they clip + scroll inside instead.
         const ImVec2 clipTop = ImGui::GetCursorScreenPos();   // grid origin
-        const float boardH = kMinRows * CellPx() + 1.0f;
+        // ★GI80: EXACTLY the cells — no slack. The +1 that used to be here is
+        // where the overflow bleed came from: the child clips content to its
+        // own rect, so one extra pixel of height is one pixel in which a
+        // scrolled sprite may legally draw past the last cell row. The border
+        // rings were then added to paint over that sliver, which made the
+        // frame load-bearing: move it for looks and the leak comes straight
+        // back (it just did). The pixel cannot leak if it does not exist, and
+        // the frame is free to sit wherever it looks right — it draws on its
+        // own clip now (GI79) and no longer needs room inside the child.
+        const float boardH = kMinRows * CellPx();
         ImGui::BeginChild("fablerim_grid", ImVec2(gridW, boardH), ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar);
         // ROOT CAUSE of the "items spill past the frame" saga: the grid's
@@ -4935,22 +6854,46 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             cdl->PushClipRect(ImVec2(clipTop.x - m, clipTop.y - m),
                 ImVec2(clipTop.x + gridW + m, clipTop.y + boardH + m), true);
             DrawGridView(g_views[0], 0);
-            // Second border ON TOP of the item sprites (they z-cover the
-            // chrome outline): fixed to the 10x14 board — same colour /
-            // thickness / rect as the chrome outline (skin-aware). Must be
-            // on THIS child's list AFTER the passes: the child renders
-            // above its parent, so a parent-list border sat under the items
-            // (user-reported). Other windows / the carried cursor icon
-            // still draw above.
-            // stronger alpha than the inner cell lines (13%) / old outline
-            // (30%) so the board edge stays readable over item sprites
-            cdl->AddRect(clipTop, ImVec2(clipTop.x + gridW, clipTop.y + boardH),
-                Theme::Acc(0.45f));
-            // +1px OUTWARD (user request): a second ring just outside the
-            // board line — 2px total, growing out, not into the cells
-            cdl->AddRect(ImVec2(clipTop.x - 1.0f, clipTop.y - 1.0f),
-                ImVec2(clipTop.x + gridW + 1.0f, clipTop.y + boardH + 1.0f),
-                Theme::Acc(0.45f));
+            cdl->PopClipRect();
+
+            // Border ON TOP of the item sprites (they z-cover the pass-1
+            // chrome outline): fixed to the 10x14 board, so it does not move
+            // when the overflow rows scroll. Must be on THIS child's list
+            // AFTER the passes: the child renders above its parent, so a
+            // parent-list border sat under the items (user-reported). Other
+            // windows / the carried cursor icon still draw above.
+            //
+            // ★GI79: its own clip, and NOT intersected with the current one.
+            // The board rings live OUTSIDE the child's rect now, and the
+            // child's clip is exactly that rect — intersecting would silently
+            // shave them off. (That is what had been happening to the outward
+            // ring all along: it was drawn at -1 and never survived the clip,
+            // which is why the border measured 1px and not the 2px the code
+            // reads like.) Content keeps the strict clip above; only these two
+            // lines are allowed out.
+            const float b = 8.0f * Theme::Scale();
+            cdl->PushClipRect(ImVec2(clipTop.x - b, clipTop.y - b),
+                ImVec2(clipTop.x + gridW + b, clipTop.y + boardH + b), false);
+            // 1px OUTWARD of the cells (user request): the frame stands just
+            // off the board instead of sitting on the outermost cell edge.
+            // Purely a look — the leak it used to cover is gone (GI80), so
+            // this offset is free to be whatever reads best.
+            constexpr float kOff = 1.0f;
+            // 0.36 = what two stacked 20% layers composited to at scroll 0
+            // (1 - 0.8*0.8), the weight the border was judged right at
+            // ★Skipped on a tiles-on-panel board — see the note at the
+            // per-view edge above. It also never agreed with itself here: the
+            // rings are drawn inside the scroll clip, so each side was cut by
+            // a different amount and the four edges came out unequal.
+            if (!Theme::S().engravedCells) {
+                cdl->AddRect(ImVec2(clipTop.x - kOff, clipTop.y - kOff),
+                    ImVec2(clipTop.x + gridW + kOff, clipTop.y + boardH + kOff),
+                    Theme::Acc(0.36f));
+                // second ring 1px further out — 2px of frame, growing outward
+                cdl->AddRect(ImVec2(clipTop.x - kOff - 1.0f, clipTop.y - kOff - 1.0f),
+                    ImVec2(clipTop.x + gridW + kOff + 1.0f, clipTop.y + boardH + kOff + 1.0f),
+                    Theme::Acc(0.20f));
+            }
             cdl->PopClipRect();
         }
         ImGui::EndChild();
@@ -5073,24 +7016,74 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     {
         auto* wm = WinManager::GetSingleton();
 
+        const auto& sk = Theme::S();
         const float S = Theme::Scale();
         for (int vi = 1; vi < static_cast<int>(g_views.size()); ++vi) {
             auto& v = g_views[vi];
+            if (!v.open) continue;   // closed bag: holds items, draws no window
             // symmetric 12px margins around the bag grid (scale-aware) +
             // 2x frame inset for tornFrame skins (breathing room)
-            const ImVec2 size(v.cols * CellPx() + 24.0f * S + 2.0f * Theme::FrameInsetX(),
+            const ImVec2 size(v.cols * CellPx() + 2.0f * Theme::PadX() * S +
+                                  2.0f * Theme::FrameInsetX(),
                               v.rows * CellPx() + 54.0f * S + 2.0f * Theme::FrameInsetY());
 
-            // default: flow to the right of the main window (E5)
+            // default: flow to the right of the main window (E5).
+            // ★Wrapped cascade: one straight diagonal walked the 18th bag
+            // clean off the bottom of the display — the ApplyNext clamp keeps
+            // it reachable now, but a fresh spawn should not need rescuing.
             ImVec2 defPos(200.0f + vi * 60.0f, 200.0f);
             if (auto* mw = wm->Find("main")) {
-                defPos = ImVec2(mw->pos.x + mw->size.x + 8.0f,
-                                mw->pos.y + (vi - 1) * 60.0f);
+                const int step = (vi - 1) % 8;
+                const int band = (vi - 1) / 8;
+                defPos = ImVec2(mw->pos.x + mw->size.x + 8.0f + band * 48.0f,
+                                mw->pos.y + step * 60.0f);
             }
             wm->ApplyNext(v.bagKey, defPos, size);
 
+            // typed bag: the COLLECT control sits in the titlebar, so reserve
+            // its width before the title is laid out (same contract the main
+            // window's EDIT / SETTINGS use)
+            const bool typedBag = !v.accept.empty();
+            const char* colLbl = Lang::T(Lang::Str::BagCollect);
+            const float colW = typedBag ? ImGui::CalcTextSize(colLbl).x + 14.0f * S : 0.0f;
+
             ImGui::Begin(("##bag_" + v.bagKey).c_str(), nullptr, kManagedWinFlags);
-            wm->TitleBar(v.bagKey, v.bagName.c_str());
+            wm->TitleBar(v.bagKey, v.bagName.c_str(), colW);
+            if (typedBag) {
+                const ImVec2 keep = ImGui::GetCursorScreenPos();
+                // ★On the TITLE's own line — the same centring the main
+                // window's EDIT / SETTINGS use. The old anchor was the
+                // content cursor (window padding), which sits well above the
+                // title text, so COLLECT floated over the bag's name.
+                const float lineH = ImGui::GetTextLineHeight();
+                const float btnH = lineH + 6.0f * S;
+                const float textTop = ImGui::GetWindowPos().y + Theme::FrameInsetY() +
+                                      (WinManager::TitleBarH() - lineH) * 0.5f;
+                ImGui::SetCursorScreenPos(ImVec2(
+                    ImGui::GetWindowPos().x + size.x - colW - Theme::FrameInsetX() - 6.0f * S,
+                    textTop - (btnH - lineH) * 0.5f));   // button centres the label
+                if (Sfx::Button(("##collect_" + v.bagKey).c_str(),
+                                ImVec2(colW, btnH))) {
+                    CollectIntoBag(v.bagKey, v.accept);
+                }
+                const bool hov = ImGui::IsItemHovered();
+                auto* dl = ImGui::GetWindowDrawList();
+                const ImVec2 bp = ImGui::GetItemRectMin();
+                const ImVec2 bs = ImGui::GetItemRectSize();
+                const ImVec2 ts = ImGui::CalcTextSize(colLbl);
+                dl->AddText(ImVec2(bp.x + (bs.x - ts.x) * 0.5f,
+                                   bp.y + (bs.y - ts.y) * 0.5f),
+                    ImGui::GetColorU32(hov ? sk.hi : sk.inkDim), colLbl);
+                if (hov) {
+                    // bottom bar, not a floating card under the cursor: the
+                    // card landed on the grid the player is aiming at
+                    char hint[192];
+                    std::snprintf(hint, sizeof(hint), Lang::T(Lang::Str::BagCollectTip),
+                        BagFilter::DisplayName(v.accept));
+                    UIRoot::NoteHoverHint(hint);
+                }
+                ImGui::SetCursorScreenPos(keep);
+            }
             // F2: dim crimson border marks the trash apart from real bags
             if (v.bagKey == kTrashKey) {
                 auto* wdl = ImGui::GetWindowDrawList();
@@ -5184,18 +7177,78 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 hc->QueueCapture(heldIconObj);
                 heldIcon = hc->Get(a_held.obj);   // base icon until captured
             }
+            // ★The carried sprite has to follow the SAME rule as the tile it
+            // came from, both in what it draws and how big. Without this,
+            // picking up a category-icon item put a bare rectangle on the
+            // cursor — the item looked like it had vanished from the board
+            // without arriving anywhere.
+            bool heldFallback = false;
+            Fallback::KeyXform heldX;
+            if (!heldIcon) {
+                hc->QueueCapture(heldIconObj);
+                const auto fb = Fallback::GetDrawn(a_held.obj);
+                heldIcon = fb.icon;
+                heldX = fb.x;
+                heldFallback = heldIcon != nullptr;
+            }
             if (const auto* icon = heldIcon) {
-                const float target = (std::max)(w, h) * 0.95f * a_held.defScale;
-                const float ms = static_cast<float>((std::max)(icon->w, icon->h));
-                const float dw = icon->w / ms * target;
-                const float dh = icon->h / ms * target;
-                const ImVec2 c(a.x + w * 0.5f, a.y + h * 0.5f);
-                UIRoot::DrawItemIcon(fg, icon->srv,
-                    ImVec2(c.x - dw * 0.5f, c.y - dh * 0.5f),
-                    ImVec2(c.x + dw * 0.5f, c.y + dh * 0.5f));
+                float dw, dh;
+                const auto hdef = Grid::ResolveDef(a_held.obj);
+                // same precedence as the tile it came from
+                const float hSc = hdef.fscale != 1.0f ? hdef.fscale : heldX.scale;
+                const float hRot = hdef.frot != 0.0f ? hdef.frot : heldX.rot;
+                const float hOfs = hdef.fx != 0.0f ? hdef.fx : heldX.x;
+                if (heldFallback) {
+                    const float sc = (std::min)(w / static_cast<float>(icon->w),
+                                                h / static_cast<float>(icon->h)) *
+                                     0.85f * hSc;
+                    dw = icon->w * sc;
+                    dh = icon->h * sc;
+                } else {
+                    const float target = (std::max)(w, h) * 0.95f * a_held.defScale;
+                    const float ms = static_cast<float>((std::max)(icon->w, icon->h));
+                    dw = icon->w / ms * target;
+                    dh = icon->h / ms * target;
+                }
+                const ImVec2 nudge = heldFallback ? RotatedOffset(hOfs, a_held.rot)
+                                                  : ImVec2(0.0f, 0.0f);
+                // ★GI62e: the sprite must revolve about THE PIVOT, not about the
+                // middle of its footprint. On a cell-pivot item those are two
+                // different points, and spinning about the middle swings the
+                // grip away from the cursor and back -- on screen the axis looks
+                // like it slides from the haft into the blade and returns
+                // (user-reported on an axe).
+                //
+                // The footprint centre sits at `v` relative to the cursor once
+                // the turn has settled. Winding `v` BACK by however much of the
+                // turn is still outstanding traces exactly the arc it travelled,
+                // so the pivot cell stays nailed under the pointer the whole way.
+                float vx = w * 0.5f - a_held.offX;
+                float vy = h * 0.5f - a_held.offY;
+                const float spin = a_held.rotDeg - a_held.rotAim;   // 0 once settled
+                if (std::fabs(spin) > 0.01f) {
+                    const float r = spin * 3.14159265f / 180.0f;
+                    const float cs = std::cos(r);
+                    const float sn = std::sin(r);
+                    const float nx = vx * cs - vy * sn;
+                    const float ny = vx * sn + vy * cs;
+                    vx = nx;
+                    vy = ny;
+                }
+                const ImVec2 c(io.MousePos.x + vx + nudge.x,
+                               io.MousePos.y + vy + nudge.y);
+                // rotDeg, not rot*90 -- the sprite is mid-turn for ~0.15s
+                UIRoot::DrawItemIconRot(fg, icon->srv, c, ImVec2(dw, dh),
+                    (heldFallback ? hRot : 0.0f) + a_held.rotDeg);
             } else {
                 fg->AddRect(a, ImVec2(a.x + w, a.y + h), IM_COL32(220, 200, 140, 200), 3.0f);
             }
+
+            // GI63: the rotate hint used to ride here in a black box. It moved
+            // to the screen-bottom prompt bar (UIRoot::DrawPromptBar) -- a hint
+            // that chases the cursor competes with the very thing it is telling
+            // you to aim, and a hard-coded black plate matched none of the six
+            // skins.
         }
 
         enum class DropWhere : std::uint8_t
@@ -5266,13 +7319,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 LootBarter::IsLootMode(LootBarter::CurrentMode())) {
                 const auto sd = LootBarter::QueryStoreDrop();
                 if (sd.onCell && sd.freeSpot) {
-                    LootBarter::NoteStoreSpot(a_held.obj, sd.col, sd.row, HeldInstanceSig());
+                    LootBarter::NoteStoreSpot(a_held.obj, sd.col, sd.row, HeldInstanceSig(), a_held.rot);
                     if (g_sound) g_sound(a_held.obj, false);
                     g_held.reset();
                 } else if (sd.onCell && sd.occ) {
                     // swap: the held item takes the occupant's anchor, the
                     // occupant rides the cursor in its place
-                    LootBarter::NoteStoreSpot(a_held.obj, sd.occCol, sd.occRow, HeldInstanceSig());
+                    LootBarter::NoteStoreSpot(a_held.obj, sd.occCol, sd.occRow, HeldInstanceSig(), a_held.rot);
                     if (g_sound) g_sound(a_held.obj, false);
                     const auto occ = sd;   // copy: reset() invalidates the query
                     g_held.reset();
@@ -5283,7 +7336,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // fresh arrival in the first free cell.
                     BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
                                       -1.0f, -1.0f,
-                                      occ.occUid, occ.occXlIdx, occ.occOrd);
+                                      occ.occUid, occ.occXlIdx, occ.occOrd, occ.occRot);
                     LootBarter::NoteCarriedSpot(occ.occSpotKey);
                 } else if (sd.onCell) {
                     // 2+ blockers: keep carrying (player-grid parity)
@@ -5373,7 +7426,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                     g_dropHint = { hintBase,
-                                   g_target.col, g_target.row, v.bagKey };
+                                   g_target.col, g_target.row, v.bagKey, a_held.rot };
                     if (swapDisp) {
                         // free the displaced tile's spot for the incoming item
                         // and put it on the cursor (same as the C4 swap)
@@ -5389,6 +7442,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         g_held->uid = d.uid;
                         g_held->sig = d.sig;       // GI25
                         g_held->fav = d.fav;       // GI36
+                        g_held->SetRot(d.rot);       // GI62
+                        HoldByPivot(*g_held, d.def);
                         if (g_sound) g_sound(d.obj, true);
                         g_needRebuild = true;
                         return true;
@@ -5405,7 +7460,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         {
             // (1) empty cell -> anchor the pin here
             const auto& v = g_views[g_target.view];
-            PlaceTile(a_held.key, g_target.col, g_target.row, v.bagKey, 1);
+            PlaceTile(a_held.key, g_target.col, g_target.row, v.bagKey, 1, a_held.rot);
             if (g_sound) g_sound(a_held.obj, false);
             g_held.reset();
             return true;
@@ -5441,7 +7496,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // the pin anchors at the drop cell, the displaced item
                 // rides the cursor
                 g_layout.erase(tgt.key);
-                PlaceTile(a_held.key, g_target.col, g_target.row, v.bagKey, 1);
+                PlaceTile(a_held.key, g_target.col, g_target.row, v.bagKey, 1, a_held.rot);
                 if (g_sound) {
                     g_sound(a_held.obj, false);
                     g_sound(tgt.obj, true);
@@ -5455,6 +7510,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 g_held->uid = tgt.uid;
                 g_held->sig = tgt.sig;       // GI25
                 g_held->fav = tgt.fav;       // GI36
+                g_held->SetRot(tgt.rot);       // GI62
+                HoldByPivot(*g_held, tgt.def);
             }
             return true;
         }
@@ -5488,7 +7545,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // (1) empty cell -> new tile owning this quantity
             const auto& v = g_views[g_target.view];
             const std::string nk = NextTileKey(HeldPool(a_held));
-            PlaceTile(nk, g_target.col, g_target.row, v.bagKey, a_held.count);
+            PlaceTile(nk, g_target.col, g_target.row, v.bagKey, a_held.count, a_held.rot);
             if (g_sound) g_sound(a_held.obj, false);
             g_held.reset();
             return true;
@@ -5523,7 +7580,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // displaced item rides the cursor
             const std::string nk = NextTileKey(HeldPool(a_held));
             ParkTile(tgt.key);   // survives on the cursor -- keep its flags
-            PlaceTile(nk, g_target.col, g_target.row, v.bagKey, a_held.count);
+            PlaceTile(nk, g_target.col, g_target.row, v.bagKey, a_held.count, a_held.rot);
             if (g_sound) {
                 g_sound(a_held.obj, false);
                 g_sound(tgt.obj, true);
@@ -5537,6 +7594,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_held->uid = tgt.uid;
             g_held->sig = tgt.sig;       // GI25
             g_held->fav = tgt.fav;       // GI36
+            g_held->SetRot(tgt.rot);       // GI62
+            HoldByPivot(*g_held, tgt.def);
             return true;
         }
 
@@ -5705,12 +7764,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         a_held.obj ? a_held.obj->GetName() : "?", a_held.key,
                         g_target.col, g_target.row);
                 }
-                PlaceTile(a_held.key, g_target.col, g_target.row, v.bagKey, a_held.count);
+                PlaceTile(a_held.key, g_target.col, g_target.row, v.bagKey, a_held.count, a_held.rot);
                 if (g_sound) g_sound(a_held.obj, false);
                 g_held.reset();
                 g_needRebuild = true;
+            // ★The swap/merge branch runs when the cell is NOT valid, so the
+            // filter check above does not cover it — a sword dropped onto an
+            // ore tile would trade places with it and end up inside the ore
+            // bag. Same rule, stated again where the second door is.
             } else if (g_target.blockers.size() == 1 &&
-                       !(a_held.isBag && !v.bagKey.empty())) {
+                       // E4b: same narrowed rule as the ghost — a bag may swap
+                       // into a GENERAL bag, never the trash / a typed bag / a
+                       // spot that would loop its own containment chain
+                       !(a_held.isBag && !v.bagKey.empty() &&
+                         (v.bagKey == kTrashKey || !v.accept.empty() ||
+                          NestsWithin(a_held.key, v.bagKey))) &&
+                       !(!v.accept.empty() && a_held.obj &&
+                         BagFilter::FilterOf(a_held.obj) != v.accept)) {
                 const Item disp = g_items[g_target.blockers.front()];
                 const RE::FormID hfid = a_held.obj->GetFormID();
                 const RE::FormID dfid = disp.obj->GetFormID();
@@ -5788,7 +7858,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // save mine; it snaps to the cursor immediately. PARK, not
                     // erase: the item survives, so its flags must too.
                     ParkTile(disp.key);
-                    PlaceTile(a_held.key, g_target.col, g_target.row, v.bagKey, a_held.count);
+                    PlaceTile(a_held.key, g_target.col, g_target.row, v.bagKey, a_held.count, a_held.rot);
                     if (g_sound) {
                         g_sound(a_held.obj, false);
                         g_sound(disp.obj, true);
@@ -5802,6 +7872,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     g_held->uid = disp.uid;
                     g_held->sig = disp.sig;               // GI25
                     g_held->fav = disp.fav;               // GI36
+                    g_held->SetRot(disp.rot);               // GI62
+                    HoldByPivot(*g_held, disp.def);
                     g_needRebuild = true;
                 }
             }
@@ -5830,7 +7902,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // the engine removal was still queued).
                     // F7: an empty drop cell rides the slider as a spot hint
                     if (sd.onCell && sd.freeSpot) {
-                        LootBarter::SetStoreSpotHint(a_held.obj, sd.col, sd.row, HeldInstanceSig());
+                        LootBarter::SetStoreSpotHint(a_held.obj, sd.col, sd.row, HeldInstanceSig(), a_held.rot);
                     }
                     LootBarter::OpenSlider(a_held.obj, a_held.count,
                         LootBarter::XferDir::kStore, a_held.key, 0, a_held.uid, a_held.sig,
@@ -5861,13 +7933,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         if (sd.occ && !merging) {
                             // F7 rule 4: swap — stored item takes the
                             // occupant's anchor, the occupant rides the cursor
-                            LootBarter::NoteStoreSpot(a_held.obj, sd.occCol, sd.occRow, HeldInstanceSig());
+                            LootBarter::NoteStoreSpot(a_held.obj, sd.occCol, sd.occRow, HeldInstanceSig(), a_held.rot);
                             g_held.reset();
                             // GI24: same as the rearrange swap — the occupant
                             // keeps its identity and its pool slot
                             BeginPartnerCarry(sd.occ, sd.occCount, sd.occValue,
                                               -1.0f, -1.0f,
-                                              sd.occUid, sd.occXlIdx, sd.occOrd);
+                                              sd.occUid, sd.occXlIdx, sd.occOrd, sd.occRot);
                             LootBarter::NoteCarriedSpot(sd.occSpotKey);
                             g_needRebuild = true;
                             return true;
@@ -5875,7 +7947,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // F7 rule 3: a FREE spot = stored right there
                         // (2+ blockers leave no spot note -> first-fit)
                         if (sd.freeSpot) {
-                            LootBarter::NoteStoreSpot(a_held.obj, sd.col, sd.row, HeldInstanceSig());
+                            LootBarter::NoteStoreSpot(a_held.obj, sd.col, sd.row, HeldInstanceSig(), a_held.rot);
                         }
                     }
                 }
@@ -6331,6 +8403,65 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return true;
     }
 
+    bool SearchMatches(const char* a_name)
+    {
+        if (g_search.empty()) return true;          // no term: everything matches
+        if (!a_name || !*a_name) return false;
+        std::string low(a_name);
+        // ASCII fold only — and that is enough. Korean, Japanese and Chinese
+        // have no case to fold, so those names compare exactly as typed; Latin
+        // names get the case-insensitive match players expect from a search box.
+        std::transform(low.begin(), low.end(), low.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return low.find(g_search) != std::string::npos;
+    }
+
+    namespace
+    {
+        void RecomputeSearch()
+        {
+            g_searchHit.clear();
+            g_searchVersion = g_boardVersion;
+            if (g_search.empty()) return;
+            for (const auto& it : g_items) {
+                if (SearchMatches(it.obj ? it.obj->GetName() : nullptr)) {
+                    g_searchHit.insert(it.key);
+                }
+            }
+        }
+    }
+
+    bool SearchActive() { return !g_search.empty(); }
+    const std::string& SearchTerm() { return g_search; }
+
+    void SetSearch(const char* a_term)
+    {
+        std::string low = a_term ? a_term : "";
+        std::transform(low.begin(), low.end(), low.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (low == g_search) return;
+        g_search = std::move(low);
+        RecomputeSearch();
+    }
+
+    bool ClearSearch()
+    {
+        if (g_search.empty()) return false;
+        g_search.clear();
+        g_searchHit.clear();
+        return true;
+    }
+
+    bool SearchMisses(const std::string& a_key)
+    {
+        if (g_search.empty()) return false;
+        // a rebuild since the set was built (looted, sold, rearranged)
+        if (g_searchVersion != g_boardVersion) RecomputeSearch();
+        return !g_searchHit.contains(a_key);
+    }
+
+    bool IsTrashConfirmOpen() { return g_trashAsk.active; }
+
     bool CloseTrashConfirm()
     {
         if (!g_trashAsk.active) return false;
@@ -6476,9 +8607,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             a_intfc->WriteRecordData(static_cast<std::int32_t>(out->row));
             WriteStr(a_intfc, out->bag);
             a_intfc->WriteRecordData(static_cast<std::int32_t>(out->count));   // v2
+            a_intfc->WriteRecordData(static_cast<std::int32_t>(out->rot));     // v6
         }
-        SKSE::log::info("[GRID] cosave: saved {} placements, {} open bags",
-            g_layout.size(), g_openBags.size());
+        // v7: the "already seen" baseline. Without it, loading a save would make
+        // the entire inventory read as new the first time the menu opens.
+        // ★Dynamic FormIDs are dropped rather than written: SKSE resolves 0xFF
+        // ids by passing them through unchanged, so a stale one could land on
+        // whatever occupies that slot in the new session.
+        std::uint32_t seenN = 0;
+        for (const auto& [fid, n] : g_seenCount) {
+            if ((fid >> 24) != 0xFF) ++seenN;
+        }
+        a_intfc->WriteRecordData(seenN);
+        for (const auto& [fid, n] : g_seenCount) {
+            if ((fid >> 24) == 0xFF) continue;
+            a_intfc->WriteRecordData(fid);
+            a_intfc->WriteRecordData(static_cast<std::int32_t>(n));
+        }
+        SKSE::log::info("[GRID] cosave: saved {} placements, {} open bags, {} seen counts",
+            g_layout.size(), g_openBags.size(), seenN);
     }
 
     void LoadRecord(SKSE::SerializationInterface* a_intfc, std::uint32_t a_version)
@@ -6531,18 +8678,41 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 std::int32_t f = 0;
                 if (!a_intfc->ReadRecordData(f)) return;
             }
+            if (a_version >= 6) {   // GI62: quarter-turns (older saves = upright)
+                std::int32_t rot = 0;
+                if (!a_intfc->ReadRecordData(rot)) return;
+                le.rot = rot & 3;
+            }
             // Saves written before the filter above carry dynamic keys; drop
             // them on the way in so an existing playthrough gets cleaned too.
             if (!IsPersistableKey(key)) continue;
             layout[std::move(key)] = std::move(le);
         }
 
+        // v7: the seen-counts baseline (GI65). Absent in older saves -- those
+        // load with no baseline, and the first menu opening marks nothing
+        // rather than marking everything.
+        std::unordered_map<RE::FormID, int> seen;
+        if (a_version >= 7) {
+            std::uint32_t n = 0;
+            if (!a_intfc->ReadRecordData(n) || n > kMaxEntries) return;
+            for (std::uint32_t i = 0; i < n; ++i) {
+                RE::FormID raw = 0;
+                std::int32_t cnt = 0;
+                if (!a_intfc->ReadRecordData(raw) || !a_intfc->ReadRecordData(cnt)) return;
+                RE::FormID fid = 0;
+                if (a_intfc->ResolveFormID(raw, fid) && fid != 0) seen[fid] = cnt;
+            }
+        }
+
         g_layout = std::move(layout);
         g_openBags = std::move(bags);
+        g_seenCount = std::move(seen);
+        g_seenValid = !g_seenCount.empty();
         g_layoutLoaded = true;   // do NOT fall back to the legacy ini
         g_capacityDirty = true;
-        SKSE::log::info("[GRID] cosave: loaded {} placements, {} open bags",
-            g_layout.size(), g_openBags.size());
+        SKSE::log::info("[GRID] cosave: loaded {} placements, {} open bags, {} seen counts",
+            g_layout.size(), g_openBags.size(), g_seenCount.size());
     }
 
     void RevertGame(SKSE::SerializationInterface*)
@@ -6556,6 +8726,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_vacated.clear();        // GI28: a flash is about the frame it happened in
         g_layoutLoaded = false;
         g_prevKeys.clear();
+        // GI65: prevKeys is empty after a load, so the very next rebuild would
+        // see EVERY tile as brand new. Suppress that one pass; the baseline
+        // itself is restored by LoadRecord (or stays absent on an old save).
+        g_newTiles.clear();
+        g_seenCount.clear();
+        g_seenValid = false;
+        g_suppressNew = true;
         g_capacityDirty = true;
         g_avResidueCleared = false;   // legacy CW cleanup is per-save
         g_paidGold = 0;
@@ -6574,6 +8751,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_pouchSlider = 0;
         g_overloaded = false;
         g_spaceUsed = 0;
+        g_spaceTotal = kCols * kMinRows;
         // F2: trash state is per-session — parked items simply reappear on
         // their boards after a load (the engine inventory was never touched)
         g_trashOpen = false;
@@ -6582,6 +8760,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_trashDeleteQ.clear();
         g_trashAsk = {};
         RequestRebuild();
+    }
+
+    void NoteInventorySeen()
+    {
+        // ★Snapshot the ENGINE's counts, not the board's. A tile can be missing
+        // from the grid while the item is genuinely held (parked in the trash,
+        // queued for an equip), and using board totals would make those look
+        // like fresh gains the next time the menu opens.
+        g_newTiles.clear();
+        g_seenCount.clear();
+        if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+            auto inv = player->GetInventory();
+            for (const auto& [obj, data] : inv) {
+                if (obj && data.first > 0) g_seenCount[obj->GetFormID()] = data.first;
+            }
+        }
+        g_seenValid = true;
     }
 
     void MarkLayoutFresh()

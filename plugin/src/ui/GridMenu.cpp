@@ -104,6 +104,10 @@ namespace FUI
 
     void GridInventoryMenu::ForceCursor()
     {
+        // Keep asking UNLESS we have taken the pointer over ourselves — the
+        // engine's arrow is what a pad should be moving, so it has to stay up
+        // for that path to work at all.
+        if (!UIRoot::WantsGameCursor()) return;
         if (auto* ui = RE::UI::GetSingleton(); ui && !ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)) {
             SKSE::GetTaskInterface()->AddUITask([]() {
                 if (const auto mq = RE::UIMessageQueue::GetSingleton()) {
@@ -127,6 +131,10 @@ namespace FUI
         IconCache::GetSingleton()->PreRender();   // icon queue owns the request while busy
         ItemPreview::GetSingleton()->Render();
         IconCache::GetSingleton()->PostRender();  // harvest this frame's capture
+        // pixel style: turn a few realistic sprites into dot versions per
+        // frame. AFTER PostRender so a capture that just landed is available
+        // to derive from on this very frame.
+        IconCache::GetSingleton()->TickPixelDerive();
         UIRoot::Render();
         ForceCursor();
     }
@@ -165,6 +173,12 @@ namespace FUI
         case RE::UI_MESSAGE_TYPE::kUpdate:
             break;
         case RE::UI_MESSAGE_TYPE::kUserEvent: {
+            // A book is open on top of us: hands off every key. Swallowing
+            // Cancel here would leave the player unable to close the book.
+            // ★Same for the console — swallowing Cancel there would leave the
+            // player unable to close IT, and our menu must not react to keys
+            // aimed at a command line.
+            if (UIRoot::IsBookOpen() || UIRoot::IsConsoleOpen()) break;
             if (const auto* data = reinterpret_cast<RE::BSUIMessageData*>(a_message.data)) {
                 // While a text field owns the keyboard, EVERY key is text —
                 // swallow the whole user-event channel (J opened the Journal
@@ -204,6 +218,8 @@ namespace FUI
             OnHide();
             break;
         case RE::UI_MESSAGE_TYPE::kScaleformEvent: {
+            // ditto for the mouse/keys relay: the book owns input while it is up
+            if (UIRoot::IsBookOpen()) break;
             auto* scaleformData = reinterpret_cast<RE::BSUIScaleformData*>(a_message.data);
             if (scaleformData && scaleformData->scaleformEvent) {
                 ProcessScaleformEvent(scaleformData);
@@ -247,6 +263,15 @@ namespace FUI
 
     void GridInventoryMenu::ProcessScaleformEvent(const RE::BSUIScaleformData* a_data)
     {
+        // ★★The console is a SEPARATE menu drawn over us, and the engine hands
+        // the same keystrokes to both — so every character typed into it also
+        // landed in whatever ImGui widget had focus (reported: the item search
+        // box filled up while entering a console command). Keys stop here while
+        // it is up; the MOUSE still passes, because the console does not use it
+        // and freezing a window the player can still see would be worse.
+        // Not IsBookOpen's treatment: a book HIDES us and we skip the frame
+        // entirely, whereas the console leaves our windows on screen.
+        const bool console = UIRoot::IsConsoleOpen();
         switch (const auto& fxEvent = a_data->scaleformEvent; fxEvent->type.get()) {
         case RE::GFxEvent::EventType::kMouseDown:
             OnMouseEvent(fxEvent, true);
@@ -258,12 +283,15 @@ namespace FUI
             OnMouseWheelEvent(fxEvent);
             break;
         case RE::GFxEvent::EventType::kKeyDown:
+            if (console) break;
             OnKeyEvent(fxEvent, true);
             break;
         case RE::GFxEvent::EventType::kKeyUp:
+            if (console) break;
             OnKeyEvent(fxEvent, false);
             break;
         case RE::GFxEvent::EventType::kCharEvent:
+            if (console) break;
             OnCharEvent(fxEvent);
             break;
         default:

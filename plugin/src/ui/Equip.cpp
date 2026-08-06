@@ -1,4 +1,5 @@
-#include "ui/Equip.h"
+﻿#include "ui/Equip.h"
+#include "ui/Fallback.h"
 #include "ui/Grid.h"
 #include "ui/Loadout.h"
 #include "ui/IconCache.h"
@@ -93,8 +94,9 @@ namespace FUI::Equip
         // the confirm windows drawn at TOP LEVEL (like Settings). Rendering the
         // confirm inside the equip panel's child window crashed; a top-level
         // window is the proven pattern.
-        bool g_buyOpen = false;    // "+" purchase confirm window open
-        int  g_delTarget = -1;     // preset index pending delete confirm (>=1)
+        bool  g_buyOpen = false;    // "+" purchase confirm window open
+        int   g_delTarget = -1;     // preset index pending delete confirm (>=1)
+        float g_slotsTop = 0.0f;    // GI77: measured tab-strip height
 
         // silhouettes: loaded once, kept for the process lifetime
         std::unordered_map<std::string, IconCache::Icon> g_silhouettes;
@@ -338,8 +340,36 @@ namespace FUI::Equip
 
             // frame (v9: border only; filled slots get the skin's filled
             // accent + faint fill)
-            if (eq) {
-                dl->AddRectFilled(p0, p1, Theme::Col(sk.filled, 0.05f), sk.rounding);
+            // ★engravedCells: every slot wears the SAME heavy frame, worn or
+            // not, and "worn" is said by the darker ground alone. A bright rim
+            // on the worn ones turned the doll into a scatter of highlights —
+            // the reference marks occupancy with ground, never with rim.
+            if (sk.engravedCells) {
+                // ★A doll slot IS a grid cell — same face, same carved shadow,
+                // no border and no drop shadow. It used to be a bordered card
+                // floating on the panel while the board next to it was tiles,
+                // so the two halves of one window spoke different languages.
+                // Occupancy is said by the ground, exactly as on the board.
+                dl->AddRectFilled(p0, p1, Theme::Col(sk.cellBg), sk.rounding);
+                if (eq) dl->AddRectFilled(p0, p1, Theme::Col(sk.shade), sk.rounding);
+                const ImU32 inner = Theme::Col(sk.cellGroove, sk.cellGroove.w * 0.85f);
+                dl->AddLine(ImVec2(p0.x, p0.y + 0.5f), ImVec2(p1.x, p0.y + 0.5f), inner);
+                dl->AddLine(ImVec2(p0.x + 0.5f, p0.y), ImVec2(p0.x + 0.5f, p1.y), inner);
+            } else if (eq) {
+                // ★A worn slot is an occupied cell — same ground the grid gives
+                // an item, so "there is something here" reads the same way in
+                // both places. A 5% accent wash said nothing on a light panel.
+                // ★★Nor on a TRANSLUCENT one, and there for a sharper reason:
+                // the mark is 0.05*(filled - panel), and the panel climbs with
+                // whatever is behind the window until it meets the filled
+                // colour — measured +3.5 on snow, which is nothing. Skins that
+                // let the world through take the grid's ground, which is tuned
+                // across the whole range of backgrounds. Opaque skins keep the
+                // wash: they have no background to lose to.
+                dl->AddRectFilled(p0, p1,
+                    sk.lightPanel || sk.translucent
+                        ? Theme::OccupiedGround()
+                        : Theme::Col(sk.filled, 0.05f), sk.rounding);
                 if (sk.cornerFade) {   // v10.4: equipped highlight = corner fade
                     Theme::CornerFade(dl, p0, p1, Theme::Col(sk.filled, 0.70f));
                 } else {
@@ -350,7 +380,16 @@ namespace FUI::Equip
             }
 
             if (eq) {
-                if (const auto* icon = IconCache::GetSingleton()->Get(eq->obj)) {
+                // GI51: same rule as the grid — a worn item is drawable now,
+                // the 3D capture only raises the quality when it lands.
+                const IconCache::Icon* eqIcon = IconCache::GetSingleton()->Get(eq->obj);
+                bool eqFallback = false;
+                if (!eqIcon) {
+                    IconCache::GetSingleton()->QueueCapture(eq->obj);
+                    eqIcon = Fallback::Get(eq->obj);
+                    eqFallback = eqIcon != nullptr;
+                }
+                if (const auto* icon = eqIcon) {
                     // alpha-trimmed sprite. Rings capture close-up and looked
                     // oversized — half size. Everything else CONTAIN-fits the
                     // slot BOX (the old min-side square fit left tall sprites
@@ -372,16 +411,26 @@ namespace FUI::Equip
                         // the size the grid would give it — same rule as there
                         // (long axis = footprint long axis * 0.95 * def.scale) —
                         // so a slot can shrink an item to fit but never enlarge it.
-                        const auto  def = Grid::ResolveDef(eq->obj);
-                        const float gridLong =
-                            static_cast<float>((std::max)(def.w, def.h)) *
-                            Grid::CellPx() * 0.95f * def.scale;
+                        const auto def = Grid::ResolveDef(eq->obj);
+                        // Cap at the size the GRID would give it — and the grid
+                        // sizes the two kinds differently: a trimmed capture by
+                        // its long axis, a square category icon contained in the
+                        // short one. Using the capture rule for both is what
+                        // made a category icon balloon past its cell.
+                        const float gridCap = eqFallback
+                            ? static_cast<float>((std::min)(def.w, def.h)) *
+                                  Grid::CellPx() * 0.85f
+                            : static_cast<float>((std::max)(def.w, def.h)) *
+                                  Grid::CellPx() * 0.95f * def.scale;
                         const float longPx = (std::max)(icon->w, icon->h) * s;
-                        if (gridLong > 0.0f && longPx > gridLong) s *= gridLong / longPx;
+                        if (gridCap > 0.0f && longPx > gridCap) s *= gridCap / longPx;
                         dw = icon->w * s;
                         dh = icon->h * s;
                     }
                     const ImVec2 c((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+                    const auto  fdef = Grid::ResolveDef(eq->obj);
+                    const float eqRot = eqFallback ? fdef.frot : 0.0f;
+                    const float eqOff = eqFallback ? fdef.fx * Grid::CellPx() : 0.0f;
                     // rarity glow + status rings UNDER the icon -- the shared
                     // renderer (GI49: this was a THIRD hand copy of the halo
                     // switch; unmasked, it read poison/temper status bits as
@@ -392,29 +441,24 @@ namespace FUI::Equip
                             ImVec2(c.x + dw * 0.5f, c.y + dh * 0.5f),
                             p0, p1);
                     }
-                    UIRoot::DrawItemIcon(dl, icon->srv,
-                        ImVec2(c.x - dw * 0.5f, c.y - dh * 0.5f),
-                        ImVec2(c.x + dw * 0.5f, c.y + dh * 0.5f));
-                } else {
-                    IconCache::GetSingleton()->QueueCapture(eq->obj);
+                    // ★1.0.5: the same shadow the grid gives its tiles, so a
+                    // pale item does not vanish here either
+                    Grid::DrawItemShadow(dl, icon->srv,
+                                         ImVec2(c.x + eqOff, c.y), dw, dh, eqRot);
+                    UIRoot::DrawItemIconRot(dl, icon->srv,
+                        ImVec2(c.x + eqOff, c.y), ImVec2(dw, dh), eqRot);
                 }
                 // GI30: this slot wears the pool's favourite -- draw the mark
-                // here so it does not read as "the star disappeared". Same
-                // shape/colour as the grid's favourite diamond, bottom-right.
-                if (Grid::IsPoolStarWorn(eq->obj, eq->uid, eq->sig)) {
-                    const float S2 = Theme::Scale();
-                    // the doll slot is 2x2 cells, so the grid's 4px marker read
-                    // as a speck here -- size it to the slot, not to a tile
-                    const float r = 6.5f * S2;
-                    const ImVec2 cc(p1.x - r - 4.0f * S2, p1.y - r - 4.0f * S2);
-                    const ImVec2 d0(cc.x, cc.y - r), d1(cc.x + r, cc.y);
-                    const ImVec2 d2(cc.x, cc.y + r), d3(cc.x - r, cc.y);
-                    dl->AddQuadFilled(d0, d1, d2, d3, IM_COL32(0, 0, 0, 235));
-                    const float ri = r - 1.2f;
-                    dl->AddQuadFilled(ImVec2(cc.x, cc.y - ri), ImVec2(cc.x + ri, cc.y),
-                                      ImVec2(cc.x, cc.y + ri), ImVec2(cc.x - ri, cc.y),
-                                      Theme::Col(sk.hi, 1.0f));
-                }
+                // here so it does not read as "the star disappeared".
+                // ★★1.0.5: through the SHARED tray, at the grid's size. It used
+                // to be a hand-rolled diamond at its own 6.5px radius "because
+                // the doll slot is 2x2", which made the same flag a different
+                // object depending on the window — and it collided with the
+                // poison droplet DrawGlow was putting in the same corner.
+                Grid::DrawMarkerTray(dl, p0, p1,
+                                     Grid::IsPoolStarWorn(eq->obj, eq->uid, eq->sig),
+                                     Grid::IsPoolStolen(eq->obj, eq->uid, eq->sig),
+                                     (eq->glow & 0x4) != 0);     // poison
                 if (eq->count > 1) {   // eqqty (ammo stack)
                     char buf[16];
                     std::snprintf(buf, sizeof(buf), "%d", eq->count);
@@ -432,10 +476,18 @@ namespace FUI::Equip
                 const float dw = sil->w / ms * target;
                 const float dh = sil->h / ms * target;
                 const ImVec2 c((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+                // ★The silhouette art is white. Tinting it with the ACCENT is
+                // right over a dark panel and wrong over a light one — navy at
+                // 35% on blue is barely a shape. A light panel keeps it white
+                // and just holds it back with alpha, so it stays a hint rather
+                // than competing with the item that will sit there.
+                const auto& sk2 = Theme::S();
+                const ImU32 silCol = sk2.lightPanel ? Theme::Col(sk2.ink, 0.50f)
+                                                    : Theme::Acc(0.35f);
                 dl->AddImage(reinterpret_cast<ImTextureID>(sil->srv),
                     ImVec2(c.x - dw * 0.5f, c.y - dh * 0.5f),
                     ImVec2(c.x + dw * 0.5f, c.y + dh * 0.5f),
-                    ImVec2(0, 0), ImVec2(1, 1), Theme::Acc(0.35f));
+                    ImVec2(0, 0), ImVec2(1, 1), silCol);
             }
 
             ImGui::SetCursorScreenPos(p0);
@@ -450,7 +502,18 @@ namespace FUI::Equip
                     // slots. Hand the tooltip the list this slot actually wears.
                     Grid::DrawItemTooltip(eq->obj, eq->count, -1, -1, false, nullptr,
                                           Grid::ExtraScope::kWorn,
-                                          eq->uid, -1, eq->sig, eq->hand);
+                                          eq->uid, -1, eq->sig, eq->hand,
+                                          Grid::TileContext{ {}, false, false, false, true });
+                    // C: the same 3D view the grid offers. Vanilla files Item
+                    // Zoom under the kItemMenu context, which every item screen
+                    // shares -- turning a piece over is expected wherever an
+                    // item is shown, and the doll is the one place you can see
+                    // what you are actually wearing.
+                    if (!UIRoot::MouseInOverlay() &&
+                        ImGui::IsKeyPressed(ImGuiKey_C, false) &&
+                        !ImGui::GetIO().WantTextInput) {
+                        UIRoot::OpenInspect(eq->obj, Grid::DefKeyOf(eq->obj));
+                    }
                 }
                 if (eq && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {   // D5
                     SKSE::log::info("[ACT] rclick-unequip '{}' slot '{}' hand={}",
@@ -746,10 +809,29 @@ namespace FUI::Equip
             if (active && activeChanged) {
                 ImGui::SetScrollHereX(0.5f);   // keep the active tab visible
             }
-            ImGui::PushStyleColor(ImGuiCol_Button, Theme::Col(active ? sk.sel : sk.acc, active ? 0.30f : 0.10f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Col(sk.sel, 0.40f));
+            // ★A loadout tab is a BUTTON, and it now says on/off the same way
+            // every other button does. It used to have its own two colours —
+            // sel .30 for on (the only cyan face on screen) and acc .10 for off
+            // (all but invisible) — so the two tabs read as a different kind of
+            // control from the four beside them.
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                sk.lightPanel ? (active ? Theme::BtnOn() : IM_COL32(0, 0, 0, 0))
+                              : Theme::Col(active ? sk.sel : sk.acc, active ? 0.30f : 0.10f));
+            // ★The hover wash is the skin's INK at low alpha, not white. White
+            // was right only because the one light-panelled skin had white ink;
+            // on a pale sheet with dark ink it lightens an already-light panel
+            // and the hover all but disappears (+7 luma). Ink at 0.10 is the
+            // same pixel value for SIMPLE (26/255) and the correct direction
+            // for parchment, with no new token to keep in sync.
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                sk.lightPanel && !active ? Theme::Col(sk.ink, 0.10f)
+                                         : Theme::Col(sk.sel, 0.40f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::Col(sk.sel, 0.55f));
-            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Col(active ? sk.hi : sk.ink, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                sk.lightPanel
+                    ? (active ? Theme::BtnOnInkVec()
+                              : ImGui::GetStyleColorVec4(ImGuiCol_Text))
+                    : (active ? Theme::ValVec() : sk.ink));
             const std::string lbl = std::string(Loadout::Name(i)) + "##lt" + std::to_string(i);
             if (Sfx::Button(lbl.c_str(), ImVec2(0, tabH))) {
                 if (!active) Loadout::RequestSwitch(i);
@@ -777,23 +859,30 @@ namespace FUI::Equip
         if (scrollMax > 0.0f) {
             auto* dl = ImGui::GetWindowDrawList();
             const float fw = 16.0f * S;
+            // ★A black fade is a shadow on a light panel, and it lands right
+            // beside the "+" button — so it read as that button having a
+            // strange drop shadow rather than as "the strip scrolls".
+            const ImU32 fadeCol = sk.lightPanel ? IM_COL32(0, 0, 0, 45)
+                                                : IM_COL32(0, 0, 0, 170);
             if (scrollX > 1.0f) {
                 dl->AddRectFilledMultiColor(stripPos,
                     ImVec2(stripPos.x + fw, stripPos.y + tabH),
-                    IM_COL32(0, 0, 0, 170), IM_COL32(0, 0, 0, 0),
-                    IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 170));
+                    fadeCol, IM_COL32(0, 0, 0, 0),
+                    IM_COL32(0, 0, 0, 0), fadeCol);
             }
             if (scrollX < scrollMax - 1.0f) {
                 dl->AddRectFilledMultiColor(
                     ImVec2(stripPos.x + stripW - fw, stripPos.y),
                     ImVec2(stripPos.x + stripW, stripPos.y + tabH),
-                    IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 170),
-                    IM_COL32(0, 0, 0, 170), IM_COL32(0, 0, 0, 0));
+                    IM_COL32(0, 0, 0, 0), fadeCol,
+                    fadeCol, IM_COL32(0, 0, 0, 0));
             }
         }
 
         if (!Loadout::AtCap()) {
             ImGui::SameLine(0, gap);
+            // ('+' used to need centring by hand here; Sfx::Button ink-centres
+            // every label now, so it is just a button again)
             if (Sfx::Button("+##addlt", ImVec2(tabH, tabH))) {
                 g_buyOpen = true;
                 g_delTarget = -1;
@@ -809,6 +898,8 @@ namespace FUI::Equip
     // never these windows — it was Loadout::PlayerGold -> Actor::GetGoldAmount
     // dereferencing a garbage BGSDefaultObjectManager slot (symbolized crash
     // chain). PlayerGold now returns Grid's cached gold, which is render-safe.
+    bool IsPopupOpen() { return g_buyOpen || g_delTarget >= 1; }
+
     bool CloseTopPopup()
     {
         if (g_buyOpen) {
@@ -936,6 +1027,8 @@ namespace FUI::Equip
         }
     }
 
+    float SlotsTopOffset() { return g_slotsTop; }
+
     void OnMenuClosed()
     {
         g_buyOpen = false;
@@ -952,6 +1045,10 @@ namespace FUI::Equip
         const float S2 = SlotPx();
         const float gap = GapPx();
         const ImVec2 start = ImGui::GetCursorScreenPos();
+        // GI77: the item grid pads itself down to this so both columns begin on
+        // one line. Read from the cursor the tabs left behind, not computed —
+        // frame height and item spacing are style values, not ours.
+        g_slotsTop = start.y - ImGui::GetWindowPos().y;
 
         // vertical strip: circlet + acc x4 (total height == doll height)
         for (int i = 0; i < 5; ++i) {

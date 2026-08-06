@@ -1,3 +1,5 @@
+﻿#include "ui/Badges.h"
+#include "ui/Fallback.h"
 #include "ui/LootBarter.h"
 
 #include "game/GoldCoins.h"
@@ -178,6 +180,10 @@ namespace FUI::LootBarter
             int row = -1;
             int w = 1;   // footprint at record time: absent spots still hold
             int h = 1;   // their shelf open (board height includes them)
+            // GI62: quarter-turns clockwise. w/h ALREADY reflect it -- this is
+            // kept so the sprite draws at the angle the player left it at, and
+            // so taking the item back carries the turn home.
+            int rot = 0;
         };
         struct ContLayout
         {
@@ -195,6 +201,7 @@ namespace FUI::LootBarter
             int                 col = -1;
             int                 row = -1;
             std::uint16_t sig = 0;   // GI18
+            int           rot = 0;   // GI62: the angle survives the slider too
         };
         StoreHint g_storeHint;
 
@@ -214,6 +221,10 @@ namespace FUI::LootBarter
             // move ("reuse the first one in the pool") picked a sibling's slot,
             // so dragging the second dagger somewhere moved the FIRST one.
             std::string   slotKey;
+            // GI62: the angle the player dropped it at. This is the whole reason
+            // a turn survives inventory -> container: the spot on the other side
+            // is created FROM this hint, so it is created already turned.
+            int           rot = 0;
         };
         std::vector<PendingSpot> g_pendingSpots;
 
@@ -428,6 +439,8 @@ namespace FUI::LootBarter
         g_slider.fav = a_fav;   // GI36
         Sfx::SelectOn();   // click / shift+click opened the quantity popup
     }
+
+    bool IsPopupOpen() { return g_confirm.active || g_slider.active; }
 
     bool CloseTopPopup()
     {
@@ -1006,8 +1019,11 @@ namespace FUI::LootBarter
             char buf[32];
             std::snprintf(buf, sizeof(buf), "%d G", total);
             center(ImGui::CalcTextSize(buf).x);
-            ImGui::TextColored(broke ? ImVec4(0.8f, 0.32f, 0.28f, 1.0f) : sk.hi,
-                "%s", buf);
+            // ★Val(), not sk.hi. A figure is a figure on every skin, and on
+            // SIMPLE sk.hi is a dark blue that reads as structure — a border,
+            // not a number (see Theme::ValVec).
+            ImGui::TextColored(broke ? ImVec4(0.8f, 0.32f, 0.28f, 1.0f)
+                                     : Theme::ValVec(), "%s", buf);
         }
 
         ImGui::Dummy(ImVec2(0.0f, 6.0f * S));
@@ -1069,7 +1085,7 @@ namespace FUI::LootBarter
                 // drop spot through the slider — apply it on confirm
                 if (g_storeHint.obj == g_slider.obj && g_storeHint.col >= 0) {
                     NoteStoreSpot(g_storeHint.obj, g_storeHint.col, g_storeHint.row,
-                                  g_storeHint.sig);
+                                  g_storeHint.sig, g_storeHint.rot);
                 }
                 g_storeHint = {};   // GI18: the pending claim stays — the
                                     // item has not reached the container yet
@@ -1168,7 +1184,7 @@ namespace FUI::LootBarter
         center(ImGui::CalcTextSize(question).x);
         ImGui::TextColored(sk.ink, "%s", question);
         center(ImGui::CalcTextSize(priceLine).x);
-        ImGui::TextColored(sk.hi, "%s", priceLine);
+        ImGui::TextColored(Theme::ValVec(), "%s", priceLine);   // a price is a figure
 
         ImGui::Dummy(ImVec2(0.0f, 6.0f * S));
         center(btnRow);
@@ -1392,6 +1408,15 @@ namespace FUI::LootBarter
             // trailing position and everything after the taken cell shuffles up,
             // which is exactly "it loots in storage order, not the one I hovered".
             std::string   spotKey;
+            // GI62: quarter-turns clockwise. Set through SetRot so w/h and the
+            // angle can never disagree -- every placement test on this side reads
+            // w/h directly, and a stale pair would place the cell wrong.
+            int           rot = 0;
+            void SetRot(int a_rot)
+            {
+                if (((rot ^ a_rot) & 1) != 0) std::swap(w, h);
+                rot = a_rot & 3;
+            }
         };
 
         // F7: this frame's partner-grid geometry for drop-cell math — set by
@@ -1402,6 +1427,33 @@ namespace FUI::LootBarter
         ImVec2                   g_partnerClipMax{};
         int                      g_partnerRows = 0;
         std::vector<PartnerCell> g_lastCells;          // this frame's placement
+
+        // ★Search on the partner board. Its cells are rebuilt EVERY frame, so
+        // there is no board version to hang a key-set off the way the player's
+        // grid does — but a form's name does not change, so the answer caches
+        // per FORM and survives every rebuild. The term itself is the player
+        // grid's (Grid::SearchTerm): one box searches both sides of the trade,
+        // which is the whole point when you are looking for what to buy.
+        std::unordered_map<RE::FormID, bool> g_findCache;
+        std::string                          g_findTerm;
+
+        [[nodiscard]] bool FindMisses(RE::TESBoundObject* a_obj)
+        {
+            const std::string& term = Grid::SearchTerm();
+            if (term.empty()) return false;
+            if (term != g_findTerm) {   // a new term invalidates every answer
+                g_findCache.clear();
+                g_findTerm = term;
+            }
+            if (!a_obj) return true;
+            const RE::FormID id = a_obj->GetFormID();
+            if (const auto it = g_findCache.find(id); it != g_findCache.end()) {
+                return !it->second;
+            }
+            const bool hit = Grid::SearchMatches(a_obj->GetName());
+            g_findCache.emplace(id, hit);
+            return !hit;
+        }
 
         // stage 1: collect partner items (worn included, for corpses)
         std::vector<PartnerCell> CollectPartnerCells(RE::TESObjectREFR* source)
@@ -1664,7 +1716,14 @@ namespace FUI::LootBarter
                         (!ps->slotKey.empty() && cl->spots.contains(ps->slotKey))
                             ? ps->slotKey
                             : freshInPool(prefix);
-                    cl->spots[key] = { ps->col, ps->row, match->w, match->h };
+                    // GI62: the hint's angle defines the new slot's footprint --
+                    // match->w/h is the upright pair, so swap it when the drop
+                    // was made on its side.
+                    const bool turned = (ps->rot & 1) != 0;
+                    cl->spots[key] = { ps->col, ps->row,
+                                       turned ? match->h : match->w,
+                                       turned ? match->w : match->h,
+                                       ps->rot & 3 };
                     ps = g_pendingSpots.erase(ps);
                 }
 
@@ -1704,14 +1763,20 @@ namespace FUI::LootBarter
                         if (i < slots.size()) {
                             members[i]->spotKey = slots[i].first;
                             const auto& s = slots[i].second;
+                            // GI62: the slot remembers the angle -- adopt it
+                            // BEFORE the fit test, which reads w/h.
+                            members[i]->SetRot(s.rot);
                             if (fits(s.col, s.row, members[i]->w, members[i]->h)) {
                                 members[i]->col = s.col;
                                 members[i]->row = s.row;
                                 mark(s.col, s.row, members[i]->w, members[i]->h);
+                            } else if (members[i]->rot != 0) {
+                                members[i]->SetRot(0);   // stand it up rather than lose it
                             }
                         } else {
                             members[i]->spotKey = freshInPool(prefix);
-                            cl->spots[members[i]->spotKey] = { -1, -1, members[i]->w, members[i]->h };
+                            cl->spots[members[i]->spotKey] = { -1, -1, members[i]->w,
+                                                               members[i]->h, members[i]->rot };
                         }
                     }
                     // the pool shrank: drop the trailing positions
@@ -1742,7 +1807,7 @@ namespace FUI::LootBarter
             if (cl) {
                 for (const auto& it : cells) {
                     if (!it.spotKey.empty()) {
-                        cl->spots[it.spotKey] = { it.col, it.row, it.w, it.h };
+                        cl->spots[it.spotKey] = { it.col, it.row, it.w, it.h, it.rot };
                     }
                 }
             }
@@ -1764,15 +1829,12 @@ namespace FUI::LootBarter
             const auto& sk = Theme::S();
             const float cell = Grid::CellPx();
             const int cols = Grid::kCols;
-            // grid lines
-            for (int r = 0; r <= rows; ++r) {
-                dl->AddLine(ImVec2(base.x, base.y + r * cell),
-                    ImVec2(base.x + gridW, base.y + r * cell), Theme::Acc(0.12f));
-            }
-            for (int c = 0; c <= cols; ++c) {
-                dl->AddLine(ImVec2(base.x + c * cell, base.y),
-                    ImVec2(base.x + c * cell, base.y + rows * cell), Theme::Acc(0.12f));
-            }
+            // ★The board, drawn by the SAME function the player's grid uses.
+            // This was a private accent hairline, which meant a skin that
+            // carves or tiles its cells did so on one half of the screen only
+            // — and on SIMPLE that hairline is near-invisible navy on a light
+            // blue panel, so the merchant's board had no cells at all.
+            Grid::DrawCellLattice(dl, base, cols, rows);
 
             // GI16: occupied-cell shading, the same pass the player grid runs
             // (DrawOccupancyPass). Its absence here was never a deliberate
@@ -1781,7 +1843,8 @@ namespace FUI::LootBarter
             // Worn gear takes a pale amber fill instead of the neutral shade:
             // on a corpse or a pickpocket target, "this is on the body" is the
             // one distinction that changes what the player does next.
-            const ImU32 shadeCol = Theme::Col(sk.shade);
+            // same ground as the player's grid and the doll (see Grid.cpp)
+            const ImU32 shadeCol = Theme::OccupiedGround();
             const ImU32 wornCol = IM_COL32(196, 172, 108, 92);
             for (const auto& it : cells) {
                 if (Grid::IsHeldPartnerUnit(it.obj, it.uid, it.xlIdx, it.ord)) continue;
@@ -1840,7 +1903,17 @@ namespace FUI::LootBarter
                                               SourceRef(),
                                               it.perUnit ? Grid::ExtraScope::kUnit
                                                          : Grid::ExtraScope::kAny,
-                                              it.uid, it.xlIdx);
+                                              it.uid, it.xlIdx, 0, 0,
+                                              Grid::TileContext{ {}, false, false, true, false });
+                        // C: 3D view, same as the player's grid. Vanilla files
+                        // Item Zoom under the kItemMenu context, which the
+                        // container and barter screens share with the
+                        // inventory -- turning a ware over before buying it is
+                        // vanilla behaviour, not an extra.
+                        if (ImGui::IsKeyPressed(ImGuiKey_C, false) &&
+                            !ImGui::GetIO().WantTextInput) {
+                            UIRoot::OpenInspect(it.obj, Grid::DefKeyOf(it.obj));
+                        }
                     }
                     // Phase 5-B: plain left-click (no shift) picks the item onto the
                     // cursor — drag to the player grid to TAKE (loot) / BUY (barter).
@@ -1855,12 +1928,13 @@ namespace FUI::LootBarter
                                 ? Lang::Str::AmbiguousUnit
                                 : Lang::Str::PickpocketBlocked));
                         } else {
-                            // F7: grab where clicked (player-tile parity)
-                            const ImVec2 mp = ImGui::GetIO().MousePos;
+                            // GI62c: centred on the cursor, same as a player tile
+                            // -- rotation has to spin about the cursor, and that
+                            // only holds if the cursor is the item's middle from
+                            // the moment it is lifted (-1 = centre).
                             g_actingSpot = it.spotKey;   // GI20: this cell's slot
                             Grid::BeginPartnerCarry(it.obj, it.count, it.value,
-                                mp.x - p0.x, mp.y - p0.y,
-                                                    it.uid, it.xlIdx, it.ord);
+                                -1.0f, -1.0f, it.uid, it.xlIdx, it.ord, it.rot);
                         }
                     }
                     // TAKE trigger: right-click (whole move) OR shift+left-click
@@ -1929,10 +2003,26 @@ namespace FUI::LootBarter
                     }
                 }
 
-                if (const auto* icon = cache->Get(it.obj)) {
-                    // contain the icon inside the footprint box, keeping aspect
-                    const float sc = (std::min)(bw / static_cast<float>(icon->w),
-                                                bh / static_cast<float>(icon->h)) * 0.85f;
+                // GI51: same rule as the player's grid — a chest full of items
+                // with no captures yet must still READ as a chest full of
+                // items, which is exactly what you need to decide whether to
+                // take anything.
+                const IconCache::Icon* cellIcon = cache->Get(it.obj);
+                if (!cellIcon) {
+                    cache->QueueCapture(it.obj);   // first sight — render next frames
+                    cellIcon = Fallback::Get(it.obj);
+                }
+                if (const auto* icon = cellIcon) {
+                    // contain the icon inside the footprint box, keeping aspect.
+                    // ★GI62: measure against the UPRIGHT box. The sprite is not
+                    // rotated -- only its draw quad is -- so a turned cell would
+                    // otherwise fit a tall sword into a short cell height and
+                    // shrink it to a third of its size (user-reported).
+                    const bool turned = (it.rot & 1) != 0;
+                    const float fitW = turned ? bh : bw;
+                    const float fitH = turned ? bw : bh;
+                    const float sc = (std::min)(fitW / static_cast<float>(icon->w),
+                                                fitH / static_cast<float>(icon->h)) * 0.85f;
                     const float dw = icon->w * sc;
                     const float dh = icon->h * sc;
                     const ImVec2 ctr(p0.x + bw * 0.5f, p0.y + bh * 0.5f);
@@ -1940,11 +2030,49 @@ namespace FUI::LootBarter
                     const ImVec2 i1(ctr.x + dw * 0.5f, ctr.y + dh * 0.5f);
                     // rarity glow UNDER the sprite — same pass as the player grid
                     Grid::DrawGlow(dl, it.obj, it.glow, i0, i1,
-                        p0, ImVec2(p0.x + bw, p0.y + bh));
-                    UIRoot::DrawItemIcon(dl, icon->srv, i0, i1);
-                } else {
-                    cache->QueueCapture(it.obj);   // first sight — render next frames
+                        p0, ImVec2(p0.x + bw, p0.y + bh), it.rot);
+                    const bool cellFallback = cellIcon && !cache->Get(it.obj);
+                    const auto cdef = Grid::ResolveDef(it.obj);
+                    const ImVec2 nudge = cellFallback ? Grid::RotatedOffset(cdef.fx, it.rot)
+                                                      : ImVec2(0.0f, 0.0f);
+                    const float pdeg = (cellFallback ? cdef.frot : 0.0f) + it.rot * 90.0f;
+                    // ★1.0.5: same shadow as the player's board
+                    Grid::DrawItemShadow(dl, icon->srv,
+                                         ImVec2(ctr.x + nudge.x, ctr.y + nudge.y),
+                                         dw, dh, pdeg);
+                    UIRoot::DrawItemIconRot(dl, icon->srv,
+                        ImVec2(ctr.x + nudge.x, ctr.y + nudge.y), ImVec2(dw, dh), pdeg);
+                    // ★Same wash and the same alpha the player's board uses for
+                    // a search miss — one search, one look, both windows.
+                    if (FindMisses(it.obj)) {
+                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
+                            IM_COL32(6, 6, 10, 168));
+                    }
+                    // ★1.0.5: the shared marker tray, so poison keeps showing
+                    // here now that DrawGlow no longer draws it. Favourite and
+                    // stolen stay off: a PartnerCell is a container's item, not
+                    // the player's, and carries neither flag.
+                    Grid::DrawMarkerTray(dl, p0, ImVec2(p0.x + bw, p0.y + bh),
+                                         false, false, (it.glow & 0x4) != 0);
                 }
+                // GI8: extension overlay (socket wells). ★This is the side that
+                // matters most for the socket mod -- the point is to SEE what a
+                // chest holds and decide whether to take it, so the badges have
+                // to be on the partner cell, not only on our own grid.
+                // The partner window draws plain rectangles (no polyomino mask),
+                // so the default full-rect shape is correct here.
+                {
+                    Badges::TileShape shape;
+                    shape.w = it.w;
+                    shape.h = it.h;
+                    auto       pr = g_partner.get();
+                    const bool hov = ImGui::IsMouseHoveringRect(
+                        p0, ImVec2(p0.x + bw, p0.y + bh), false);
+                    Badges::Draw(dl, p0, bw, bh, shape,
+                                 pr ? pr->GetFormID() : 0u,
+                                 it.obj->GetFormID(), it.uid, hov);
+                }
+
                 if (it.count > 1) {
                     char buf[16];
                     std::snprintf(buf, sizeof(buf), "%d", it.count);
@@ -2036,7 +2164,7 @@ namespace FUI::LootBarter
                 const float x0 = wp.x + insX + 2.0f;
                 const float x1 = wp.x + size.x - insX - 2.0f;
                 wdl->AddLine(ImVec2(wp.x + insX, gy), ImVec2(wp.x + size.x - insX, gy),
-                    Theme::Acc(0.25f));
+                    Theme::Rule());
                 if (g_mode == Mode::kBarter) {
                     char amt[32];
                     if (g_merchGoldInf) {
@@ -2050,12 +2178,12 @@ namespace FUI::LootBarter
                             Lang::T(Lang::Str::MerchantGoldLabel));
                         wdl->AddText(ImVec2(x0, gy + 8.0f * S), Theme::Col(sk.sel, 1.0f), lbl);
                     } else {
-                        wdl->AddText(ImVec2(x0, gy + 8.0f * S), Theme::Acc(0.7f),
+                        wdl->AddText(ImVec2(x0, gy + 8.0f * S), Theme::Chrome(0.72f),
                             Lang::T(Lang::Str::MerchantGoldLabel));
                     }
                     const float amtW = ImGui::CalcTextSize(amt).x;
                     wdl->AddText(ImVec2(x1 - amtW, gy + 8.0f * S),
-                        Theme::Col(sk.hi, 1.0f), amt);
+                        Theme::GoldCol(), amt);
                 } else if (g_mode == Mode::kPickpocket) {
                     // F6b: no take-all here — every move is an individual roll
                     wdl->AddText(ImVec2(x0, gy + 8.0f * S),
@@ -2079,7 +2207,9 @@ namespace FUI::LootBarter
             if (IsLootMode(g_mode) && !g_slider.active &&
                 ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) &&
                 ImGui::IsKeyPressed(ImGuiKey_R, false) && !ImGui::GetIO().WantTextInput) {
-                int free = Grid::SpaceTotal() - Grid::SpaceUsed() + Grid::BagFreeCells();
+                // total/used already span the bags (open or closed) — adding
+                // bag room on top of that double-counted it and over-took
+                int free = Grid::SpaceTotal() - Grid::SpaceUsed();
                 for (auto& c : cells) {
                     if (c.obj->IsGold()) {
                         RequestTake(c.obj, c.count);   // gold bypasses space
@@ -2134,7 +2264,12 @@ namespace FUI::LootBarter
         // full and the scrollbar sits in its own gutter, not over the tiles.
         // +30: bottom strip — barter = merchant GOLD bar (mirrors the player
         // window's), loot = shortcut hint line (design pass C/G)
-        const ImVec2 size(gridW + sbW + 2.0f * insX,
+        // ★+2 x PadX. TitleBar starts the content at PadX from the left edge
+        // (every managed window does), so a width sized without it runs the
+        // last cell column PadX past the right edge, where ImGui clips it.
+        // Invisible on skins whose PadX is baked into a frame inset; on SIMPLE
+        // (inset 0, PadX 8) the merchant's grid simply lost its right column.
+        const ImVec2 size(gridW + sbW + 2.0f * (insX + Theme::PadX() * S),
                           barH + labelH + visRows * cell + 14.0f * S + 30.0f * S + 2.0f * insY);
         ImVec2 defPos(120.0f, 200.0f);
         if (auto* m = wm->Find("main"); m && m->posKnown) {
@@ -2144,7 +2279,8 @@ namespace FUI::LootBarter
         // managed-window rule: WindowPadding must equal the frame inset, else
         // the content starts at the default padding (left) while the width was
         // sized from insX (right) — a lopsided right margin. (See memory note.)
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(insX, insY));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+            ImVec2(insX + Theme::PadX() * S, insY + Theme::PadY() * S));
         ImGui::Begin("##gi_partner", nullptr, kManagedWinFlags);
         wm->TitleBar("partner", title);
 
@@ -2243,6 +2379,7 @@ namespace FUI::LootBarter
                     d.occXlIdx = pc.xlIdx;
                     d.occOrd = pc.ord;
                     d.occSpotKey = pc.spotKey;
+                    d.occRot = pc.rot;        // GI62
                 }
             }
         }
@@ -2255,7 +2392,7 @@ namespace FUI::LootBarter
     }
 
     void NoteStoreSpot(RE::TESBoundObject* a_obj, int a_col, int a_row,
-                       std::uint16_t a_sig)
+                       std::uint16_t a_sig, int a_rot)
     {
         if (!a_obj || !SpotMemoryOn() || !Partner()) return;
         const RE::FormID form = a_obj->GetFormID();
@@ -2266,12 +2403,13 @@ namespace FUI::LootBarter
                 ps.col = a_col;
                 ps.row = a_row;
                 ps.slotKey = g_actingSpot;
+                ps.rot = a_rot & 3;
                 return;
             }
         }
         // GI23: g_actingSpot is still set here — the carry has not ended yet, so
         // this records exactly which slot is being moved (empty = a new arrival)
-        g_pendingSpots.push_back({ form, a_sig, a_col, a_row, g_actingSpot });
+        g_pendingSpots.push_back({ form, a_sig, a_col, a_row, g_actingSpot, a_rot & 3 });
     }
 
     void NoteCarriedSpot(const std::string& a_spotKey)
@@ -2280,9 +2418,9 @@ namespace FUI::LootBarter
     }
 
     void SetStoreSpotHint(RE::TESBoundObject* a_obj, int a_col, int a_row,
-                          std::uint16_t a_sig)
+                          std::uint16_t a_sig, int a_rot)
     {
-        g_storeHint = { a_obj, a_col, a_row, a_sig };
+        g_storeHint = { a_obj, a_col, a_row, a_sig, a_rot & 3 };
     }
 
     // ---- F7: cosave 'GCLY' v1 ----
@@ -2292,6 +2430,7 @@ namespace FUI::LootBarter
     {
         constexpr std::uint32_t kContMaxStr = 512;
         constexpr std::uint32_t kContMaxEntries = 65536;
+        constexpr std::uint32_t kContCosaveVersion = 2;   // v2: GI62 per-spot rotation
 
         bool ContWriteStr(SKSE::SerializationInterface* a_intfc, const std::string& a_s)
         {
@@ -2311,7 +2450,7 @@ namespace FUI::LootBarter
 
     void SaveGame(SKSE::SerializationInterface* a_intfc)
     {
-        if (!a_intfc->OpenRecord(kContRecordType, 1)) {
+        if (!a_intfc->OpenRecord(kContRecordType, kContCosaveVersion)) {
             SKSE::log::error("[LOOT] cosave: OpenRecord GCLY failed");
             return;
         }
@@ -2326,6 +2465,7 @@ namespace FUI::LootBarter
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.row));
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.w));
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.h));
+                a_intfc->WriteRecordData(static_cast<std::int32_t>(s.rot));   // v2
             }
         }
         SKSE::log::info("[LOOT] cosave: saved {} container layouts", g_contLayouts.size());
@@ -2333,7 +2473,11 @@ namespace FUI::LootBarter
 
     void LoadRecord(SKSE::SerializationInterface* a_intfc, std::uint32_t a_version)
     {
-        if (a_version != 1) return;
+        if (a_version < 1 || a_version > kContCosaveVersion) {
+            SKSE::log::warn("[LOOT] cosave: unsupported container record v{} (max v{}) — skipped",
+                            a_version, kContCosaveVersion);
+            return;
+        }
         std::unordered_map<RE::FormID, ContLayout> loaded;
         std::uint32_t nCont = 0;
         if (!a_intfc->ReadRecordData(nCont) || nCont > kContMaxEntries) return;
@@ -2353,13 +2497,16 @@ namespace FUI::LootBarter
             cl.stamp = stamp;
             for (std::uint32_t j = 0; j < nSpots; ++j) {
                 std::string key;
-                std::int32_t col = 0, row = 0, w = 1, h = 1;
+                std::int32_t col = 0, row = 0, w = 1, h = 1, rot = 0;
                 if (!ContReadStr(a_intfc, key) || !a_intfc->ReadRecordData(col) ||
                     !a_intfc->ReadRecordData(row) || !a_intfc->ReadRecordData(w) ||
                     !a_intfc->ReadRecordData(h)) {
                     return;
                 }
-                cl.spots[std::move(key)] = { col, row, w, h };
+                if (a_version >= 2) {   // GI62 (older saves: everything upright)
+                    if (!a_intfc->ReadRecordData(rot)) return;
+                }
+                cl.spots[std::move(key)] = { col, row, w, h, rot & 3 };
             }
             if (ok && resolved != 0) {
                 maxStamp = (std::max)(maxStamp, stamp);

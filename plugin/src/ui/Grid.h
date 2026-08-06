@@ -1,10 +1,12 @@
-#pragma once
+﻿#pragma once
 
 #include "ui/ItemDef.h"
+#include "ui/Lang.h"
 #include "ui/Theme.h"
 
 #include <functional>
 #include <string>
+#include <string_view>
 
 namespace FUI::Grid
 {
@@ -31,6 +33,31 @@ namespace FUI::Grid
     // Click-carry state (C1~C7). ESC/right-click cancels; the menu's Cancel
     // handler must check IsHolding() before closing (A2).
     [[nodiscard]] bool IsHolding();
+    // GI63: may the carried item be turned? The prompt bar hides the rotate keys
+    // for square footprints, where pressing them does nothing.
+    [[nodiscard]] bool HeldCanRotate();
+
+    // GI63: what the tooltip is describing THIS FRAME, for the prompt bar.
+    // ★Recorded by DrawItemTooltip, which every board shares (grid, doll,
+    // partner), so the bar needs to know nothing about who is hovering what.
+    // Stamped with the frame number rather than cleared at a fixed point: the
+    // bar draws after the tooltips, and a "clear at end of frame" would have to
+    // land in exactly one place between the two.
+    struct HoverPrompt
+    {
+        bool active = false;
+        bool canSplit = false;    // a stack / divisible gold: Shift+click applies
+        bool canCompare = false;  // weapon or armour: hold Shift for the card
+        bool canPick = false;     // left-click lifts it (false on a parked tile)
+        bool canDrop = false;     // R discards one (never a quest item / partner)
+        bool canFav = false;      // F stars it (never a coin / pouch / partner)
+        bool hasVerb = false;
+        Lang::Str verb{};         // the right-click action, already resolved by
+                                  // the tooltip: equip / read / learn / use /
+                                  // sell / store / open bag / restore / buy /
+                                  // steal / plant / withdraw / unequip
+    };
+    [[nodiscard]] HoverPrompt HoveredPrompt();
     void CancelHold();
 
     // Phase 5-B: the partner item currently carried on the cursor (null if the
@@ -48,6 +75,11 @@ namespace FUI::Grid
     // parked without a cell). The doll shows the star meanwhile.
     [[nodiscard]] bool IsPoolStarWorn(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
                                       std::uint16_t a_sig);
+
+    // ★1.0.5: ...and whether that pool is stolen goods, for the same reason —
+    // equipping a stolen item must not make it stop looking stolen.
+    [[nodiscard]] bool IsPoolStolen(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                                    std::uint16_t a_sig);
 
     // GI18: content signature of the carried unit (0 = nothing, or a plain
     // unit). Survives a container move, unlike an ordinal or a uniqueID, so a
@@ -77,9 +109,12 @@ namespace FUI::Grid
     // clicked, like player tiles); negative = centre (swap pickups).
     // D4: a_uid/a_xlIdx = the partner sub-stack picked up, so the eventual
     // take/buy moves THAT unit and not whichever one the engine fancies.
+    // GI62: a_rot = the quarter-turn the cell sits at on the partner board, so
+    // the carry (and any drop back into the inventory) keeps it.
     void BeginPartnerCarry(RE::TESBoundObject* a_obj, int a_count, int a_value,
                            float a_offX = -1.0f, float a_offY = -1.0f,
-                           std::uint16_t a_uid = 0, int a_xlIdx = -1, int a_ord = 0);
+                           std::uint16_t a_uid = 0, int a_xlIdx = -1, int a_ord = 0,
+                           int a_rot = 0);
 
     // Deferred rebuild (safe to request mid-draw; runs at FinishFrame).
     void RequestRebuild();
@@ -100,6 +135,13 @@ namespace FUI::Grid
     void NotePendingEquip(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
                           std::uint16_t a_sig, int a_hand = 0,
                           const std::string& a_srcKey = {});
+    // Right-click on a book or note: show it in the game's OWN Book Menu.
+    // Queued here, opened on the Tick — the menu must not be raised from
+    // inside the render pass. While it is up, UIRoot stands down completely
+    // (no draw, no input) so the book is visible and closable.
+    void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig);
+    void ProcessBookRead();   // UIRoot::Tick
+
     // GI32: apply queued favourite toggles. MUST run on the game thread --
     // the native SetFavorite refuses to add a second favourite from inside the
     // render pass.
@@ -144,9 +186,11 @@ namespace FUI::Grid
 
     // S2: stats panel "Space X / Y" — used cells on the main board (from the
     // last Rebuild; can exceed the total while overloaded) and the hard cap.
+    // S2 stats panel "Space X / Y" — and the ONE source for "how much room is
+    // left" (take-all budget included). Both halves span the main board plus
+    // every owned bag, open or closed; the trash is storage for neither.
     [[nodiscard]] int SpaceUsed();
     [[nodiscard]] int SpaceTotal();
-    [[nodiscard]] int BagFreeCells();   // B: free cells across open bags (take-all budget)
     [[nodiscard]] int CellSpanOf(RE::TESBoundObject* a_obj);   // grid cells an item occupies
     // shift+lclick split -> held fragment. a_srcKey = the tile it leaves.
     // a_srcTotal (coins only) = the source tile's full gold value, so an AUTO
@@ -190,7 +234,31 @@ namespace FUI::Grid
     //   kWorn — the sub-stack on the body: the equipment doll
     //   kAny  — the first sub-stack carrying each trait: aggregate partner cells,
     //           which are one cell per FORM with a stack badge (by design)
+    // The item-def key for a form ("Skyrim.esm|0x0139B9"). The 3D inspect view
+    // files an adopted angle/scale under this key, so anything that opens the
+    // view has to name the item the same way the editor does.
+    [[nodiscard]] std::string DefKeyOf(RE::TESForm* a_form);
+
     enum class ExtraScope { kUnit, kWorn, kAny };
+
+    // GI50: what the hovered TILE is, as opposed to what the item is. The
+    // tooltip needs this to name the right-click action (it differs per tile
+    // kind and per mode) and to say why an action would be refused. None of it
+    // is derivable from the object — the drawing code already knows it, so it
+    // hands it over rather than making the tooltip guess.
+    struct TileContext
+    {
+        std::string_view key;              // layout key: quest / stolen lookup
+        bool             isBag    = false;
+        bool             parked   = false;   // sitting in the trash
+        bool             partner  = false;   // the other side's grid
+        bool             equipSlot = false;  // equipment doll, not a grid cell
+    };
+
+    // The cell lattice for a cols x rows board at `base` — tiles, a carve or a
+    // hairline, whichever the skin says. Partner windows call this so both
+    // halves of the screen show the same board.
+    void DrawCellLattice(ImDrawList* a_dl, const ImVec2& a_base, int a_cols, int a_rows);
 
     void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count, int a_coinValue = -1,
                          int a_price = -1, bool a_isBuy = false,
@@ -200,17 +268,124 @@ namespace FUI::Grid
                          // kWorn only: WHICH worn unit. With one copy in each
                          // hand "the worn list of this form" is ambiguous, so the
                          // doll passes the identity its slot recorded.
-                         std::uint16_t a_sig = 0, int a_hand = 0);
+                         std::uint16_t a_sig = 0, int a_hand = 0,
+                         const TileContext& a_tile = {});
+
+    // ★An item's name as the GAME would print it. Quest items name themselves
+    // through their own extra data, not their base form: a Missives note's FULL
+    // is literally "Missive: Deliver Weapon to <Alias=Destination>" and the
+    // engine substitutes the alias per instance only when asked via the
+    // ExtraDataList. Reading TESForm::GetName() showed users the raw token.
+    // Player-renamed items resolve through the same call, so this is also the
+    // one place that has to know about custom names.
+    //   a_xl    — the sub-stack being described (nullptr if none/aggregate)
+    //   a_entry — fallback for an AGGREGATE cell ONLY: the first named
+    //             sub-stack, which is what the vanilla item card shows for a
+    //             merged row.
+    // ★Do NOT pass an entry when the caller is describing ONE unit. A null
+    // a_xl then means "this unit carries no extra data", and the right answer
+    // is the base name — the entry's name belongs to whichever sub-stack
+    // happens to be first, which is how three plain daggers all came out
+    // "Fine Dagger" after one of them was tempered.
+    [[nodiscard]] const char* DisplayNameOf(RE::TESBoundObject* a_obj,
+                                            RE::ExtraDataList* a_xl = nullptr,
+                                            RE::InventoryEntryData* a_entry = nullptr);
 
     // Item base value for barter pricing (InventoryEntryData::GetValue cached
     // at Rebuild). -1 if unknown / not a priceable item.
     [[nodiscard]] int ItemValue(RE::TESBoundObject* a_obj);
 
+    // ★★★1.0.5 — rarity is the CELL'S GROUND, not a halo over it.
+    //
+    // Every halo variant failed the same way and it is worth writing down why,
+    // because the failure looks like a tuning problem and is not one. A halo is
+    // translucent, so what reaches the screen is the panel plus a little
+    // colour. Against cream parchment (189,174,147) the blue halo lands at
+    // (157,170,182): the hue moves a lot and the LUMINANCE moves by four. The
+    // shape is iso-luminant with its background, the eye gets colour but no
+    // form, and every fix that stays translucent — more alpha, a black copy
+    // underneath, a vignette around it — is still negotiating with whatever is
+    // behind it.
+    //
+    // Filling the cell stops negotiating. At 78% the ground is the same colour
+    // on parchment as on a dark panel (82,108,161 vs 45,75,134 — both plainly
+    // blue), so the skin, the daylight behind a glass panel, and the icon's own
+    // brightness all stop being variables. This is what inventory grids that
+    // must be read at a glance do; the halo was the wrong instrument.
+    //
+    // ★★1.0.5 — the state markers along a tile's bottom edge, in ONE place.
+    //
+    // There were three hand-written copies: the grid's tray, the doll's lone
+    // favourite diamond (at its own 6.5px radius) and the droplet that used to
+    // ride inside DrawGlow. They disagreed on size, on colour and on where
+    // poison went, so an item looked different depending on which window it
+    // was in — and on the doll the droplet landed on top of the diamond.
+    //
+    // Order, right to left: stolen ● · poison 💧 · favourite ◆.
+    //
+    // ★Every marker is bounded by the SAME square. The droplet is narrower
+    // because its point makes it tall, so its width is derived from the shared
+    // height instead of set alongside it; the diamond lost the 1.15 vertical
+    // stretch it used to have. Three of them plus the gaps now measure
+    // 4 + 8 + 3 + 8 + 3 + 8 = 34px against a 38.4px cell, so the full set fits
+    // inside one tile — it did not before (40px), and spilled onto the
+    // neighbour.
+    void DrawMarkerTray(ImDrawList* a_dl, const ImVec2& a_boxMin, const ImVec2& a_boxMax,
+                        bool a_fav, bool a_stolen, bool a_poisoned);
+
+    // ★★1.0.5 — the item's own drop shadow, so a pale sprite does not vanish
+    // into a pale panel. Cream parchment sits at 177,160,131 once the occupied
+    // overlay is on it, and polished steel is brighter than that: the icon had
+    // colour but no edge, the same iso-luminance trap the rarity halo fell
+    // into. A dark halo behind the sprite gives it one at every skin.
+    //
+    // ★★Three settings, and they are the three a drop shadow has anywhere else:
+    // DISTANCE (px toward the lower right, 0 = ambient), BLUR (px of spread,
+    // 0 = a hard silhouette), OPACITY. See Theme::ShadowDist / Blur / Opacity.
+    //
+    // ★It draws the ICON'S OWN SPRITE in black, stamped repeatedly on a ring —
+    // no separate texture. An earlier build sampled a silhouette baked for the
+    // retired rarity halo, but that sprite lives on a 96px canvas: the capture
+    // was downsampled to it, blurred, then stretched back up to the tile, and
+    // the round trip put a floor under the softness that no radius could get
+    // below. Stamping runs at full capture resolution, so blur 0 really is the
+    // exact outline. Consecutive stamps share a texture and merge into one
+    // draw command, so the cost is vertices rather than draw calls.
+    //
+    // Callers pass the sprite geometry they are ABOUT to draw with, so the
+    // shadow can never drift out of register with the icon.
+    void DrawItemShadow(ImDrawList* a_dl, void* a_srv, const ImVec2& a_centre,
+                        float a_dw, float a_dh, float a_deg);
+
+    // ★★★1.0.5 — rarity is a CORNER WEDGE, and nothing else.
+    //
+    // Everything that tried to colour the item's own area failed, and the
+    // reason is worth keeping: a translucent halo is iso-luminant against a
+    // light panel, and an opaque ground turns the metadata into the loudest
+    // thing on the tile. Both were also fighting each skin's palette, because
+    // blue simply does not exist in a parchment world.
+    //
+    // A wedge sidesteps all of it by being SMALL. At roughly a quarter of a
+    // cell a colour reads as an accent rather than as wallpaper, so it can sit
+    // outside the skin's palette without looking foreign, and the icon keeps
+    // its own ground. It also costs two triangles.
+    //
+    // Drawn once per ITEM at the footprint's top-right, not per cell.
+    void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
+                         const ImVec2& a_boxMax, std::uint8_t a_haloBits);
+
     // Rarity glow, shared with the partner (loot/barter) window so its items
-    // glow exactly like the player grid's. GlowBits: bit1 = enchanted (EITM or
-    // crafted ExtraEnchantment), bit2 = unique (DESC, cached). DrawGlow paints
-    // the tinted silhouette halo mapped onto the DRAWN icon rect (radial
-    // across the cell box as the style-0 / no-sprite fallback).
+    // glow exactly like the player grid's.
+    //   bit1 = enchanted (EITM or crafted ExtraEnchantment)  -> halo
+    //   bit2 = unique (DESC, cached)                         -> halo
+    //   bit4 = poisoned                                      -> corner droplet
+    // ★Only bits 1|2 are a HALO. Bit 4 is a marker and must never reach the
+    // rarity switch, or a poison-only item takes the "both rarities" red.
+    // (There was a bit 8 for temper; nothing marks temper any more -- it is in
+    // the name, the damage number and the price, and by mid-game it is on
+    // nearly every weapon, so the mark carried no information.)
+    // DrawGlow paints the tinted silhouette halo mapped onto the DRAWN icon rect
+    // (radial across the cell box as the style-0 / no-sprite fallback).
     // GI1/D2: a_xl names the SUB-STACK being drawn -- pass nullptr for a plain
     // unit (one with no ExtraDataList of its own) or when there is no entry.
     // Before GI1 this scanned the whole entry, so a single enchanted sword in a
@@ -338,9 +513,11 @@ namespace FUI::Grid
 
     // Content signature of a sub-stack (0 = none). Stable across container moves.
     [[nodiscard]] std::uint16_t InstanceSigOf(RE::ExtraDataList* a_xl);
+    // GI62: a_rot = the tile's quarter-turn, so the SILHOUETTE halo lies at the
+    // same angle as the sprite it was cut from (the radial style is symmetric).
     void DrawGlow(ImDrawList* a_dl, RE::TESBoundObject* a_obj, std::uint8_t a_bits,
                   const ImVec2& a_iconMin, const ImVec2& a_iconMax,
-                  const ImVec2& a_boxMin, const ImVec2& a_boxMax);
+                  const ImVec2& a_boxMin, const ImVec2& a_boxMax, int a_rot = 0);
 
     // Phase 2 shared cell renderer: count/value badge hugging the tile's
     // top-left corner, full black outline (player tiles + partner grid).
@@ -348,6 +525,9 @@ namespace FUI::Grid
 
     // G2: coin-pouch withdraw window (slider) — top level, settings pattern.
     void DrawPouchWindow();
+    // GI63: the withdraw window takes the same keys as the quantity slider, so
+    // the prompt bar has to know it is up (it is not a LootBarter slider).
+    [[nodiscard]] bool IsPouchOpen();
     bool ClosePouch();   // I/ESC layering: close the withdraw window if open
 
     // F2: trash window — a 6x4 virtual bag view ("__trash") holding items
@@ -357,6 +537,28 @@ namespace FUI::Grid
     [[nodiscard]] bool IsTrashOpen();
     void ToggleTrash();          // the trash-can button
     bool CloseTrash();           // I/ESC layering: confirm-all + close if open
+    // ---- find by name -------------------------------------------------------
+    // ★Deliberately NOT a filter. Matching tiles keep their place and the rest
+    // dim, because a grid inventory's whole premise is that you remember where
+    // you put things — hiding the misses would erase the board you learned.
+    // The term is folded to lower case on the way in; matching is a substring.
+    [[nodiscard]] bool SearchActive();
+    [[nodiscard]] const std::string& SearchTerm();
+    void SetSearch(const char* a_term);
+    bool ClearSearch();   // I/ESC layering: false when nothing was set
+    // true = this tile does NOT match, so the caller should dim it. Cheap: the
+    // name comparison ran once per board change, this only asks a set.
+    [[nodiscard]] bool SearchMisses(const std::string& a_key);
+    // ★The raw test, for boards this module does not own (the partner window
+    // rebuilds its cells every frame, so it caches by FORM instead of by key).
+    // Returns true when no term is set, so callers need no special case.
+    // Not free — it lower-cases the name — so cache the answer, never call it
+    // once per tile per frame.
+    [[nodiscard]] bool SearchMatches(const char* a_name);
+
+    // ★The close-order stack needs to ASK, not just tell: it records the order
+    // layers opened in, which means observing each one every frame.
+    [[nodiscard]] bool IsTrashConfirmOpen();
     bool CloseTrashConfirm();    // I/ESC layering: dismiss the favorite ask
     void DrawTrashConfirm();     // favorite-intake confirm popup (top level)
     void ProcessTrashDeletes();  // UIRoot::Tick — engine RemoveItem, deferred
@@ -380,11 +582,37 @@ namespace FUI::Grid
     void RevertGame(SKSE::SerializationInterface* a_intfc);
     void MarkLayoutFresh();   // kNewGame: start empty, skip the legacy-ini fallback
 
+    // GI65: the menu is closing — everything on the board counts as seen, and
+    // the counts become the baseline the next opening is measured against.
+    void NoteInventorySeen();
+
     // Grid pixel metrics (main window sizes itself around these).
     inline constexpr int   kCols    = 10;
     inline constexpr int   kMinRows = 14;
     inline constexpr float kCell    = 48.0f;   // base cell at UI scale 1.0
 
     // H′: every layout metric goes through the global UI scale.
-    [[nodiscard]] inline float CellPx() { return kCell * Theme::Scale(); }
+    // ★Two scales: Theme::Scale() is the UI's, CellScale() is the board's.
+    // Everything measured in CELLS — the grid, the equipment slots, the item
+    // pictures — rides both; text, buttons and padding ride only the first.
+    [[nodiscard]] inline float CellPx()
+    {
+        return kCell * Theme::Scale() * Theme::CellScale();
+    }
+
+    // GI62: the drawn-icon nudge (`fx`, in cells) is authored for an UPRIGHT
+    // tile, where "off-centre" means sideways. Turn the tile and the nudge has
+    // to turn with it, or a rotated bow drifts along the wrong axis.
+    // ★Lives in the header because BOTH boards draw rotated sprites -- the same
+    // rule written twice is the same rule until the day one copy is edited.
+    [[nodiscard]] inline ImVec2 RotatedOffset(float a_cells, int a_rot)
+    {
+        const float px = a_cells * CellPx();
+        switch (a_rot & 3) {
+        case 1:  return ImVec2(0.0f, px);
+        case 2:  return ImVec2(-px, 0.0f);
+        case 3:  return ImVec2(0.0f, -px);
+        default: return ImVec2(px, 0.0f);
+        }
+    }
 }

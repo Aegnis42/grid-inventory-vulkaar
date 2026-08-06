@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <iosfwd>
 
@@ -33,6 +34,12 @@ namespace FUI
             std::string parent;            // "" = root; "main" or another key
             bool        posKnown = false;  // has a position (loaded or defaulted)
             int         lastSeen = -1;     // ImGui frame the window was last drawn
+            // ★GI72: the size we last ASKED ImGui for. `size` is what ImGui
+            // hands back, and it floors to whole pixels -- so "did the layout
+            // change?" has to be answered against the request, never against
+            // the readback, or a fractional request looks like a change on
+            // every single frame.
+            ImVec2      reqSize = ImVec2(0.0f, 0.0f);
         };
 
         static WinManager* GetSingleton();
@@ -61,8 +68,25 @@ namespace FUI
                                                    const std::string&)> a_apply,
                                 std::function<void()> a_done);
 
+        // ★Which corner stays put when a window's CODE-DEFINED size changes
+        //  while it is open. Sizes are not user-editable, but they do change:
+        //  the main window drops its whole equipment column in loot/barter mode
+        //  (~412px). Holding the top-LEFT fixed there slid the item grid
+        //  sideways by that width and stranded — or swallowed — whatever the
+        //  user had docked to the edge that moved (user report).
+        //  The main window pins its RIGHT edge because the grid is the part
+        //  that survives both modes and it is right-aligned in the frame; the
+        //  left column then appears and disappears leftwards, into the space
+        //  the partner window uses anyway.
+        enum class Anchor : std::uint8_t
+        {
+            kTopLeft = 0,   // default — position IS the top-left corner
+            kTopRight       // right edge holds; the window grows/shrinks leftwards
+        };
+
         // Call BEFORE ImGui::Begin: applies the stored position.
-        void ApplyNext(const std::string& a_key, ImVec2 a_defaultPos, ImVec2 a_defaultSize);
+        void ApplyNext(const std::string& a_key, ImVec2 a_defaultPos, ImVec2 a_defaultSize,
+                       Anchor a_anchor = Anchor::kTopLeft);
 
         // Call right after ImGui::Begin: draws the drag strip, records the
         // window rect, and starts a drag when the strip is grabbed.
@@ -73,6 +97,12 @@ namespace FUI
         // confirm dialogs — loadout buy/delete — look lopsided left-anchored).
         void TitleBar(const std::string& a_key, const char* a_label, float a_reserveRight = 0.0f,
                       bool a_centerTitle = false);
+
+        // Height of the title strip, scale included. Anything a caller draws
+        // INTO that strip (EDIT / SETTINGS / a bag's COLLECT) centres itself
+        // against this — hardcoding the number at each call site is how those
+        // controls drifted off the title's line.
+        [[nodiscard]] static float TitleBarH();
 
         // Phase 2: shared chrome for the centred confirm-style popups
         // (quantity slider / sell-confirm / loadout buy / delete):
@@ -97,9 +127,16 @@ namespace FUI
 
         Win&                     Ensure(const std::string& a_key);
         [[nodiscard]] bool       IsOpen(const Win& a_win) const;
-        std::vector<std::string> SubtreeOf(const std::string& a_key) const;
+        // a_openOnly=false includes docked windows that are currently closed —
+        // a resize must move them too, or they reopen detached.
+        std::vector<std::string> SubtreeOf(const std::string& a_key,
+                                           bool a_openOnly = true) const;
         void                     StartDrag(const std::string& a_key);
         void                     EndDrag();
+
+        // Re-place a_key for a new code-defined size: honour a_anchor and drag
+        // everything docked to it along the edge it was docked to.
+        void Reanchor(const std::string& a_key, ImVec2 a_newSize, Anchor a_anchor);
 
         // length of the shared (flush) edge between two rects; 0 = not touching
         static float ContactLen(ImVec2 a_min, ImVec2 a_max, ImVec2 b_min, ImVec2 b_max);

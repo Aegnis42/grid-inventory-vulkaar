@@ -76,6 +76,12 @@ namespace FUI
         // frame bakes the wrong orientation into the cache permanently.
         bool RotationApplied() const;
 
+        // GI68: is the engine still working on a model load? Separates "slow"
+        // from "never took" without guessing at the player's disk speed --
+        // a load that IS in flight deserves another pass later; one that never
+        // took (no task, no entry) will not improve with more time.
+        [[nodiscard]] bool LoadPending() const;
+
         void UnloadCurrent();  // unload AFTER the model landed (actually removes)
         // End3D+Begin3D recovery when loadedModels fills up (7 cap). Returns
         // false when DEFERRED: End3D derefs every entry's spModel, so a
@@ -106,6 +112,36 @@ namespace FUI
         // on the engine's own item scale, re-applied every frame because the
         // engine recomputes it; 0 restores the saved value.
         void SetInspectScale(float a_mul) { m_inspectScale = a_mul; }
+
+        // ★★1.0.5: where the capture lamp sits for the item being captured,
+        // as an OFFSET in degrees from the default rig. The scene has one
+        // light, so an item's brightness is decided by which face it turns
+        // toward it; this lets a def move the lamp instead of the item.
+        // Re-applied every frame while parked (the engine owns the scene and
+        // may reassert the scheme), and restored in End().
+        // ★The caller passes the TOTAL offset (global setting + item def) —
+        // see IconCache::CaptureLightFor. A changed global therefore arrives
+        // here as a changed value and re-arms the park gate, which is what
+        // makes moving the global slider re-photograph rather than re-use.
+        void SetLightOffset(float a_azDeg, float a_elDeg);
+
+        // ★DIAGNOSTIC (temporary): where the capture lamp is RIGHT NOW, tagged
+        // by the caller. The park-time log alone cannot say whether the value
+        // still held at the moment a capture was accepted — this is the other
+        // half of that comparison.
+        static void LogLightNow(const char* a_tag, const char* a_item);
+
+        // ★★Has THIS request's model been parked at least one full frame?
+        // RotationApplied() was doing this job by proxy and got it wrong: it
+        // asks "does the node carry the requested rotation", which a DIFFERENT
+        // item's leftover model answers YES to whenever the two share a
+        // rotation. Category defaults make that common — armor_head and
+        // armor_body_heavy are both rx:90 — so a body could be accepted while
+        // the helmet's model was still on screen, one frame before its own
+        // orientation and light were applied. Weapons and bags have distinct
+        // angles, which is the only reason they never showed it.
+        [[nodiscard]] bool ParkSettled() const;
+
         // B4: the boost in effect right now — a soft-skip requeue stashes it
         // so the retry doesn't restart the 1.6x ladder from zero
         float CaptureBoost() const { return m_captureBoost; }
@@ -115,12 +151,20 @@ namespace FUI
 
         bool Initialize();
         void Shutdown();
+        // ★The ONE place a model is handed to the engine — both call sites
+        // (fresh request, self-heal reload) go through it so the loader choice
+        // stays in a single spot.
+        void LoadForCapture(RE::Inventory3DManager* a_mgr, RE::TESBoundObject* a_item);
+
         void UpdateParking();   // apply def + move model under the park point
         // Engine scene teardown, retried via main-thread tasks until no model
         // load is in flight (see ResetScene note). Aborts when a_session no
         // longer matches (the menu reopened; the new session pairs its own
         // End3D).
         void TeardownWhenIdle(std::uint32_t a_session, int a_tries);
+        // ★Put the capture zoom back on the node before letting go of it.
+        // Every path that unloads MUST call this first — see m_scaledNode.
+        void RestoreNodeScale();
 
         bool                m_initialized = false;
         bool                m_running     = false;
@@ -141,12 +185,33 @@ namespace FUI
 
         ImVec2  m_parkPos = ImVec2(0.0f, 0.0f);
         bool    m_hasPark = false;
+        // GI68: consecutive self-heal repairs, for log throttling only.
+        int     m_healRun = 0;
         float   m_inspectScale  = 0.0f;   // 0 = off
         float   m_savedItemScale = 0.0f;  // engine value to restore
         bool    m_hasSavedScale = false;
         float   m_savedNodeScale = 1.0f;  // model node scale to restore
-        bool    m_nodeScaled = false;
+        // ★★The node we scaled, by IDENTITY — not a bool. A bool says "some
+        // node is scaled", which is the wrong question after an unload: the
+        // engine DEDUPES loads of the same nif and can hand the SAME node
+        // back, still carrying our 2.5x. Clearing a flag then re-saved that
+        // 2.5x as the base and multiplied again — 1068 -> 2670 -> 6675 ->
+        // 16689 -> 41723 radius in one EDIT rotation drag (measured). The
+        // pointer answers "did I already scale THIS node", which no unload
+        // timing can get wrong.
+        RE::NiAVObject* m_scaledNode = nullptr;
         float   m_captureBoost = 0.0f;   // min capture-box side requested by BoostCapture
+        float   m_lightAz = 0.0f;        // total lamp offset in effect (global + def)
+        float   m_lightEl = 0.0f;
+        // ★How many times UpdateParking has applied THIS request's orientation
+        // and light. 0 = never, 1 = applied but the frame it applied to has not
+        // been rendered yet, 2+ = settled.
+        // ★NOT a frame number: ImGui's counter advances inside Render, while
+        // parking happens in the game-update Tick, so "current frame > parked
+        // frame" could compare two readings taken from the same count and never
+        // become true — which stalled every capture until it timed out.
+        // Counting our own applications has no such ambiguity.
+        int     m_parkTicks = 0;
         IconDef m_def;   // rotation only — scale is a crop-region zoom (Request param)
 
         ID3D11Texture2D*          m_dstTex     = nullptr;

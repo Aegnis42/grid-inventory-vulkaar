@@ -1,9 +1,10 @@
-#include "ui/UIRoot.h"
+﻿#include "ui/UIRoot.h"
 #include "ui/Editor.h"
 #include "ui/Equip.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
 #include "ui/GridMenu.h"
+#include "ui/Fallback.h"
 #include "ui/Grid.h"
 #include "ui/LootBarter.h"
 #include "ui/IconCache.h"
@@ -18,6 +19,7 @@
 #include <imgui_impl_win32.h>
 #include <imgui_internal.h>   // ClearActiveID (drop text-field focus on close)
 
+#include <bit>            // countr_zero (pad button bookkeeping)
 #include <d3d11.h>
 #include <filesystem>
 
@@ -65,6 +67,51 @@ namespace FUI::UIRoot
             }
         }
 
+        // ★Mip-enabled sampler for the WHOLE ImGui pass. The DX11 backend's
+        // own sampler is created with MaxLOD = 0, which locks every draw to
+        // mip level 0 — the icon textures now carry a full CPU-built chain
+        // (IconCache) precisely so a ~250px capture shown in a ~40px cell is
+        // sampled from the right level instead of aliasing. Bound once at the
+        // head of the background draw list each frame; textures without mips
+        // (fonts, frames) sample identically under it, so one sampler serves
+        // everything.
+        ID3D11SamplerState* g_mipSampler = nullptr;
+
+        void MipSamplerCB(const ImDrawList*, const ImDrawCmd*)
+        {
+            auto* data = RE::BSGraphics::Renderer::GetRendererData();
+            auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
+            if (ctx && g_mipSampler) {
+                ctx->PSSetSamplers(0, 1, &g_mipSampler);
+            }
+        }
+
+        void CreateMipSampler(ID3D11Device* a_device)
+        {
+            if (g_mipSampler) return;
+            D3D11_SAMPLER_DESC sd = {};
+            sd.Filter         = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            // ★★CLAMP, not WRAP. Icons are drawn at uv 0..1, and a linear tap
+            // at uv 0 wants texel -0.5 — under WRAP that is the texel at the
+            // OPPOSITE edge, so the sprite's top row renders half-mixed with
+            // its bottom row. Realistic sprites are alpha-trimmed, so their
+            // edge rows are nearly transparent and it never showed; the PIXEL
+            // style ends every sprite in an opaque 1-dot outline, and any
+            // icon whose silhouette reaches the texture edge grew a straight
+            // line across the empty cells above it (reported on Exploration
+            // Pack, whose stacked books fill the bottom row solid).
+            // Nothing here tiles — every AddImage/AddImageQuad in this plugin
+            // passes uv inside 0..1 — so CLAMP is pixel-identical everywhere
+            // else, including the font atlas.
+            sd.AddressU       = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.AddressV       = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.AddressW       = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+            sd.MinLOD         = 0.0f;
+            sd.MaxLOD         = D3D11_FLOAT32_MAX;   // the one field that differs
+            a_device->CreateSamplerState(&sd, &g_mipSampler);
+        }
+
         void CreateFillLightBlend(ID3D11Device* a_device)
         {
             if (g_fillBlend) return;
@@ -79,11 +126,6 @@ namespace FUI::UIRoot
             bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
             a_device->CreateBlendState(&bd, &g_fillBlend);
         }
-        IconCache::Icon g_tornGlowA;   // torn 9-slice panel, thin cream rim (skin 3)
-        IconCache::Icon g_tornGlowB;   // torn 9-slice panel, soft cream halo (skin 4)
-        IconCache::Icon g_tornCreamA;  // V1 cream rebake (skin 5)
-        IconCache::Icon g_tornBrightB; // V2 bright rebake (skin 6)
-
         // B11: written from the render path, read from the message-queue path
         // — both are the main thread today, but atomics cost nothing and the
         // assumption is now explicit
@@ -100,7 +142,15 @@ namespace FUI::UIRoot
         std::string         g_inspKey;
         float g_inspRx = 0.0f, g_inspRy = 0.0f, g_inspRz = 0.0f;
         float g_inspRx0 = 0.0f, g_inspRy0 = 0.0f, g_inspRz0 = 0.0f;   // R resets here
-        float g_inspZoom = 1.0f;
+        // ★GI70: the view OPENS fully zoomed out and the wheel only ever adds.
+        // Opening at the middle of the range meant the first thing anyone did
+        // was scroll back to see the whole object -- and on a greatsword or a
+        // staff the ends were already off screen before they touched anything.
+        // Zoom is for looking closer at a detail; the default should be the
+        // shot that shows what the item IS.
+        constexpr float kInspZoomMin = 0.5f;
+        constexpr float kInspZoomMax = 3.5f;
+        float           g_inspZoom   = kInspZoomMin;
         // Grid's C press and the overlay's C toggle run in the SAME ImGui frame
         // (grid draws first) — without this the view would open and shut at once
         int   g_inspOpenFrame = -1;
@@ -111,6 +161,7 @@ namespace FUI::UIRoot
         // straight off the game window — chained WndProc into the ImGui
         // Win32 backend (Modex-style). Mouse stays on the Scaleform relay.
         WNDPROC g_origWndProc = nullptr;
+        HWND    g_gameWnd = nullptr;   // for ScreenToClient in MouseHandler
 
         LRESULT CALLBACK WndProcThunk(HWND h, UINT m, WPARAM w, LPARAM l)
         {
@@ -144,9 +195,72 @@ namespace FUI::UIRoot
         // The pak path rides in g_presetMergePak (same-thread handoff).
         std::atomic<bool> g_iconsMergePreset = false;
         std::string       g_presetMergePak;
+        // drawn-icon folder re-read (settings). Same frame-outside rule: the
+        // drawings it frees are in this frame's draw list until Render ends.
+        std::atomic<bool> g_flatReload = false;
+        // ...and how long its acknowledgement owns the prompt bar. The bar is
+        // where this UI already answers "what just happened / what can I do",
+        // so the confirmation belongs there rather than as a second label
+        // growing out of the button and shoving the row's layout around.
+        double g_flatReloadNote = 0.0;
 
         // (re)build the font atlas at 17px * UI scale. Call OUTSIDE the
         // NewFrame/Render pair only.
+        // ★GI71: the glyph range the active language pack wants, or null when it
+        // needs nothing beyond the built-in atlas. Presets cover what Windows
+        // ships a face for; the explicit "0x0400-0x052F" form is the escape
+        // hatch for anything else, because guessing a script's block boundaries
+        // is exactly the sort of thing a translator can look up and we cannot.
+        const ImWchar* PackRanges()
+        {
+            const char* r = Lang::FontRange();
+            if (!r || !r[0]) return nullptr;
+            auto& io = ImGui::GetIO();
+            std::string s(r);
+            for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (s == "cyrillic")   return io.Fonts->GetGlyphRangesCyrillic();
+            if (s == "greek")      return io.Fonts->GetGlyphRangesGreek();
+            if (s == "thai")       return io.Fonts->GetGlyphRangesThai();
+            if (s == "vietnamese") return io.Fonts->GetGlyphRangesVietnamese();
+            if (s == "latin-ext") {
+                static const ImWchar kLatinExt[] = { 0x0020, 0x024F, 0 };
+                return kLatinExt;
+            }
+            // explicit "0xAAAA-0xBBBB" (repeatable, comma separated)
+            static ImVector<ImWchar> s_custom;
+            s_custom.clear();
+            size_t pos = 0;
+            while (pos < s.size()) {
+                const auto comma = s.find(',', pos);
+                const auto part  = s.substr(pos, comma == std::string::npos
+                                                     ? std::string::npos : comma - pos);
+                const auto dash  = part.find('-');
+                if (dash != std::string::npos) {
+                    const auto lo = std::strtoul(part.substr(0, dash).c_str(), nullptr, 0);
+                    const auto hi = std::strtoul(part.substr(dash + 1).c_str(), nullptr, 0);
+                    if (lo > 0 && hi >= lo && hi <= 0xFFFF) {
+                        s_custom.push_back(static_cast<ImWchar>(lo));
+                        s_custom.push_back(static_cast<ImWchar>(hi));
+                    }
+                }
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
+            if (s_custom.empty()) {
+                SKSE::log::warn("[LANG] unrecognised #range '{}' - no extra glyphs baked", r);
+                return nullptr;
+            }
+            s_custom.push_back(0);
+            return s_custom.Data;
+        }
+
+        // ★Body text size. Measured against the 24px window title: at 17 the
+        // title's caps came out 11px and a label's 7px, and a 1px outline that
+        // is a thin edge on 11px eats the whole gap between strokes on 7px —
+        // the label reads as a dark clot rather than an outlined word. 20
+        // narrows that ratio and is the size the panel wanted anyway.
+        constexpr float kBodyFont = 17.0f;
+
         void BuildFonts()
         {
             auto& io = ImGui::GetIO();
@@ -174,25 +288,36 @@ namespace FUI::UIRoot
                 ImFontConfig base;
                 base.OversampleH = 2;
                 base.OversampleV = 2;   // default V=1 leaves dense hangul strokes rough
-                g_fontMain = io.Fonts->AddFontFromFileTTF(kMalgun, 17.0f * k, &base, mainRanges.Data);
+                g_fontMain = io.Fonts->AddFontFromFileTTF(kMalgun, kBodyFont * k, &base, mainRanges.Data);
                 ImFontConfig mc;
                 mc.MergeMode = true;
                 mc.OversampleH = 2;
                 mc.OversampleV = 2;
                 if (exists(kYaHei)) {
-                    io.Fonts->AddFontFromFileTTF(kYaHei, 17.0f * k, &mc,
+                    io.Fonts->AddFontFromFileTTF(kYaHei, kBodyFont * k, &mc,
                         io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
                 }
                 const char* jp = exists(kMeiryo) ? kMeiryo : (exists(kYuGoth) ? kYuGoth : nullptr);
                 if (jp) {
-                    io.Fonts->AddFontFromFileTTF(jp, 17.0f * k, &mc, io.Fonts->GetGlyphRangesJapanese());
+                    io.Fonts->AddFontFromFileTTF(jp, kBodyFont * k, &mc, io.Fonts->GetGlyphRangesJapanese());
                 }
                 // malgun has no U+2699 (gear) / U+270E (pencil) — Segoe UI Symbol
                 // supplies them (merge skips codepoints malgun already covers)
                 const char* kSegSym = "C:\\Windows\\Fonts\\seguisym.ttf";
                 static const ImWchar symRanges[] = { 0x2010, 0x2BFF, 0 };
                 if (exists(kSegSym)) {
-                    io.Fonts->AddFontFromFileTTF(kSegSym, 17.0f * k, &mc, symRanges);
+                    io.Fonts->AddFontFromFileTTF(kSegSym, kBodyFont * k, &mc, symRanges);
+                }
+                // ★GI71: whatever the active language pack asks for, merged LAST
+                // so it only fills gaps. #range is the part that matters: the
+                // atlas above bakes Latin + Hangul + CJK and nothing else, so a
+                // Cyrillic pack draws tofu until it names the range — even when
+                // the face already on disk has the glyphs. #font is optional;
+                // omitted, the extra range is baked from the main face.
+                if (const ImWchar* extra = PackRanges()) {
+                    const char* pf = Lang::FontPath();
+                    const char* face = (pf && pf[0] && exists(pf)) ? pf : kMalgun;
+                    io.Fonts->AddFontFromFileTTF(face, kBodyFont * k, &mc, extra);
                 }
             } else {
                 g_fontMain = io.Fonts->AddFontDefault();
@@ -203,17 +328,335 @@ namespace FUI::UIRoot
             g_bakedScale = k;
         }
 
+        // ---- gamepad (user report: "no pointer at all on a controller") ----
+        //
+        // The mod never owned a pointer: it borrowed the game's Cursor Menu and
+        // read MenuCursor::cursorPos*. Both are mouse-only — in gamepad mode
+        // the engine suppresses that cursor and never advances its position, so
+        // the UI kept running with nothing to aim and no way to click.
+        //
+        // So on a controller we draw and drive our own: ImGui's software cursor
+        // at a position WE integrate from the left stick, with the pad's face
+        // buttons translated into the mouse/key events every existing call site
+        // already understands. Nothing downstream needed to learn about pads.
+        // ★What a pad button MEANS is asked of the engine, not hardcoded.
+        //  ControlMap knows what this player bound each button to in OUR input
+        //  context, so a remap (or a non-Xbox pad the engine maps differently)
+        //  is followed for free. We only decide what each ACTION does to the
+        //  grid — which is the part no engine could know, since vanilla's pad
+        //  inventory is a list with no pointer at all.
+        enum PadAction : std::uint32_t
+        {
+            kActPrimary   = 1u << 0,   // pick up / place      (left click)
+            kActSecondary = 1u << 1,   // equip / read / bag   (right click)
+            kActDrop      = 1u << 2,   // drop one / take all  (R)
+            kActFavorite  = 1u << 3,   // toggle star          (F)
+            kActInspect   = 1u << 4,   // 3D view              (C)
+            kActSplit     = 1u << 5,   // stack split / compare (Shift)
+            kActNudgeL    = 1u << 6,
+            kActNudgeR    = 1u << 7,
+            kActNudgeU    = 1u << 8,
+            kActNudgeD    = 1u << 9,
+        };
+
+        std::atomic<std::uint32_t> g_padRaw{ 0 };       // physical buttons held
+        std::uint32_t              g_btnAction[32]{};   // action of each held bit
+        std::atomic<std::uint32_t> g_padHeld{ 0 };      // OR of held actions
+        std::uint32_t              g_padPrev = 0;       // actions consumed last frame
+        std::atomic<float>         g_padMoveX{ 0.0f };   // left stick, deadzoned
+        std::atomic<float>         g_padMoveY{ 0.0f };
+        std::atomic<float>         g_padScrollY{ 0.0f };  // right stick
+        std::atomic<bool>          g_padActive{ false };  // a pad drives the UI
+        ImVec2                     g_padCursor{ 0.0f, 0.0f };
+
+        constexpr float kPadCursorSpeed = 1400.0f;   // px/s at full deflection
+        constexpr float kPadScrollRate  = 26.0f;
+
+        std::atomic<bool> g_padSeed{ false };   // park the cursor mid-screen once
+        std::atomic<bool> g_padSuppressed{ false };   // the mouse took over
+
+        // Who owns the pointer on a pad — decided ONCE by observation, never
+        // per frame (a per-frame verdict is what made it blink).
+        enum class PadCursorMode : std::uint8_t
+        {
+            kProbing = 0,   // offering the stick to the engine, watching
+            kEngine,        // the game's own arrow follows: use it, draw nothing
+            kOwn            // it does not: integrate and draw our own
+        };
+        PadCursorMode g_padCursorMode = PadCursorMode::kProbing;
+        float         g_engineLastX = 0.0f;
+        float         g_engineLastY = 0.0f;
+        int           g_engineStillFrames = 0;
+        bool              g_bookWasOpen = false;   // Book Menu edge (see Render)
+
+        // Called from the input sink (game thread, but not the render pass) —
+        // only flags are touched here; the cursor is seeded during the frame.
+        // a_fromDevice: an actual pad event, which is the ONLY thing allowed to
+        // lift a mouse takeover. The engine's mode flag must not, or the two
+        // would keep handing the pointer back and forth.
+        void MarkPadActive(bool a_fromDevice)
+        {
+            if (a_fromDevice) g_padSuppressed.store(false);
+            if (!g_padActive.exchange(true)) g_padSeed.store(true);
+        }
+
+        // actions -> the input this UI is already built on
+        void TranslatePadButtons()
+        {
+            auto& io = ImGui::GetIO();
+            const std::uint32_t now = g_padHeld.load();
+            const std::uint32_t changed = now ^ g_padPrev;
+            if (changed == 0) return;
+
+            const auto edge = [&](std::uint32_t a_bit) { return (changed & a_bit) != 0; };
+            const auto down = [&](std::uint32_t a_bit) { return (now & a_bit) != 0; };
+
+            if (edge(kActPrimary))   io.AddMouseButtonEvent(0, down(kActPrimary));
+            if (edge(kActSecondary)) io.AddMouseButtonEvent(1, down(kActSecondary));
+            if (edge(kActDrop))      io.AddKeyEvent(ImGuiKey_R, down(kActDrop));
+            if (edge(kActFavorite))  io.AddKeyEvent(ImGuiKey_F, down(kActFavorite));
+            if (edge(kActInspect))   io.AddKeyEvent(ImGuiKey_C, down(kActInspect));
+            if (edge(kActSplit)) {
+                io.AddKeyEvent(ImGuiMod_Shift, down(kActSplit));
+                io.AddKeyEvent(ImGuiKey_LeftShift, down(kActSplit));
+            }
+            // d-pad nudges exactly one cell — the only way to hit a specific
+            // tile reliably without a mouse
+            const float step = Grid::CellPx();
+            if (edge(kActNudgeL) && down(kActNudgeL)) g_padCursor.x -= step;
+            if (edge(kActNudgeR) && down(kActNudgeR)) g_padCursor.x += step;
+            if (edge(kActNudgeU) && down(kActNudgeU)) g_padCursor.y -= step;
+            if (edge(kActNudgeD) && down(kActNudgeD)) g_padCursor.y += step;
+
+            g_padPrev = now;
+        }
+
+        // Ask the engine first; fall back to the physical layout for anything
+        // the Inventory context leaves unbound (the triggers, typically).
+        std::uint32_t ActionForButton(std::uint32_t a_idCode)
+        {
+            using K = RE::BSWin32GamepadDevice::Keys;
+            auto* cm = RE::ControlMap::GetSingleton();
+            auto* ue = RE::UserEvents::GetSingleton();
+            if (cm && ue) {
+                // ★Ask the contexts that actually CARRY gamepad bindings, in
+                //  order. Our menu declares kInventory (so the Inventory key
+                //  toggles it), but measured in game that context binds almost
+                //  nothing for a pad — every button came back "(unbound)" and
+                //  the whole mapping was silently running on the fallback
+                //  below. Vanilla's own item screens live in kItemMenu /
+                //  kMenuMode, which is where the real bindings are.
+                using Ctx = RE::UserEvents::INPUT_CONTEXT_ID;
+                std::string_view name{};
+                for (const auto ctx : { Ctx::kItemMenu, Ctx::kMenuMode, Ctx::kInventory }) {
+                    name = cm->GetUserEventName(a_idCode, RE::INPUT_DEVICE::kGamepad, ctx);
+                    if (!name.empty()) break;
+                }
+                const auto is = [&](const RE::BSFixedString& a_ev) {
+                    const char* s = a_ev.c_str();
+                    return s && !name.empty() && name == s;
+                };
+                // Vanilla already has a name for most of what our grid does —
+                // use ITS name, so the player's own binding decides the button.
+                // Measured: vanilla's item screens hand the face buttons over
+                // as GENERIC names (XButton / YButton) and let the menu decide
+                // what they mean — exactly what we are doing. Only Accept /
+                // Cancel and the equip actions carry a meaning of their own.
+                if (is(ue->accept))         return kActPrimary;
+                if (is(ue->equip) || is(ue->xButton)) return kActSecondary;
+                if (is(ue->dropItem) || is(ue->takeAll) || is(ue->yButton)) return kActDrop;
+                if (is(ue->toggleFavorite)) return kActFavorite;
+                if (is(ue->itemZoom))       return kActInspect;
+                if (is(ue->left))  return kActNudgeL;
+                if (is(ue->right)) return kActNudgeR;
+                if (is(ue->up))    return kActNudgeU;
+                if (is(ue->down))  return kActNudgeD;
+            }
+            // Physical layout for the rest. The triggers deliberately stay
+            // here: the item menu calls them LeftEquip / RightEquip, and
+            // pinning our split modifier to THAT name would make it wander if
+            // the player rebinds hand-equip. A trigger is a trigger.
+            switch (a_idCode) {
+            case K::kA:             return kActPrimary;
+            case K::kX:             return kActSecondary;
+            case K::kY:             return kActDrop;
+            case K::kLeftShoulder:  return kActFavorite;
+            case K::kRightShoulder: return kActInspect;
+            case K::kLeftTrigger:
+            case K::kRightTrigger:  return kActSplit;
+            case K::kLeft:          return kActNudgeL;
+            case K::kRight:         return kActNudgeR;
+            case K::kUp:            return kActNudgeU;
+            case K::kDown:          return kActNudgeD;
+            default:                return 0;
+            }
+        }
+
+        // Hint labels: which pad button ends up carrying each action. Answering
+        // runs the binding lookup above (ControlMap + string compares) once per
+        // button, so it is resolved on menu open and cached — KeyLabel() is
+        // called every frame a tooltip is up.
+        const char* g_padLabel[8]{};   // indexed by Act
+        bool        g_padLabelReady = false;
+
+        void ResolvePadLabels()
+        {
+            using K = RE::BSWin32GamepadDevice::Keys;
+            // Xbox names, which is what vanilla prints too. A pad with another
+            // layout still lands on the right BUTTON — the engine normalises
+            // every controller onto these codes.
+            static constexpr struct { std::uint32_t id; const char* name; } kBtn[] = {
+                { K::kA, "A" }, { K::kB, "B" }, { K::kX, "X" }, { K::kY, "Y" },
+                { K::kLeftShoulder, "LB" }, { K::kRightShoulder, "RB" },
+                { K::kLeftTrigger, "LT" }, { K::kRightTrigger, "RT" },
+                { K::kLeftThumb, "LS" }, { K::kRightThumb, "RS" },
+                { K::kUp, "D-Up" }, { K::kDown, "D-Down" },
+                { K::kLeft, "D-Left" }, { K::kRight, "D-Right" },
+            };
+            static constexpr std::uint32_t kWanted[] = {
+                kActPrimary, kActSecondary, kActDrop,
+                kActFavorite, kActInspect, kActSplit,
+                // GI63 rotate: no game action, so nothing can ever match these
+                // (ActionForButton never returns 0) and they stay nullptr --
+                // which is exactly right, the keys really are keyboard-only.
+                0, 0,
+            };
+            static_assert(std::size(kWanted) == std::size(g_padLabel));
+
+            for (auto& s : g_padLabel) s = nullptr;
+            for (const auto& b : kBtn) {
+                const std::uint32_t act = ActionForButton(b.id);
+                if (act == 0) continue;
+                for (std::size_t i = 0; i < std::size(kWanted); ++i) {
+                    // first button wins — both triggers carry kActSplit
+                    if ((act & kWanted[i]) != 0 && !g_padLabel[i]) g_padLabel[i] = b.name;
+                }
+            }
+            g_padLabelReady = true;
+        }
+
         void MouseHandler()
         {
+            auto& io = ImGui::GetIO();
+
+            // ★Who owns the pointer is decided by the ENGINE's input mode and by
+            //  real device events — NEVER by watching the OS cursor position.
+            //  In gamepad mode the game parks that cursor at screen centre and
+            //  keeps warping it back, so reading its movement as "the user
+            //  grabbed the mouse" kicked us out of pad mode at random; the next
+            //  stick event pulled us back in, and the pointer alternated
+            //  between the stick position and dead centre every few frames.
+            //  That is the tooltip/carried-item flicker at screen centre.
+            if (auto* idm = RE::BSInputDeviceManager::GetSingleton()) {
+                const bool padMode = idm->IsGamepadEnabled();
+                if (padMode && !g_padSuppressed.load()) {
+                    MarkPadActive(false);
+                } else if (!padMode) {
+                    g_padActive.store(false);
+                }
+            }
+
+            // Handing back to the mouse with a pad button still held would
+            // leave ImGui with a button that is down forever — its release is
+            // only translated while pad mode is on. Flush it here.
+            if (!g_padActive.load() && g_padPrev != 0) {
+                g_padRaw.store(0);
+                g_padHeld.store(0);
+                TranslatePadButtons();   // emits the releases
+            }
+
+            if (g_padActive.load()) {
+                auto* mc = RE::MenuCursor::GetSingleton();
+                auto* uiS = RE::UI::GetSingleton();
+                const bool cursorUp =
+                    mc && uiS && uiS->IsMenuOpen(RE::CursorMenu::MENU_NAME);
+
+                const bool justSeeded = g_padSeed.exchange(false);
+                if (justSeeded) {
+                    // Take over from wherever the pointer already is, so the
+                    // handover from mouse to stick has no jump.
+                    g_padCursor = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+                    if (mc && mc->cursorPosX >= 0.0f && mc->cursorPosX < io.DisplaySize.x &&
+                        mc->cursorPosY >= 0.0f && mc->cursorPosY < io.DisplaySize.y) {
+                        g_padCursor = ImVec2(mc->cursorPosX, mc->cursorPosY);
+                    }
+                }
+
+                const float mx = g_padMoveX.load();
+                const float my = g_padMoveY.load();
+                const bool  wanted = (mx != 0.0f || my != 0.0f);
+
+                // ★Did the ENGINE advance its own cursor? That is the whole
+                //  question, and it is cheaper to observe than to predict:
+                //  FeedEngineCursor hands CursorMenu the real stick event, and
+                //  if its own handler acts on it, cursorPos* moves by itself.
+                //  Latch the answer once — deciding per frame is what made the
+                //  pointer blink, since the verdict flipped with the Cursor
+                //  Menu's own open/close.
+                bool engineMoved = false;
+                if (cursorUp && !justSeeded) {
+                    engineMoved = (mc->cursorPosX != g_engineLastX ||
+                                   mc->cursorPosY != g_engineLastY);
+                }
+                if (cursorUp) {
+                    g_engineLastX = mc->cursorPosX;
+                    g_engineLastY = mc->cursorPosY;
+                }
+
+                if (g_padCursorMode == PadCursorMode::kProbing && wanted) {
+                    if (engineMoved) {
+                        g_padCursorMode = PadCursorMode::kEngine;
+                        SKSE::log::info("[PAD] the engine drives its own cursor — using it");
+                    } else if (++g_engineStillFrames > 20) {
+                        g_padCursorMode = PadCursorMode::kOwn;
+                        SKSE::log::info("[PAD] engine cursor did not follow — drawing our own");
+                    }
+                }
+
+                if (g_padCursorMode == PadCursorMode::kEngine) {
+                    // The game's arrow IS the pointer; just follow it.
+                    g_padCursor = ImVec2(mc->cursorPosX, mc->cursorPosY);
+                    io.MouseDrawCursor = false;
+                } else {
+                    const float dt = std::clamp(io.DeltaTime, 1.0f / 240.0f, 1.0f / 20.0f);
+                    g_padCursor.x += mx * kPadCursorSpeed * dt;
+                    g_padCursor.y += my * kPadCursorSpeed * dt;
+                    g_padCursor.x = std::clamp(g_padCursor.x, 0.0f, io.DisplaySize.x - 1.0f);
+                    g_padCursor.y = std::clamp(g_padCursor.y, 0.0f, io.DisplaySize.y - 1.0f);
+                    io.MouseDrawCursor = true;
+                    // Keep the game's frozen arrow parked on top of ours, so the
+                    // sync it does perform (on a button press) lands HERE rather
+                    // than leaving a second arrow stranded mid-screen. Not done
+                    // while probing: it would forge the very signal we measure.
+                    if (g_padCursorMode == PadCursorMode::kOwn && mc) {
+                        mc->cursorPosX = g_padCursor.x;
+                        mc->cursorPosY = g_padCursor.y;
+                    }
+                }
+                io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
+                io.AddMousePosEvent(g_padCursor.x, g_padCursor.y);
+                TranslatePadButtons();
+                if (const float sy = g_padScrollY.load(); sy != 0.0f) {
+                    AddScrollEvent(0.0f, sy * kPadScrollRate);
+                }
+                return;
+            }
+
+            io.MouseDrawCursor = false;
             if (auto* ui = RE::UI::GetSingleton()) {
-                POINT cursorPos;
                 if (ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)) {
                     const auto* menuCursor = RE::MenuCursor::GetSingleton();
-                    ImGui::GetIO().AddMouseSourceEvent(ImGuiMouseSource_Mouse);
-                    ImGui::GetIO().AddMousePosEvent(menuCursor->cursorPosX, menuCursor->cursorPosY);
-                } else if (GetCursorPos(&cursorPos) != FALSE) {
-                    ImGui::GetIO().AddMousePosEvent(
-                        static_cast<float>(cursorPos.x), static_cast<float>(cursorPos.y));
+                    io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
+                    io.AddMousePosEvent(menuCursor->cursorPosX, menuCursor->cursorPosY);
+                } else if (POINT client{}; GetCursorPos(&client) != FALSE) {
+                    // ★CLIENT coordinates. GetCursorPos is desktop-absolute, so
+                    // windowed/offset setups fed a position shifted by the whole
+                    // window origin — and since this branch alternates with the
+                    // Cursor Menu one above whenever that menu is flickering,
+                    // the carried item icon jumped between the two every frame.
+                    if (g_gameWnd) ScreenToClient(g_gameWnd, &client);
+                    io.AddMousePosEvent(static_cast<float>(client.x),
+                                        static_cast<float>(client.y));
                 }
             }
         }
@@ -287,9 +730,69 @@ namespace FUI::UIRoot
             float S;           // UI scale
         };
 
+        // ★ImGui cannot outline the text it draws, so anything that needs the
+        // outline is drawn by US at the cursor and then given the same space
+        // back with a Dummy. Layout is unchanged — SameLine and wrapping still
+        // see an item of exactly the text's size.
+        void OutlinedText(ImU32 a_col, const char* a_txt,
+                          float a_size = 0.0f, float a_spacing = 0.0f)
+        {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const ImVec2 ts = Theme::TrackedSize(a_txt, a_size, a_spacing);
+            Theme::TextOutlined(ImGui::GetWindowDrawList(), p, a_col, a_txt,
+                                a_size, a_spacing);
+            ImGui::Dummy(ts);
+        }
+
+        // ★Values are RIGHT-aligned in the settings panel, the way the stats
+        // panel already reads. Left-starting values left a 114px ragged edge
+        // — and the ragged shape changed with every translation, because a
+        // Korean button is wider than its English label.
+        void RightAlign(float a_w)
+        {
+            const float avail = ImGui::GetContentRegionAvail().x;
+            if (avail > a_w) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - a_w);
+        }
+        float BtnW(const char* a_label)
+        {
+            return ImGui::CalcTextSize(a_label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        }
+        float BtnRowW(std::initializer_list<const char*> a_labels)
+        {
+            const float gap = ImGui::GetStyle().ItemSpacing.x;
+            float w = 0.0f; bool first = true;
+            for (const char* l : a_labels) { if (!first) w += gap; w += BtnW(l); first = false; }
+            return w;
+        }
+
+        // ★★ONE path for every settings slider, so the right-click gesture and
+        // the line that explains it cannot drift apart — the failure mode of
+        // "add the reset, forget the hint on one row" is silent, because a
+        // gesture nobody is told about looks exactly like no gesture.
+        // The EDIT panel answers this question differently, with a "(def 90°)"
+        // column beside each field. These rows have no width to spare, so the
+        // help goes to the bottom bar, which already carries hover help.
+        bool SettingSlider(const char* a_id, float* a_v, float a_lo, float a_hi,
+                           float a_w, float a_def, const char* a_fmt = "%.2f")
+        {
+            const bool ch =
+                Theme::ChromeSliderFloat(a_id, a_v, a_lo, a_hi, a_w, a_fmt, a_def);
+            if (ImGui::IsItemHovered()) {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "%s  %.2f",
+                    Lang::T(Lang::Str::HintSliderReset), a_def);
+                NoteHoverHint(buf);
+            }
+            return ch;
+        }
+
         void SettingLabel(const SettingsCtx& a_c, Lang::Str a_label)
         {
-            ImGui::TextColored(Theme::S().inkDim, "%s", Lang::T(a_label));
+            // ★All-caps applied HERE, not in the strings: a built-in that
+            // already reads "PRECACHE ALL" is replaced by en.ini's "Precache
+            // All" (rule 91), which is why that one row came out sentence case
+            // while its neighbours did not. See Lang::UpperCase.
+            OutlinedText(Theme::Chrome(1.0f), Lang::UpperCase(Lang::T(a_label)).c_str());
             ImGui::SameLine(a_c.padLabelW);
         }
 
@@ -301,9 +804,10 @@ namespace FUI::UIRoot
         void RowScale(const SettingsCtx& a_c)
         {
             SettingLabel(a_c, Lang::Str::ScaleLabel);
+            RightAlign(a_c.trackW);
             static float s_pending = -1.0f;
             float sc = s_pending > 0.0f ? s_pending : Theme::Scale();
-            if (Theme::ChromeSliderFloat("##uiscale", &sc, 0.5f, 1.6f, a_c.trackW)) {
+            if (SettingSlider("##uiscale", &sc, 0.5f, 1.6f, a_c.trackW, Theme::kDefScale)) {
                 s_pending = sc;
             }
             if (ImGui::IsItemDeactivatedAfterEdit()) {
@@ -318,63 +822,246 @@ namespace FUI::UIRoot
             }
         }
 
-        // SKIN — mockup swatch colours (representative, not raw winBg)
+        // CELL — the BOARD's scale. ★Its own row because it answers a
+        // different question from SCALE: that one is "how big is the text",
+        // this one is "how much screen does the window take". The grid and the
+        // equipment doll are 97% of the window's width and both are built from
+        // cells, so this is the only control that actually shrinks it.
+        void RowCellScale(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::CellScaleLabel);
+            RightAlign(a_c.trackW);
+            float cs = Theme::CellScale();
+            if (SettingSlider("##cellscale", &cs, 0.6f, 1.2f, a_c.trackW,
+                              Theme::kDefCellScale)) {
+                Theme::SetCellScale(cs);
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                WinManager::GetSingleton()->Save();
+                Grid::RequestRebuild();   // cell size changes what fits per row
+            }
+        }
+
+        // SKIN — ★GI73: grouped by CHROME FAMILY, two colour variants each.
+        //
+        // Six flat colour chips could not say what any of them were: 3/4 are
+        // 1/2 with a torn frame and 5/6 differ ONLY in panel transparency, so
+        // a 1px accent ring was carrying the entire distinction and losing.
+        // Now the family caption carries the frame, a base+wedge split carries
+        // the accent, and the two Glass chips are drawn at their REAL alpha
+        // over a hatch — transparency is not a colour and cannot be shown as
+        // one, so it is shown as itself.
         void RowSkin(const SettingsCtx& a_c)
         {
             const auto& sk = Theme::S();
             auto* dl = ImGui::GetWindowDrawList();
-            struct SwCol { ImU32 fill; ImU32 inner; };
-            static constexpr SwCol kSw[6] = {
-                { IM_COL32(0xD8, 0xB8, 0x78, 255), 0 },                                  // amber
-                { IM_COL32(0x0B, 0x0A, 0x09, 255), IM_COL32(0xA8, 0x40, 0x2F, 255) },    // black+crimson
-                { IM_COL32(0x1A, 0x18, 0x16, 255), IM_COL32(0xD8, 0xB8, 0x78, 255) },    // amber torn
-                { IM_COL32(0x1A, 0x18, 0x16, 255), IM_COL32(0xA8, 0x40, 0x2F, 255) },    // oathvein torn
-                { IM_COL32(0x14, 0x14, 0x16, 255), IM_COL32(0x86, 0x26, 0x1C, 255) },    // quickloot dark
-                { IM_COL32(0x3A, 0x3A, 0x40, 255), IM_COL32(0xD4, 0xD4, 0xD8, 255) },    // quickloot glass
+
+            // ★Desaturated against the raw accent values. A 24px chip of solid
+            // #D8B878 is a far brighter object than the same hue spread thin
+            // over a window border, and six of them in a row glared. Pulled
+            // ~40% toward their own luminance and darkened a touch; the hue is
+            // unchanged, so they still read as gold / crimson / bone.
+            constexpr ImU32 kGold  = IM_COL32(0xC0, 0xAE, 0x89, 255);
+            constexpr ImU32 kBrown = IM_COL32(0x6B, 0x4A, 0x2A, 255);
+            constexpr ImU32 kBlack = IM_COL32(0x14, 0x14, 0x14, 255);
+            constexpr ImU32 kRed   = IM_COL32(0x99, 0x46, 0x38, 255);
+            constexpr ImU32 kWhite = IM_COL32(0xCE, 0xCA, 0xC2, 255);
+
+            struct Sw
+            {
+                ImU32 base;    // 0 = translucent: draw the hatch and use `alpha`
+                ImU32 wedge;
+                int   alpha;   // panel alpha, 0-255, only when base == 0
             };
+            constexpr ImU32 kBlue  = IM_COL32(0x53, 0x97, 0xB9, 255);
+            constexpr ImU32 kNavy  = IM_COL32(0x1C, 0x44, 0x84, 255);
+            // ★★The SIMPLE chips carry each theme's OWN panel and chrome —
+            // that pair is what the whole skin is, and a hand-picked swatch
+            // would be a second copy of a colour that already exists in
+            // Theme.cpp. Keep in step with the skin table there.
+            static constexpr Sw kSw[11] = {
+                { kBlack, kRed,   0 },    // 1 Fable Crimson
+                { kGold,  kBrown, 0 },    // 2 Parchment Amber
+                { kBlack, kWhite, 0 },    // 3 Parchment Crimson
+                { 0,      kRed,   148 },  // 4 Glass Dark    (0.58)
+                { 0,      kRed,   97 },   // 5 Glass Clear   (0.38)
+                { kBlue,  kNavy,  0 },    // 6 Simple (0.86 — near solid)
+                { IM_COL32(0x84, 0x8B, 0x91, 255), IM_COL32(0x43, 0x47, 0x4F, 255), 0 },  // 7 Silver
+                { IM_COL32(0x6D, 0x78, 0x84, 255), IM_COL32(0x2F, 0x33, 0x3F, 255), 0 },  // 8 Graphite
+                { IM_COL32(0xAE, 0x67, 0x53, 255), IM_COL32(0x61, 0x3E, 0x1C, 255), 0 },  // 9 Copper
+                { IM_COL32(0xA7, 0x5A, 0x75, 255), IM_COL32(0x5C, 0x22, 0x27, 255), 0 },  // 10 Wine
+                { IM_COL32(0x5B, 0xA6, 0x75, 255), IM_COL32(0x22, 0x5B, 0x45, 255), 0 },  // 11 Forest
+            };
+            // ★★A family is now a RANGE, not a pair. It was {a, b} with 0
+            // meaning "no second member", which capped every family at two and
+            // needed a skip in both the draw loop and the hit test — the kind
+            // of duplication that put the two out of step once already (see the
+            // hit-test note below). SIMPLE has six members now; first/count
+            // says so once and both loops read it.
+            struct Fam { const char* name; int first, count; };
+            // ★Fable lost its amber half (it was Parchment Amber's twin in
+            // everything but the frame), so that family is down to one chip.
+            static constexpr Fam kFam[4] = {
+                { "FABLE", 1, 1 }, { "PARCHMENT", 2, 2 }, { "GLASS", 4, 2 },
+                { "SIMPLE", 6, 6 }
+            };
+            // ★Families wrap. Eleven chips in one row would push the settings
+            // window ~160px wider than every other control needs, so a family
+            // that does not fit starts a new line — and a family is never split
+            // across lines, because the caption belongs to its chips.
+            const float kRowMax = 232.0f * a_c.S;
+
+            const float side  = 24.0f * a_c.S;
+            const float capH  = 15.0f * a_c.S;
+            const float capPx = Theme::FontCaption();
+            // ★The family gap is set by the CAPTION, not by the chips: at 12px
+            // "PARCHMENT" is wider than the two 24px chips it labels, so the
+            // gap has to absorb the overhang or it runs into GLASS. Keep this
+            // in step with kFamGap in the swatchW budget above.
+            const float famGap = 16.0f * a_c.S;
+            ImFont*     font   = ImGui::GetFont();
+
             SettingLabel(a_c, Lang::Str::SkinLabel);
-            for (int i = 1; i <= Theme::SkinCount(); ++i) {
-                ImGui::PushID(i);
-                const ImVec2 p0 = ImGui::GetCursorScreenPos();
-                const float side = 24.0f * a_c.S;
-                ImGui::InvisibleButton("##skin", ImVec2(side, side));
-                const ImVec2 p1(p0.x + side, p0.y + side);
-                dl->AddRectFilled(p0, p1, kSw[i - 1].fill, 4.0f);
-                if (kSw[i - 1].inner) {
-                    dl->AddRect(ImVec2(p0.x + 1, p0.y + 1), ImVec2(p1.x - 1, p1.y - 1),
-                        kSw[i - 1].inner, 3.0f);
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+            const float rowH = capH + side + 9.0f * a_c.S;
+            float        x = origin.x;
+            float        y = origin.y;
+            float        rowW = 0.0f;   // widest line, for the hit area
+            // ★★The hit test reads the rects the DRAW produced instead of
+            // recomputing the layout. The two used to be separate walks with a
+            // comment ordering them to stay in step, and they did not: when
+            // Fable became a one-member family every chip after it was
+            // hit-tested a slot to the left of where it was painted. Wrapping
+            // would have been a second chance to make the same mistake.
+            struct Chip { ImVec2 p0; int idx; };
+            Chip chips[11] = {};
+            int  nChips = 0;
+            for (const auto& f : kFam) {
+                const float famW = f.count * (side + 8.0f * a_c.S) + famGap;
+                if (x > origin.x && (x - origin.x) + famW > kRowMax) {
+                    rowW = (std::max)(rowW, x - origin.x);
+                    x = origin.x;
+                    y += rowH;
                 }
-                dl->AddRect(p0, p1, Theme::Acc(0.4f), 4.0f);
-                if (Theme::SkinIndex() == i) {
-                    dl->AddRect(ImVec2(p0.x - 2, p0.y - 2), ImVec2(p1.x + 2, p1.y + 2),
-                        Theme::Col(sk.hi, 1.0f), 5.0f, 0, 2.0f);
+                dl->AddText(font, capPx, ImVec2(x, y),
+                    Theme::Col(sk.inkDim, 0.85f), f.name);
+                for (int i = 0; i < f.count; ++i) {
+                    const int idx = f.first + i;
+                    const ImVec2 p0(x, y + capH);
+                    const ImVec2 p1(p0.x + side, p0.y + side);
+                    const auto&  s = kSw[idx - 1];
+                    if (s.base) {
+                        dl->AddRectFilled(p0, p1, s.base, 4.0f);
+                    } else {
+                        // Hatch, then the panel at its true alpha on top: the
+                        // stripes that survive ARE the transparency. Neutral
+                        // greys on purpose — a coloured hatch (the first cut
+                        // used a grass green) stops reading as "see-through"
+                        // and starts reading as "the green skin".
+                        dl->AddRectFilled(p0, p1, IM_COL32(0x6E, 0x6E, 0x74, 255), 4.0f);
+                        // ★PushClipRect is a RECTANGLE — it ignores the corner
+                        // rounding, so stripes clipped to p0..p1 filled the
+                        // rounded corners and these two chips came out square
+                        // next to four round ones. Inset the stripe band
+                        // instead: the rounded base itself covers the edge.
+                        const float in = 3.0f * a_c.S;
+                        dl->PushClipRect(ImVec2(p0.x + in, p0.y + in),
+                                         ImVec2(p1.x - in, p1.y - in), true);
+                        for (float o = -side; o < side * 2.0f; o += 6.0f * a_c.S) {
+                            dl->AddLine(ImVec2(p0.x + o, p1.y), ImVec2(p0.x + o + side, p0.y),
+                                IM_COL32(0x45, 0x45, 0x4B, 255), 3.0f * a_c.S);
+                        }
+                        dl->PopClipRect();
+                        dl->AddRectFilled(p0, p1, IM_COL32(0x0C, 0x0C, 0x0E, s.alpha), 4.0f);
+                    }
+                    const float wg = side * 0.57f;
+                    dl->PathLineTo(ImVec2(p1.x, p1.y - wg));
+                    dl->PathLineTo(ImVec2(p1.x, p1.y));
+                    dl->PathLineTo(ImVec2(p1.x - wg, p1.y));
+                    dl->PathFillConvex(s.wedge);
+                    dl->AddRect(p0, p1, Theme::Acc(0.4f), 4.0f);
+                    if (Theme::SkinIndex() == idx) {
+                        dl->AddRect(ImVec2(p0.x - 2, p0.y - 2), ImVec2(p1.x + 2, p1.y + 2),
+                            Theme::Val(), 5.0f, 0, 2.0f);
+                    }
+                    if (nChips < 11) chips[nChips++] = { p0, idx };
+                    x += side + 8.0f * a_c.S;
                 }
-                if (ImGui::IsItemClicked()) {
-                    Theme::SetSkin(i);
-                    WinManager::GetSingleton()->Save();
+                x += famGap;
+            }
+            rowW = (std::max)(rowW, x - origin.x);
+            // ONE hit area for the whole block, then hit-test the recorded
+            // chips: captions and gaps make per-chip InvisibleButtons fight the
+            // cursor layout, and the block is fixed-size anyway.
+            const float blockH = (y - origin.y) + capH + side;
+            ImGui::SetCursorScreenPos(origin);
+            ImGui::InvisibleButton("##skinrow", ImVec2(rowW, blockH));
+            if (ImGui::IsItemClicked()) {
+                const ImVec2 m = ImGui::GetIO().MousePos;
+                for (int i = 0; i < nChips; ++i) {
+                    const ImVec2& q = chips[i].p0;
+                    if (m.x >= q.x && m.x < q.x + side &&
+                        m.y >= q.y && m.y < q.y + side) {
+                        Theme::SetSkin(chips[i].idx);
+                        WinManager::GetSingleton()->Save();
+                        break;
+                    }
                 }
-                ImGui::PopID();
-                if (i < Theme::SkinCount()) ImGui::SameLine(0.0f, 10.0f * a_c.S);
             }
         }
 
         // language chip labels — shared by the width budget and the row
-        constexpr const char* kLangChips[4] = { "EN", "한국어", "中文", "日本語" };
-
-        // LANGUAGE — padded chips (image-3 spacing)
+        // LANGUAGE — padded chips (image-3 spacing). ★GI71: the list is however
+        // many languages exist, not four: user packs append to it. Chips wrap
+        // instead of running off the panel once packs are installed.
         void RowLanguage(const SettingsCtx& a_c)
         {
             SettingLabel(a_c, Lang::Str::LanguageLabel);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
-            for (int i = 0; i < 4; ++i) {
+            {   // right-align the whole strip when it fits on one line
+                float total = 0.0f;
+                for (int i = 0; i < Lang::Count(); ++i) {
+                    if (i) total += 6.0f * a_c.S;
+                    total += ImGui::CalcTextSize(Lang::DisplayName(i)).x + 16.0f * a_c.S;
+                }
+                if (total <= ImGui::GetContentRegionAvail().x) RightAlign(total);
+            }
+            const float avail = ImGui::GetContentRegionAvail().x;
+            const float gap   = 6.0f * a_c.S;
+            float       used  = 0.0f;
+            const int   n     = Lang::Count();
+            for (int i = 0; i < n; ++i) {
+                const char* label = Lang::DisplayName(i);
+                const float w = ImGui::CalcTextSize(label).x + 16.0f * a_c.S;
+                if (i > 0) {
+                    if (used + gap + w <= avail) {
+                        ImGui::SameLine(0.0f, gap);
+                        used += gap;
+                    } else {
+                        // Wrapped. Without this the chip falls back to the
+                        // window margin and sits under the LANGUAGE label
+                        // instead of under the row above it -- SettingLabel
+                        // parks every control at padLabelW, so a second line
+                        // has to be put there by hand.
+                        ImGui::SetCursorPosX(a_c.padLabelW);
+                        used = 0.0f;
+                    }
+                }
+                used += w;
                 const bool on = Lang::Get() == i;
-                if (on) ImGui::PushStyleColor(ImGuiCol_Button, Theme::Acc(0.28f));
-                if (Sfx::Button(kLangChips[i])) {
+                if (on) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, Theme::BtnOn());
+                    ImGui::PushStyleColor(ImGuiCol_Text, Theme::BtnOnInkVec());
+                }
+                ImGui::PushID(i);
+                if (Sfx::Button(label)) {
                     Lang::SetLang(i);
+                    // a pack can ask for glyphs the current atlas never baked
+                    g_fontsDirty.store(true);
                     WinManager::GetSingleton()->Save();
                 }
-                if (on) ImGui::PopStyleColor();
-                if (i < 3) ImGui::SameLine(0.0f, 6.0f * a_c.S);
+                ImGui::PopID();
+                if (on) ImGui::PopStyleColor(2);
             }
             ImGui::PopStyleVar();
         }
@@ -446,52 +1133,97 @@ namespace FUI::UIRoot
         {
             SettingLabel(a_c, Lang::Str::IconStyleLabel);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
+            RightAlign(BtnRowW({ Lang::T(Lang::Str::StyleRealistic),
+                                 Lang::T(Lang::Str::StyleFlat),
+                                 Lang::T(Lang::Str::StylePixel) }));
             auto* icons = IconCache::GetSingleton();
-            for (int style : { 0, 1 }) {
-                const bool on = icons->StylizedStyle() == (style == 1);
-                if (on) ImGui::PushStyleColor(ImGuiCol_Button, Theme::Acc(0.28f));
-                ImGui::PushID(style);
-                if (Sfx::Button(Lang::T(style == 1 ? Lang::Str::StyleStylized
-                                                   : Lang::Str::StyleRealistic))) {
-                    icons->SetStylizedStyle(style == 1);
+            // Realistic captures the game's models; Drawn (GI52) uses the
+            // authored category set and captures nothing. The derived
+            // "stylized" filter that used to sit between them was retired in
+            // GI60 — the drawn set answers the same want without a scan.
+            static constexpr struct { IconCache::Style s; Lang::Str label; } kStyles[] = {
+                { IconCache::Style::kRealistic, Lang::Str::StyleRealistic },
+                { IconCache::Style::kFlat,      Lang::Str::StyleFlat      },
+                // Pixel is DERIVED from the realistic capture, so it needs no
+                // art of its own and covers mod items exactly as well.
+                { IconCache::Style::kPixel,     Lang::Str::StylePixel     },
+            };
+            for (int i = 0; i < static_cast<int>(std::size(kStyles)); ++i) {
+                const bool on = icons->GetStyle() == kStyles[i].s;
+                if (on) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, Theme::BtnOn());
+                    ImGui::PushStyleColor(ImGuiCol_Text, Theme::BtnOnInkVec());
+                }
+                ImGui::PushID(i);
+                if (Sfx::Button(Lang::T(kStyles[i].label))) {
+                    // ★Through Theme, not IconCache: the style belongs to the
+                    // SKIN now, and Theme is what hands it to the cache and
+                    // what Save writes out. Poking the cache directly would
+                    // change the sprites and lose the choice on the next open.
+                    Theme::SetIconStyle(static_cast<int>(kStyles[i].s));
                     WinManager::GetSingleton()->Save();
+                    Grid::Rebuild();   // tiles re-resolve which sprite they draw
                 }
                 ImGui::PopID();
-                if (on) ImGui::PopStyleColor();
-                if (style == 0) ImGui::SameLine(0.0f, 6.0f * a_c.S);
-            }
-            ImGui::PopStyleVar();
-        }
-
-        void RowGlowStyle(const SettingsCtx& a_c)
-        {
-            SettingLabel(a_c, Lang::Str::GlowLabel);
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
-            for (int style : { 1, 0 }) {
-                const bool on = Theme::GlowStyle() == style;
-                if (on) ImGui::PushStyleColor(ImGuiCol_Button, Theme::Acc(0.28f));
-                if (Sfx::Button(Lang::T(style == 1 ? Lang::Str::GlowSilhouette
-                                                   : Lang::Str::GlowRadial))) {
-                    Theme::SetGlowStyle(style);
-                    WinManager::GetSingleton()->Save();
+                if (on) ImGui::PopStyleColor(2);
+                if (i + 1 < static_cast<int>(std::size(kStyles))) {
+                    ImGui::SameLine(0.0f, 6.0f * a_c.S);
                 }
-                if (on) ImGui::PopStyleColor();
-                if (style == 1) ImGui::SameLine(0.0f, 6.0f * a_c.S);
             }
             ImGui::PopStyleVar();
         }
 
-        // GLOW LEVEL — brightness multiplier, same track chrome as SCALE
-        void RowGlowGain(const SettingsCtx& a_c)
+        // ★★★1.0.5 ITEM SHADOW — three rows, and they are the three controls a
+        // drop shadow has in every tool that has ever had one: DISTANCE, BLUR,
+        // OPACITY. What stood here before was a strength slider plus a
+        // Soft/Sharp pair, and that pair was an implementation detail dressed
+        // as a choice — "Soft" sampled a silhouette baked onto a 96px canvas,
+        // "Sharp" stamped the sprite, and the user was being asked to pick
+        // between two code paths because neither could be tuned into the other.
+        // The draw does its own blur at sprite resolution now, so the shape
+        // follows the numbers and the numbers are the ones people expect.
+        //
+        // ★One helper for all three: they differ only in axis, range and
+        // format, and three near-identical copies is exactly how a right-click
+        // reset ends up on two rows out of three.
+        // a_mul lets a row SHOW different units than it stores: opacity lives as
+        // 0..1 and reads as 0..100%, and doing that here keeps the conversion
+        // off the draw path, where a stray /100 would be a silent bug.
+        void ShadowRow(const SettingsCtx& a_c, Lang::Str a_label, const char* a_id,
+                       int a_axis, float a_hi, const char* a_fmt, float a_mul = 1.0f)
         {
-            SettingLabel(a_c, Lang::Str::GlowBrightLabel);
-            float gg = Theme::GlowGain();
-            if (Theme::ChromeSliderFloat("##glowgain", &gg, 0.2f, 2.5f, a_c.trackW)) {
-                Theme::SetGlowGain(gg);
+            SettingLabel(a_c, a_label);
+            RightAlign(a_c.trackW);
+            float v = Theme::ShadowAxis(a_axis) * a_mul;
+            if (SettingSlider(a_id, &v, 0.0f, a_hi * a_mul, a_c.trackW,
+                              Theme::DefShadow(a_axis) * a_mul, a_fmt)) {
+                Theme::SetShadowAxis(a_axis, v / a_mul);
             }
             if (ImGui::IsItemDeactivatedAfterEdit()) {
                 WinManager::GetSingleton()->Save();
             }
+        }
+
+        // px the shadow falls toward the lower right. 0 = ambient, spread even
+        // on every side — which is also the only setting that stays put under
+        // the 90-degree tile rotations.
+        void RowShadowDist(const SettingsCtx& a_c)
+        {
+            ShadowRow(a_c, Lang::Str::ShadowDistLabel, "##shaddist", 0, 8.0f, "%.1f");
+        }
+
+        // px of spread. 0 is the sprite's exact outline in black — no longer a
+        // separate "Sharp" mode, just the bottom of this slider.
+        void RowShadowBlur(const SettingsCtx& a_c)
+        {
+            ShadowRow(a_c, Lang::Str::ShadowBlurLabel, "##shadblur", 1, 8.0f, "%.1f");
+        }
+
+        // how dark, as a fraction. Shown as a percentage because that is how
+        // the mockups that settled it were labelled.
+        void RowShadowOpac(const SettingsCtx& a_c)
+        {
+            ShadowRow(a_c, Lang::Str::ShadowOpacLabel, "##shadopac", 2, 1.0f, "%.0f%%", 100.0f);
         }
 
         // ICON LIGHT — item icon brightness, LIVE: <=1 darkens via tint,
@@ -499,11 +1231,76 @@ namespace FUI::UIRoot
         void RowIconGain(const SettingsCtx& a_c)
         {
             SettingLabel(a_c, Lang::Str::IconBrightLabel);
+            RightAlign(a_c.trackW);
             float ig = Theme::IconGain();
-            if (Theme::ChromeSliderFloat("##icongain", &ig, 0.4f, 1.6f, a_c.trackW)) {
+            if (SettingSlider("##icongain", &ig, 0.4f, 1.6f, a_c.trackW,
+                              Theme::DefaultIconGain())) {
                 Theme::SetIconGain(ig);
             }
             if (ImGui::IsItemDeactivatedAfterEdit()) {
+                WinManager::GetSingleton()->Save();
+            }
+        }
+
+        // ★★CAPTURE LIGHT — where the menu scene's single lamp stands while an
+        // icon is photographed, for EVERY item at once. Two reasons it lives
+        // here and not in DISPLAY: DISPLAY is stored per skin, and a per-skin
+        // lamp would throw away the whole icon cache every time the player
+        // tried another skin; and this is a property of the photograph, which
+        // the ICONS section already owns (cache, precache, reload).
+        //
+        // ★★LIVE, exactly like the EDIT panel's own light rows — a lamp you
+        // cannot see move is a lamp you cannot aim. Two things have to be true
+        // for that to be affordable, and both are provided rather than assumed:
+        //   1. PurgeQueue() — every frame of the drag is a new key for EVERY
+        //      item, and the queue dedupes by key, so without it a three-second
+        //      drag leaves thousands of captures queued at angles already
+        //      scrolled past. Purging keeps the backlog at "what is on screen".
+        //   2. IconCache's per-item last-good fallback — a missing key draws
+        //      the previous angle instead of nothing, so the board never blanks
+        //      mid-drag. (Get(): m_lastGood.)
+        // Only the ini WRITE waits for release; the pixels do not.
+        void RowCaptureLight(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::CaptureLightLabel);
+            // ★The warning goes on the LABEL: both sliders already spend their
+            // own hover on the right-click hint, and this row is the one whose
+            // cost ("every icon re-photographs") is not obvious from its name.
+            if (ImGui::IsItemHovered()) NoteHoverHint(Lang::T(Lang::Str::CaptureLightHint));
+            RightAlign(a_c.trackW);
+
+            float az = Theme::CaptureLightAz();
+            float el = Theme::CaptureLightEl();
+
+            bool changed = false, released = false;
+            const float half = (a_c.trackW - 6.0f * a_c.S) * 0.5f;
+            // ★Both axes report into the SAME pair of flags. Testing
+            // IsItemDeactivatedAfterEdit after the row instead would only ever
+            // see the LAST slider, so releasing X would never save.
+            const auto axis = [&](const char* a_id, float* a_v, float a_lo, float a_hi,
+                                  float a_def, const char* a_fmt) {
+                if (SettingSlider(a_id, a_v, a_lo, a_hi, half, a_def, a_fmt)) changed = true;
+                if (ImGui::IsItemDeactivatedAfterEdit()) released = true;
+            };
+            // ★Axis named INSIDE the value ("X 12°"), not in a second label
+            // column: two rows of one slider would push ICONS past the panel
+            // height for a pair of numbers that are always read together.
+            axis("##caplightx", &az, -180.0f, 180.0f,
+                 Theme::kDefCapLightAz, "X %.0f\xC2\xB0");
+            ImGui::SameLine(0.0f, 6.0f * a_c.S);
+            axis("##caplighty", &el, -80.0f, 80.0f,
+                 Theme::kDefCapLightEl, "Y %.0f\xC2\xB0");
+
+            if (changed) {
+                Theme::SetCaptureLight(az, el);
+                IconCache::GetSingleton()->PurgeQueue();   // old angle's backlog is worthless
+                Grid::RefreshDefs();                       // re-queue the board at the new one
+            }
+            // ★The ini write is the ONE thing that still waits: it is disk IO
+            // and the intermediate angles are not worth persisting. The
+            // right-click reset never goes through an active state, so it is
+            // caught by the second clause instead of the release.
+            if (released || (changed && !ImGui::IsAnyItemActive())) {
                 WinManager::GetSingleton()->Save();
             }
         }
@@ -519,6 +1316,7 @@ namespace FUI::UIRoot
             const bool armed = ImGui::GetTime() < s_armedUntil;
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
             if (armed) ImGui::PushStyleColor(ImGuiCol_Button, Theme::Col(sk.sel, 0.55f));
+            RightAlign(BtnW(Lang::T(armed ? Lang::Str::Confirm : Lang::Str::CacheReset)));
             if (Sfx::Button(Lang::T(armed ? Lang::Str::Confirm : Lang::Str::CacheReset))) {
                 if (armed) {
                     g_iconsReset.store(true);
@@ -536,29 +1334,96 @@ namespace FUI::UIRoot
         // open; already-on-disk items are skipped for free, captures land in
         // the pak only (VRAM stays flat). Click again to cancel; visible
         // items re-queue themselves as usual.
+        // GI53 — ICON MAP: write every item's drawn-icon assignment to json so
+        // IconStudio can show what the rules actually produce on THIS load
+        // order. Classification only, no captures, so it returns at once.
+        // The tool deliberately does not re-implement the rules: a second copy
+        // in another language would answer confidently and wrongly the moment
+        // Fallback.cpp changes.
+        void RowIconReload(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::IconReloadLabel);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
+            RightAlign(BtnW(Lang::T(Lang::Str::IconReloadBtn)));
+            if (Sfx::Button(Lang::T(Lang::Str::IconReloadBtn))) {
+                g_flatReload.store(true);   // Tick: SRVs must not drop mid-frame
+                // ★Say it ran, in the prompt bar. When nothing on screen changes
+                // — the common case, and the correct one if the file did not
+                // change — a silent button reads as a broken button, and the
+                // next thing that arrives is a bug report about the button
+                // rather than about the file.
+                g_flatReloadNote = ImGui::GetTime() + 3.5;
+            }
+            ImGui::PopStyleVar();
+        }
+
         void RowPrecache(const SettingsCtx& a_c)
         {
             const auto& sk = Theme::S();
             SettingLabel(a_c, Lang::Str::PrecacheLabel);
             static bool s_precacheOn = false;
+            static size_t s_precacheMax = 0;   // queue length at the start
             auto* cache = IconCache::GetSingleton();
             const size_t q = cache->QueuedCount();
             if (s_precacheOn && q == 0) s_precacheOn = false;   // drained
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
-            if (!s_precacheOn) {
-                if (Sfx::Button(Lang::T(Lang::Str::PrecacheStart))) {
-                    s_precacheOn = cache->PrecacheAll() > 0;
-                }
-            } else {
-                char lbl[64];
+
+            // ★Right-align BOTH states. The alignment used to sit inside the
+            // idle branch only, so the moment the run started the button
+            // jumped to the left margin — every other row in the panel keeps
+            // its control on the right edge.
+            // ★And size it to the WIDEST label it will ever show: the count
+            // shrinks as the queue drains (1400 -> 999 -> 99), and a button
+            // that narrows under right alignment crawls rightwards for the
+            // whole run.
+            char lbl[64], wide[64];
+            if (s_precacheOn) {
                 std::snprintf(lbl, sizeof(lbl), "%s (%zu)",
                     Lang::T(Lang::Str::Cancel), q);
+                std::snprintf(wide, sizeof(wide), "%s (%zu)",
+                    Lang::T(Lang::Str::Cancel), s_precacheMax);
+            } else {
+                std::snprintf(lbl, sizeof(lbl), "%s", Lang::T(Lang::Str::PrecacheStart));
+                std::snprintf(wide, sizeof(wide), "%s", lbl);
+            }
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
+            const float bw = BtnW(wide);
+            RightAlign(bw);
+            if (s_precacheOn) {
                 ImGui::PushStyleColor(ImGuiCol_Button, Theme::Col(sk.sel, 0.55f));
-                if (Sfx::Button(lbl, ImVec2(0, 0), true)) {   // cancel
+                if (Sfx::Button(lbl, ImVec2(bw, 0.0f), true)) {   // cancel
                     cache->CancelPrecache();
                     s_precacheOn = false;
                 }
                 ImGui::PopStyleColor();
+            } else {
+                if (Sfx::Button(lbl, ImVec2(bw, 0.0f))) {
+                    const size_t n = cache->PrecacheAll();
+                    s_precacheOn = n > 0;
+                    s_precacheMax = n;
+                }
+            }
+            ImGui::PopStyleVar();
+        }
+
+        // GI68 — DEFERRED ICONS: only appears when something is actually owed a
+        // retry. A row that is always there would need explaining; a row that
+        // shows up with a number on it explains itself.
+        void RowDeferred(const SettingsCtx& a_c)
+        {
+            auto* cache = IconCache::GetSingleton();
+            const size_t n = cache->DeferredCount();
+            if (n == 0) return;
+            SettingLabel(a_c, Lang::Str::DeferredLabel);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
+            char lbl[64];
+            std::snprintf(lbl, sizeof(lbl), "%s (%zu)",
+                Lang::T(Lang::Str::DeferredRetry), n);
+            RightAlign(BtnW(lbl) + 6.0f * a_c.S +
+                       BtnW(Lang::T(Lang::Str::DeferredForget)));
+            if (Sfx::Button(lbl)) cache->RetryDeferred();
+            ImGui::SameLine(0.0f, 6.0f * a_c.S);
+            if (Sfx::Button(Lang::T(Lang::Str::DeferredForget), ImVec2(0, 0), true)) {
+                cache->ClearDeferred();
             }
             ImGui::PopStyleVar();
         }
@@ -570,15 +1435,20 @@ namespace FUI::UIRoot
             SettingLabel(a_c, Lang::Str::MerchGoldSetLabel);
             ImGui::PushID("merchgold");
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
+            RightAlign(BtnRowW({ Lang::T(Lang::Str::ToggleDefault),
+                                 Lang::T(Lang::Str::ToggleUnlimited) }));
             for (int inf : { 0, 1 }) {
                 const bool on = LootBarter::MerchantGoldInfinite() == (inf == 1);
-                if (on) ImGui::PushStyleColor(ImGuiCol_Button, Theme::Acc(0.28f));
+                if (on) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, Theme::BtnOn());
+                    ImGui::PushStyleColor(ImGuiCol_Text, Theme::BtnOnInkVec());
+                }
                 if (Sfx::Button(Lang::T(inf ? Lang::Str::ToggleUnlimited
                                             : Lang::Str::ToggleDefault))) {
                     LootBarter::SetMerchantGoldInfinite(inf == 1);
                     WinManager::GetSingleton()->Save();
                 }
-                if (on) ImGui::PopStyleColor();
+                if (on) ImGui::PopStyleColor(2);
                 if (inf == 0) ImGui::SameLine(0.0f, 6.0f * a_c.S);
             }
             ImGui::PopStyleVar();
@@ -592,15 +1462,20 @@ namespace FUI::UIRoot
             SettingLabel(a_c, Lang::Str::MerchStockSetLabel);
             ImGui::PushID("merchstock");
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
+            RightAlign(BtnRowW({ Lang::T(Lang::Str::ToggleDefault),
+                                 Lang::T(Lang::Str::ToggleAnything) }));
             for (int all : { 0, 1 }) {
                 const bool on = LootBarter::MerchantBuysAll() == (all == 1);
-                if (on) ImGui::PushStyleColor(ImGuiCol_Button, Theme::Acc(0.28f));
+                if (on) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, Theme::BtnOn());
+                    ImGui::PushStyleColor(ImGuiCol_Text, Theme::BtnOnInkVec());
+                }
                 if (Sfx::Button(Lang::T(all ? Lang::Str::ToggleAnything
                                             : Lang::Str::ToggleDefault))) {
                     LootBarter::SetMerchantBuysAll(all == 1);
                     WinManager::GetSingleton()->Save();
                 }
-                if (on) ImGui::PopStyleColor();
+                if (on) ImGui::PopStyleColor(2);
                 if (all == 0) ImGui::SameLine(0.0f, 6.0f * a_c.S);
             }
             ImGui::PopStyleVar();
@@ -617,10 +1492,22 @@ namespace FUI::UIRoot
             const SettingsRowFn* rows;
             size_t               count;
         };
-        constexpr SettingsRowFn kRowsGeneral[] = { RowScale, RowSkin, RowLanguage, RowPreset, RowPresetExport };
-        constexpr SettingsRowFn kRowsDisplay[] = { RowIconStyle, RowGlowStyle, RowGlowGain, RowIconGain };
+        constexpr SettingsRowFn kRowsGeneral[] = { RowScale, RowCellScale, RowLanguage, RowPreset, RowPresetExport };
+        // ★SKIN leads DISPLAY rather than sitting in GENERAL: every row under
+        // it is now stored PER SKIN, so the skin chip is the context those
+        // rows are read in. Choosing a skin first and tuning below it is the
+        // order the settings are actually used in.
+        // ★1.0.5: the GLOW STYLE row (silhouette / radial) is gone with the
+        // halo it selected between. What is left is the drop shadow, which
+        // has one shape and only a strength.
+        constexpr SettingsRowFn kRowsDisplay[] = { RowSkin, RowIconStyle, RowShadowDist,
+                                                   RowShadowBlur, RowShadowOpac, RowIconGain };
         constexpr SettingsRowFn kRowsTrade[]   = { RowMerchantGold, RowMerchantStock };
-        constexpr SettingsRowFn kRowsIcons[]   = { RowCacheReset, RowPrecache };
+        // ★CAPTURE LIGHT leads the section: it decides what the captures look
+        // like, and the rows under it (reset, precache) are how you re-take
+        // them. Reading top to bottom is the order the work is actually done.
+        constexpr SettingsRowFn kRowsIcons[]   = { RowCaptureLight, RowCacheReset,
+                                                   RowPrecache, RowDeferred, RowIconReload };
         constexpr SettingsSection kSettingsSections[] = {
             { Lang::Str::SectionGeneral, kRowsGeneral, std::size(kRowsGeneral) },
             { Lang::Str::SectionDisplay, kRowsDisplay, std::size(kRowsDisplay) },
@@ -634,11 +1521,15 @@ namespace FUI::UIRoot
             const char* txt = Lang::T(a_title);
             const float availW = ImGui::GetContentRegionAvail().x;
             const ImVec2 p = ImGui::GetCursorScreenPos();
-            const ImVec2 ts = ImGui::CalcTextSize(txt);
+            const ImVec2 ts = Theme::TrackedSize(txt, Theme::FontBody(), 2.6f * a_c.S);
             auto* dl = ImGui::GetWindowDrawList();
             dl->AddLine(ImVec2(p.x + ts.x + 10.0f * a_c.S, p.y + ts.y * 0.55f),
-                ImVec2(p.x + availW, p.y + ts.y * 0.55f), Theme::Acc(0.22f));
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(Theme::Acc(0.85f)), "%s", txt);
+                ImVec2(p.x + availW, p.y + ts.y * 0.55f), Theme::Rule());
+            // ★Full white at BODY size. At the caption step it was small and
+            // held back at once, and two reductions on a 17px string leave it
+            // legible only if you already know what it says. Tracking alone
+            // carries "this is a heading" — it costs no contrast.
+            OutlinedText(Theme::Chrome(1.0f), txt, Theme::FontBody(), 2.6f * a_c.S);
             ImGui::Dummy(ImVec2(0.0f, 6.0f * a_c.S));
         }
 
@@ -652,29 +1543,51 @@ namespace FUI::UIRoot
             // value column never overlaps it in any language; generous
             // label->control gap (32px) with a floor so short labels (KO
             // "크기") don't collapse the column
+            // measured on the SAME string SettingLabel draws — all caps is
+            // wider, so measuring the raw text would let a label run into its
+            // control
+            const auto lw = [](Lang::Str a_s) {
+                return ImGui::CalcTextSize(Lang::UpperCase(Lang::T(a_s)).c_str()).x;
+            };
             const float labelW = (std::max)(84.0f * S, 32.0f * S + (std::max)({
-                ImGui::CalcTextSize(Lang::T(Lang::Str::ScaleLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::SkinLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::LanguageLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::PresetLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::PresetExport)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::GlowLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::GlowBrightLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::IconBrightLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::CacheLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::PrecacheLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::MerchGoldSetLabel)).x,
-                ImGui::CalcTextSize(Lang::T(Lang::Str::MerchStockSetLabel)).x }));
+                lw(Lang::Str::ScaleLabel),
+                lw(Lang::Str::CellScaleLabel),
+                lw(Lang::Str::SkinLabel),
+                lw(Lang::Str::LanguageLabel),
+                lw(Lang::Str::PresetLabel),
+                lw(Lang::Str::PresetExport),
+                lw(Lang::Str::ShadowDistLabel),
+                lw(Lang::Str::ShadowBlurLabel),
+                lw(Lang::Str::ShadowOpacLabel),
+                lw(Lang::Str::IconBrightLabel),
+                lw(Lang::Str::CacheLabel),
+                lw(Lang::Str::CaptureLightLabel),
+                lw(Lang::Str::PrecacheLabel),
+                lw(Lang::Str::MerchGoldSetLabel),
+                lw(Lang::Str::MerchStockSetLabel) }));
             const float trackW = 176.0f * S;
             // language chips sized like image-3: real padding, so the window
             // width follows the actual row width (no dead right margin)
+            // ★GI71: the BUILT-IN four only. Packs append to the row but must
+            // not widen the window — summing them all would stretch the panel
+            // off screen once someone installs a few; instead the row wraps
+            // inside the width the four define.
             float langW = 0.0f;
             for (int i = 0; i < 4; ++i) {
-                langW += ImGui::CalcTextSize(kLangChips[i]).x + 16.0f * S;
+                langW += ImGui::CalcTextSize(Lang::DisplayName(i)).x + 16.0f * S;
                 if (i < 3) langW += 6.0f * S;
             }
-            const float swatchW = Theme::SkinCount() * 24.0f * S +
-                                  (Theme::SkinCount() - 1) * 10.0f * S;
+            // ★GI73: three families of two — 2 chips + inner gap per family,
+            // plus a family gap (kFamGap, must match RowSkin) or the row runs
+            // past the panel edge.
+            constexpr float kFamGap = 16.0f;
+            // ★★The skin row WRAPS now (RowSkin kRowMax), so this is no longer
+            // the sum of every chip — it is the width one line is allowed to
+            // reach. Eleven chips on one line would have made the settings
+            // window ~160px wider than any other control needs it, to show a
+            // row nobody scans left-to-right anyway.
+            // Keep kRowMax in RowSkin equal to this.
+            const float swatchW = 232.0f * S;
             // glow style chips (silhouette / radial), same chip metrics as langs
             const float glowW =
                 ImGui::CalcTextSize(Lang::T(Lang::Str::GlowSilhouette)).x + 16.0f * S +
@@ -712,10 +1625,10 @@ namespace FUI::UIRoot
             }
             wm->ApplyNext("settings", defPos, size);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
-                ImVec2(12.0f + insX, 8.0f + insY));
+                ImVec2(Theme::PadX() + insX, Theme::PadY() + insY));
             ImGui::Begin("##fablerim_settings", nullptr, kManagedWinFlags);
             NoteOverlayRect();
-            wm->TitleBar("settings", Lang::T(Lang::Str::Settings));
+            wm->TitleBar("settings", Lang::SentenceCase(Lang::T(Lang::Str::Settings)).c_str());
 
             // EDIT-style lifetime (user request): stays open until the gear
             // toggle or ESC. The old click-outside-closes popup rule ALSO ate
@@ -762,8 +1675,101 @@ namespace FUI::UIRoot
             return func(p, entry);
         }
 
-        // total height of the stats block (bodyH reserves this under the doll)
-        [[nodiscard]] float StatsPanelH() { return 112.0f * Theme::Scale(); }
+        // ---- stats block metrics (S1) ------------------------------------
+        // ★GI76: every gap around a divider is kStatGap. It used to be 4/7 and
+        // 3/8 — the top halves came from rowH's built-in leading and the 3 was
+        // not a decision at all but the remainder left over when the block's
+        // hard-coded height did not match what the rows actually used. Derive
+        // the height from the same numbers and that class of leftover cannot
+        // come back.
+        // ★These are DERIVED, not frozen. kStatText used to be a literal 17 —
+        // "the font size" written down in a second place — so the day the body
+        // font moved to 20 the glyphs grew past their own row boxes and every
+        // divider gap below them went wrong. Ask the scale instead.
+        // money reads in thousands; "6223" makes the eye count digits
+        [[nodiscard]] inline std::string Grouped(int a_v)
+        {
+            char raw[32];
+            std::snprintf(raw, sizeof(raw), "%d", a_v < 0 ? -a_v : a_v);
+            std::string out;
+            const int n = static_cast<int>(std::char_traits<char>::length(raw));
+            for (int i = 0; i < n; ++i) {
+                if (i && (n - i) % 3 == 0) out += ',';
+                out += raw[i];
+            }
+            return (a_v < 0 ? std::string("-") : std::string()) + out;
+        }
+
+        [[nodiscard]] inline float StatValuePx() { return Theme::FontValue(); }
+        [[nodiscard]] inline float StatLabelPx() { return Theme::FontCaption(); }
+        [[nodiscard]] inline float StatRowH()    { return Theme::FontValue() + 3.0f * Theme::Scale(); }
+        constexpr float kStatGap  = 6.0f;    // glyph edge <-> divider, both sides
+        constexpr float kCapBarH   = 5.0f;   // capacity bar thickness
+        // ★Same air above the bar as below it. It used to be 2px above and 9px
+        // below, which reads as the bar being stuck to the SPACE row rather
+        // than spaced under it — the mockup gives it equal margins.
+        constexpr float kCapBarGap = 6.0f;
+        // ★The bar's air BELOW is its own value. Everywhere else kStatGap is
+        // the distance from a glyph edge to a rule, but the capacity bar is a
+        // solid block, not type — it has no descender slack under it, so the
+        // same 6px reads noticeably tighter than every other gap in the panel.
+        constexpr float kCapBarBelow = 10.0f;
+        // ★The bottom strip's CONTENTS (the GOLD row and the trash can) sit
+        // lower than the divider gap alone would place them — user request,
+        // for breathing room under the rule. The rule itself and everything
+        // above it must NOT move, so this is applied at the two draw sites
+        // and never folded into BottomStripY (which the stats block above
+        // also reads). It fits inside the strip's own 38px.
+        //
+        // ★Skin-dependent: a window's bottom margin is `pad + FrameInsetY`,
+        // and only skins 1-2 have no inset at all (torn 3-4 = 24px,
+        // translucent 5-6 = 6px). The full drop reads right against that
+        // extra margin but sits too low without it. ONE function so the
+        // amount cannot differ between the gold row and the trash can.
+        [[nodiscard]] float GoldStripDrop()
+        {
+            const float S = Theme::Scale();
+            // ★Centred in the strip, not a fixed 5px. The old number was blind
+            // to the type size, so the row sat low once the value font grew —
+            // and it is the only thing in that strip, with nothing beside it to
+            // line up against. kStatGap*S is already added before this lands,
+            // so it comes back out here.
+            const float centred = (38.0f * S - Theme::FontValue()) * 0.5f - kStatGap * S;
+            // torn-frame skins carry a deeper margin below the strip; they
+            // still want the extra step down that used to be hard-coded
+            return centred + (Theme::FrameInsetY() > 0.0f ? 5.0f * S : 0.0f);
+        }
+
+        // total height of the stats block (bodyH reserves this under the doll):
+        // gap, 4 rows, gap-to-divider, gap, the space glyph, gap to the GOLD rule
+        [[nodiscard]] float StatsPanelH()
+        {
+            const float S = Theme::Scale();
+            const float lead = StatRowH() - StatValuePx();
+            // gap, 4 rows, gap-to-divider, gap, space row, capacity bar, gap.
+            // The bar block is (gap above - the row's leading) + the bar, and
+            // the trailing kStatGap is its air below: equal on both sides.
+            return kStatGap * S + 4.0f * StatRowH() + (kStatGap * S - lead) +
+                   kStatGap * S + StatRowH() +
+                   ((kCapBarGap + kCapBarH) * S - lead) + kCapBarBelow * S;
+        }
+
+        // ★GI75: top of the bottom strip (GOLD bar on the left, trash on the
+        // right), measured from the body child's top.
+        //
+        // bodyH is  itemsLabelH + grid + 30 (strip) + 8 (bottom margin), so the
+        // grid's bottom border sits at bodyH - 38. The strip used to start at
+        // bodyH - 30 — that put the whole margin ABOVE it and left the GOLD
+        // divider hanging 8px below the line it is supposed to continue. The
+        // margin belongs under the strip, not over it.
+        //
+        // Everything in that strip and everything stacked on top of it (the
+        // stats block) reads its position from here, so the left column and the
+        // right column cannot drift apart.
+        [[nodiscard]] float BottomStripY(float a_bodyH)
+        {
+            return a_bodyH - 38.0f * Theme::Scale();
+        }
 
         // S1/S2: [divider, armor/damage/speed/crit, divider, space] pinned
         // ABOVE the GOLD bar in the left column. Space turns crimson while the
@@ -774,23 +1780,34 @@ namespace FUI::UIRoot
             const float S = Theme::Scale();
             auto* dl = ImGui::GetWindowDrawList();
             const ImVec2 cp = ImGui::GetWindowPos();
-            const float rowH = 19.0f * S;
-            float y = cp.y + a_bodyH - 30.0f * S - StatsPanelH();
+            const float rowH = StatRowH();
+            const float lpx = StatLabelPx(), vpx = StatValuePx();
+            const float trk = 1.6f * S;   // caption tracking, as in the settings headers
+            float y = cp.y + BottomStripY(a_bodyH) - StatsPanelH();
 
+            // ★Label and value share ONE style here — same size, same white,
+            // same outline. The stats block is a two-column list read straight
+            // across, so holding the label back made the left half look
+            // disabled rather than subordinate. All caps carries the "this is
+            // a name, not a number" difference on its own.
+            (void)lpx; (void)trk;
             auto row = [&](const char* a_label, const char* a_val, ImU32 a_valCol) {
-                dl->AddText(ImVec2(cp.x + 2.0f, y), Theme::Col(sk.inkDim, 1.0f), a_label);
-                const float w = ImGui::CalcTextSize(a_val).x;
-                dl->AddText(ImVec2(cp.x + a_leftW - w - 2.0f, y), a_valCol, a_val);
+                const std::string lbl = Lang::UpperCase(a_label);
+                Theme::TextOutlined(dl, ImVec2(cp.x + 2.0f, y), Theme::Chrome(1.0f),
+                                    lbl.c_str(), vpx);
+                const float w = Theme::TrackedSize(a_val, vpx, 0.0f).x;
+                Theme::TextOutlined(dl, ImVec2(cp.x + a_leftW - w - 2.0f, y), a_valCol,
+                                    a_val, vpx);
                 y += rowH;
             };
 
             auto* p = RE::PlayerCharacter::GetSingleton();
             auto* avo = p ? p->AsActorValueOwner() : nullptr;
-            const ImU32 hi = Theme::Col(sk.hi, 1.0f);
+            const ImU32 hi = Theme::Val();
             char buf[48];
 
-            dl->AddLine(ImVec2(cp.x, y), ImVec2(cp.x + a_leftW, y), Theme::Acc(0.25f));
-            y += 7.0f * S;
+            dl->AddLine(ImVec2(cp.x, y), ImVec2(cp.x + a_leftW, y), Theme::Rule());
+            y += kStatGap * S;
 
             std::snprintf(buf, sizeof(buf), "%.0f", StatDamageValue());
             row(Lang::T(Lang::Str::StatDamage), buf, hi);
@@ -815,14 +1832,34 @@ namespace FUI::UIRoot
             std::snprintf(buf, sizeof(buf), "%u", crit);
             row(Lang::T(Lang::Str::StatCrit), buf, hi);
 
-            y += 2.0f * S;
-            dl->AddLine(ImVec2(cp.x, y), ImVec2(cp.x + a_leftW, y), Theme::Acc(0.25f));
-            y += 7.0f * S;
+            // row() already advanced past the last glyph by the row's leading
+            y += kStatGap * S - (StatRowH() - StatValuePx());
+            dl->AddLine(ImVec2(cp.x, y), ImVec2(cp.x + a_leftW, y), Theme::Rule());
+            y += kStatGap * S;
 
             const bool over = Grid::IsOverloaded();
-            std::snprintf(buf, sizeof(buf), "%d / %d", Grid::SpaceUsed(), Grid::SpaceTotal());
-            row(Lang::T(Lang::Str::StatSpace), buf,
-                over ? IM_COL32(204, 81, 72, 255) : hi);
+            const int used = Grid::SpaceUsed(), total = (std::max)(1, Grid::SpaceTotal());
+            std::snprintf(buf, sizeof(buf), "%d / %d", used, total);
+            const ImU32 spaceCol = over ? IM_COL32(204, 81, 72, 255) : hi;
+            row(Lang::T(Lang::Str::StatSpace), buf, spaceCol);
+
+            // ★A bar under the figure. "154 / 832" makes the reader do the
+            // division; a bar answers "how full am I" without any reading, and
+            // it is the one stat that has a natural maximum to draw against.
+            {
+                const float bh = kCapBarH * S;
+                // measured from the SPACE glyph box's bottom edge, so the air
+                // above the bar matches the kStatGap below it
+                const float by = y - (StatRowH() - StatValuePx()) + kCapBarGap * S;
+                const ImVec2 b0(cp.x + 2.0f, by);
+                const ImVec2 b1(cp.x + a_leftW - 2.0f, by + bh);
+                dl->AddRectFilled(b0, b1, IM_COL32(0, 0, 0, 62), bh * 0.5f);
+                const float f = (std::min)(1.0f, static_cast<float>(used) / static_cast<float>(total));
+                if (f > 0.0f) {
+                    dl->AddRectFilled(b0, ImVec2(b0.x + (b1.x - b0.x) * f, b1.y),
+                                      spaceCol, bh * 0.5f);
+                }
+            }
         }
 
         // Main inventory window (v9): [tabs + equip doll + GOLD] | [ITEMS + grid]
@@ -847,23 +1884,82 @@ namespace FUI::UIRoot
             const bool hov = ImGui::IsItemHovered();
             if (hov) Sfx::HoverNote(ImGui::GetItemID());
             auto* dl = ImGui::GetWindowDrawList();
-            const ImVec4 col = a_on ? sk.hi : (hov ? sk.ink : sk.inkDim);
+            const ImVec4 col = a_on   ? Theme::BtnOnInkVec()
+                             : sk.lightPanel ? ImGui::GetStyleColorVec4(ImGuiCol_Text)
+                             : (hov ? sk.ink : sk.inkDim);
             // scaled glyphs sit centred on the normal text line
             const float dy = (ImGui::GetTextLineHeight() - lh) * 0.5f;
-            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * a_fontMul,
-                ImVec2(a_x, a_ty + dy), ImGui::GetColorU32(col), a_lbl);
-            if (a_on) {   // mockup .tbtn.on::after
-                const float uy = a_ty + ImGui::GetTextLineHeight() + 3.0f;
-                if (sk.cornerFade) {
-                    dl->AddRectFilledMultiColor(ImVec2(a_x, uy),
-                        ImVec2(a_x + a_w, uy + 1.0f),
-                        Theme::Acc(0.8f), Theme::Acc(0.0f),
-                        Theme::Acc(0.0f), Theme::Acc(0.8f));
-                } else {
-                    dl->AddRectFilled(ImVec2(a_x, uy), ImVec2(a_x + a_w, uy + 1.0f),
-                        Theme::Acc(0.7f));
+            // ★A light panel gives these BOXES. Bare text on a dark panel reads
+            // as a control because the letters are the only bright thing there;
+            // on a light panel it just reads as a label, and the underline that
+            // marks "on" is nearly invisible. The reference boxes its title-bar
+            // controls for exactly this reason.
+            // ★The box is sized from the NORMAL line, but a scaled glyph (the
+            // close ×, at 1.55x) is taller than that — so centring the glyph on
+            // the normal line dropped it below the box's middle. Give the box
+            // the taller of the two and centre the glyph inside THE BOX, not
+            // inside a line height the glyph does not use.
+            // ★EVERY control in the bar is boxed, and the box is what makes it
+            // read as a control — measured off the reference: the inactive one
+            // is an OUTLINE ONLY (acc .55, no fill), the active one is the same
+            // outline darkened (acc .85) over an acc .55 fill. Marking "on" with
+            // a fill alone left the others as bare text, which is what "the EDIT
+            // and X buttons have no border" was about.
+            // ★The box is sized from the NORMAL line so every control in the bar
+            // shares one height, and the glyph is centred in THAT — the close x
+            // draws at 1.55x and would otherwise hang below its neighbours.
+            const float boxH = ImGui::GetTextLineHeight() + 6.0f;
+            const float boxTop = a_ty - 3.0f;
+            // ★1.0.5: EVERY skin boxes these now, not just the light one. Bare
+            // text read as a caption rather than as a control on the dark
+            // skins too — and each of them already owns a square button frame
+            // (ImGuiCol_Border + FrameRounding), so this is that same frame,
+            // not a new idea. Only the BEVEL stays light-panel-only: it is
+            // part of the recessed-button grammar SIMPLE is built on.
+            const float pad = 6.0f * Theme::Scale();
+            const ImVec2 b0(a_x - pad, boxTop);
+            const ImVec2 b1(a_x + a_w + pad, boxTop + boxH);
+            {
+                // OFF shows the panel through it, exactly like every other
+                // button; ON is the one bright face in the skin.
+                // ★Inset by the stroke, same as Sfx::Button — a fill drawn on
+                // the frame's own rect bleeds past a rounded corner.
+                const float fr = Theme::FrameRounding();
+                const ImVec2 f0(b0.x + 1.0f, b0.y + 1.0f);
+                const ImVec2 f1(b1.x - 1.0f, b1.y - 1.0f);
+                const float  fr2 = (fr > 1.0f) ? fr - 1.0f : 0.0f;
+                if (a_on)      dl->AddRectFilled(f0, f1, Theme::BtnOn(), fr2);
+                else if (hov)  dl->AddRectFilled(f0, f1, IM_COL32(255, 255, 255, 26), fr2);
+                // ★The frame is the SAME one every other control wears
+                // (ImGuiCol_Border), not an accent tint. Two things worked
+                // against acc here: it is BLUE on a blue title bar, so it has
+                // only lightness to separate it, and the bar is TRANSLUCENT —
+                // over a dark scene the darkest token on the skin has nothing
+                // left to stand against. The ordinary buttons never had this
+                // problem because their frame is grey. The fill still says
+                // which control is active.
+                dl->AddRect(b0, b1, ImGui::GetColorU32(ImGuiCol_Border), fr, 0, 1.0f);
+                // same bevel every other button wears (Sfx::Button) — the
+                // recessed grammar belongs to the light panel alone
+                if (sk.lightPanel) {
+                const float bx0 = b0.x + 1.5f, bx1 = b1.x - 1.5f;
+                const float by0 = b0.y + 1.5f, by1 = b1.y - 1.5f;
+                dl->AddLine(ImVec2(bx0 + fr2, by0), ImVec2(bx1 - fr2, by0),
+                            Theme::BevelLit());
+                dl->AddLine(ImVec2(bx0, by0 + fr2), ImVec2(bx0, by1 - fr2),
+                            Theme::BevelLit());
+                dl->AddLine(ImVec2(bx0 + fr2, by1), ImVec2(bx1 - fr2, by1),
+                            Theme::BevelShd());
+                dl->AddLine(ImVec2(bx1, by0 + fr2), ImVec2(bx1, by1 - fr2),
+                            Theme::BevelShd());
                 }
             }
+            // ★Ink-centred in the BOX, always — not only for the scaled ✕.
+            // A line box reserves descender room; "EDIT" has no descender and
+            // ✕ has neither, so each label sits at its own wrong offset and no
+            // single nudge straightens them together (Theme::TextInkCentered).
+            const float fsz = Theme::SnapPx(ImGui::GetFontSize() * a_fontMul);
+            Theme::TextInkCentered(dl, b0, b1, ImGui::GetColorU32(col), a_lbl, fsz);
             return pressed;
         }
 
@@ -876,9 +1972,18 @@ namespace FUI::UIRoot
                                   float a_editW, float a_setW, float a_btnGap)
         {
             const ImVec2 wp = ImGui::GetWindowPos();
-            const float ty = wp.y + a_insY + (a_barH - ImGui::GetTextLineHeight()) * 0.5f;
+            // half the inset, matching the title itself (see WinManager)
+            const float ty = wp.y + a_insY * 0.5f +
+                             (a_barH - ImGui::GetTextLineHeight()) * 0.5f;
             const char* closeLbl = "\xC3\x97";   // × (U+00D7, already baked)
-            constexpr float kCloseMul = 1.55f;   // × alone is unreadably small
+            // ★The x is capped at the TITLE size. The old 1.55 multiplier was
+            // set against a 17px body and silently became 31px — bigger than
+            // the title beside it — the moment the body font moved.
+            // ★An ABSOLUTE size, not a ratio. A ratio recomputed from the
+            // live font size drifts in the last decimal every frame, and ImGui
+            // bakes a new glyph set for every distinct size it is handed.
+            const float closePx = Theme::SnapPx(Theme::S().titleSize * Theme::Scale());
+            const float kCloseMul = closePx / (std::max)(1.0f, ImGui::GetFontSize());
             const float closeW = ImGui::CalcTextSize(closeLbl).x * kCloseMul;
             const float xClose = wp.x + a_mainSize.x - a_pad - a_insX - closeW;
             const float xSet = xClose - a_btnGap - a_setW;
@@ -920,30 +2025,47 @@ namespace FUI::UIRoot
         }
 
         // GOLD bar — pinned to the bottom of a column of width a_colW.
-        // a_rightReserve (F2): the trash-can button shares the compact strip,
-        // so the amount shifts left of it.
+        // a_rightReserve (F2): non-zero when the trash-can button SHARES this
+        // strip (compact mode, where the bar spans the grid column).
         void DrawGoldBar(float a_colW, float a_bodyH, float a_rightReserve = 0.0f)
         {
             const auto& sk = Theme::S();
             const float S = Theme::Scale();
             auto* dl = ImGui::GetWindowDrawList();
             const ImVec2 cp = ImGui::GetWindowPos();
-            const float gy = cp.y + a_bodyH - 30.0f * S;
-            dl->AddLine(ImVec2(cp.x, gy), ImVec2(cp.x + a_colW, gy), Theme::Acc(0.25f));
+            const float gy = cp.y + BottomStripY(a_bodyH);   // the rule: unmoved
+            const float ty = gy + kStatGap * S + GoldStripDrop();
+            dl->AddLine(ImVec2(cp.x, gy), ImVec2(cp.x + a_colW, gy), Theme::Rule());
             char buf[32];
-            std::snprintf(buf, sizeof(buf), "%d", Grid::GoldAmount());
-            const float amtW = ImGui::CalcTextSize(buf).x;
+            std::snprintf(buf, sizeof(buf), "%s", Grouped(Grid::GoldAmount()).c_str());
+
+            char lbl[48];
             if (sk.diamondLabels) {   // v10.4: crimson "◇ GOLD"
-                char lbl[48];
                 std::snprintf(lbl, sizeof(lbl), "\xE2\x97\x87 %s", Lang::T(Lang::Str::Gold));
-                dl->AddText(ImVec2(cp.x + 2.0f, gy + 8.0f * S),
-                    Theme::Col(sk.sel, 1.0f), lbl);
             } else {
-                dl->AddText(ImVec2(cp.x + 2.0f, gy + 8.0f * S), Theme::Acc(0.7f),
-                    Lang::T(Lang::Str::Gold));
+                std::snprintf(lbl, sizeof(lbl), "%s", Lang::T(Lang::Str::Gold));
             }
-            dl->AddText(ImVec2(cp.x + a_colW - amtW - 2.0f - a_rightReserve, gy + 8.0f * S),
-                Theme::Col(sk.hi, 1.0f), buf);
+            // same single style the stats rows use
+            const float vpx = StatValuePx();
+            const ImVec2 ls = Theme::TrackedSize(lbl, vpx, 0.0f);
+            Theme::TextOutlined(dl, ImVec2(cp.x + 2.0f, ty),
+                sk.diamondLabels ? Theme::Col(sk.sel, 1.0f) : Theme::Chrome(1.0f),
+                lbl, vpx);
+
+            // ★The amount follows its LABEL when the trash can shares the strip.
+            //  Right-aligning it there parked the number against the trash glyph,
+            //  which reads as "delete 6223 gold" instead of "you have 6223"
+            //  (user report). In the plain left column there is no trash button
+            //  and the stats rows above are label-left / value-right, so the
+            //  amount stays right-aligned to match them.
+            if (a_rightReserve > 0.0f) {
+                Theme::TextOutlined(dl, ImVec2(cp.x + 2.0f + ls.x + 10.0f * S, ty),
+                    Theme::GoldCol(), buf, vpx);
+            } else {
+                const float amtW = Theme::TrackedSize(buf, vpx, 0.0f).x;
+                Theme::TextOutlined(dl, ImVec2(cp.x + a_colW - amtW - 2.0f, ty),
+                    Theme::GoldCol(), buf, vpx);
+            }
         }
 
         // F2: trash-can button in the bottom-right strip of the grid column.
@@ -956,8 +2078,10 @@ namespace FUI::UIRoot
             auto* dl = ImGui::GetWindowDrawList();
             const ImVec2 cp = ImGui::GetWindowPos();
             const float side = 18.0f * S;
+            // top-aligned with the GOLD figure: in compact layout both sit in
+            // this same strip, and a 2px offset between them showed
             const ImVec2 p0(cp.x + a_colW - side - 2.0f,
-                            cp.y + a_bodyH - 30.0f * S + (30.0f * S - side) * 0.5f + 2.0f * S);
+                            cp.y + BottomStripY(a_bodyH) + kStatGap * S + GoldStripDrop());
             ImGui::SetCursorScreenPos(ImVec2(p0.x - 4.0f * S, p0.y - 4.0f * S));
             const bool pressed = ImGui::InvisibleButton("##gi_trashbtn",
                 ImVec2(side + 8.0f * S, side + 8.0f * S));
@@ -989,6 +2113,314 @@ namespace FUI::UIRoot
             if (pressed) Grid::ToggleTrash();
         }
 
+        // ---- GI63: contextual prompt bar, bottom edge of the SCREEN ----------
+        //
+        // ★The division of labour with the tooltip is the whole design:
+        //   tooltip  = what can I do with THIS ITEM   (needs a hover)
+        //   this bar = what can I do RIGHT NOW        (needs no hover)
+        // Several of these could never live in a tooltip at all -- orbiting the
+        // 3D view, the wheel zoom, "closing the trash confirms the delete" --
+        // because they are not attached to any item.
+        //
+        // Drawn on the FOREGROUND list against the screen, not a window, so it
+        // costs the inventory no height and stays put while the cursor moves.
+        // ★A hint for the bottom bar, set by whatever is hovered THIS frame.
+        // The bag's COLLECT used to raise a floating tooltip right under the
+        // cursor, which covered the very grid the player was aiming at — and
+        // every other hover in this UI already answers in the bar.
+        std::string g_hoverHint;
+        int         g_hoverHintFrame = -1;
+
+        struct PromptBit
+        {
+            std::string key;     // "" = plain text (drag / wheel / a warning)
+            std::string label;
+            bool        sep = false;   // draw a divider before this bit
+        };
+
+        void DrawPromptRow(const std::vector<PromptBit>& a_bits, bool a_warn, float a_fade)
+        {
+            if (a_bits.empty() || a_fade <= 0.01f) return;
+            const auto& io = ImGui::GetIO();
+            auto* fg = ImGui::GetForegroundDrawList();
+            // ★★PINNED to Glass Dark, not the active skin. This bar is not part
+            // of any window — it floats on the WORLD at the bottom of the
+            // screen, so the thing it has to stand against is the game, never
+            // the panel. Following the skin gave a pale skin pale keycaps over
+            // a bright room, where they vanished. Glass Dark is the one
+            // palette in the table that was designed to sit on the world.
+            const auto& sk = Theme::SkinAt(4);   // 4 = Glass Dark
+            const float S = Theme::Scale();
+            const float gap = 6.0f * S;      // between a key and its label
+            const float wide = 13.0f * S;    // between groups
+            const float capPad = 5.0f * S;
+            const float capH = ImGui::GetTextLineHeight() + 3.0f * S;
+
+            auto capW = [&](const std::string& k) {
+                return (std::max)(capH, ImGui::CalcTextSize(k.c_str()).x + capPad * 2.0f);
+            };
+
+            // A bare key (no label of its own) is one half of a PAIR -- the A of
+            // "A D rotate" -- so it hugs the next bit instead of taking a full
+            // group gap, or the two read as separate prompts.
+            auto lead = [&](std::size_t i) {
+                if (!i) return 0.0f;
+                if (a_bits[i].sep) return wide * 2.0f;
+                return a_bits[i - 1].label.empty() ? gap * 0.7f : wide;
+            };
+
+            float total = 0.0f;
+            for (std::size_t i = 0; i < a_bits.size(); ++i) {
+                const auto& b = a_bits[i];
+                total += lead(i);
+                if (!b.key.empty()) {
+                    total += capW(b.key);
+                    if (!b.label.empty()) total += gap;
+                }
+                total += ImGui::CalcTextSize(b.label.c_str()).x;
+            }
+
+            const float y = io.DisplaySize.y - 44.0f * S;
+            float x = (io.DisplaySize.x - total) * 0.5f;
+
+            // vignette: the bar has to read over a snowfield or a dark crypt
+            // alike, and a flat plate would box in a screen that has no other
+            // chrome at its edge.
+            // ★GI63: the vignette is not one linear ramp. The band the TEXT sits
+            // in is held at full darkness so the row reads the same over a
+            // snowfield and a crypt; only above it does the darkness let go, and
+            // it lets go on a CURVE (alpha ~ t^1.7) so the top edge dissolves
+            // instead of ending on a visible line. A straight ramp put the
+            // halfway tone right behind the text and drew its own horizon.
+            //
+            // ImGui interpolates a rect linearly, so the curve is approximated
+            // by stacked bands -- ten is past the point the seams are findable.
+            // Reach: 200px of fade, but it is SPENT in the lower quarter -- see
+            // the ramp below. The long tail is what makes the top edge
+            // undetectable; the short saturation keeps the text band solid.
+            const float vh = 200.0f * S;        // total reach
+            const float aMax = 195.0f * a_fade;
+            const float top = io.DisplaySize.y - vh;
+
+            // ★ONE smoothstep, no separate solid rectangle. It starts at 4% and
+            // is fully dark by 77.5% of the way down -- 45px off the bottom,
+            // just above the text -- so the row's own band never varies.
+            // Both ends of a smoothstep have zero slope, and that is what
+            // removes the seams: a power curve arrives at the flat section
+            // still climbing, and the eye reads that kink as an edge (it showed
+            // as bands in the first build). Zero slope at the join leaves
+            // nothing to see.
+            // ★The constants are coupled to `vh`: (0.04 + 0.735) * 200 = 155px
+            // down = 45px up from the bottom, which must clear the text's top
+            // edge at 44px. Change the height and these move with it.
+            auto ramp = [](float t) {
+                const float u = (std::min)(1.0f, (std::max)(0.0f, (t - 0.04f) / 0.735f));
+                return u * u * (3.0f - 2.0f * u);
+            };
+            // 200 slices over ~200px: one per pixel. Slice count costs nothing
+            // in fill (they tile, they do not overlap) -- only vertices, and
+            // that many quads is noise. Per-pixel means the ramp is as smooth as
+            // the 8-bit alpha channel allows; there is no kink left to find.
+            constexpr int kBands = 200;
+            for (int i = 0; i < kBands; ++i) {
+                const float t0 = static_cast<float>(i) / kBands;
+                const float t1 = static_cast<float>(i + 1) / kBands;
+                const auto c0 = IM_COL32(0, 0, 0, static_cast<int>(aMax * ramp(t0)));
+                const auto c1 = IM_COL32(0, 0, 0, static_cast<int>(aMax * ramp(t1)));
+                fg->AddRectFilledMultiColor(
+                    ImVec2(0.0f, top + vh * t0),
+                    ImVec2(io.DisplaySize.x, top + vh * t1), c0, c0, c1, c1);
+            }
+
+            // every colour rides the same fade, vignette included, so the whole
+            // strip arrives and leaves as one object rather than text-then-plate
+            auto fade = [&](ImVec4 c) { c.w *= a_fade; return ImGui::GetColorU32(c); };
+            // ★★The keycap CHROME has to be pinned too. Only the two text
+            // colours below took `sk`; the cap fill, its rim and the group
+            // separator called Theme::Acc, which reads the ACTIVE skin — so
+            // the bar was half pinned and the caps went on changing colour
+            // underneath fixed lettering.
+            // Glass Dark is translucent and not light-panelled, so Acc gives
+            // it the x1.9 line boost; applying it in the same order (alpha
+            // first, then boost, then clamp) keeps the bar pixel-identical to
+            // what it looked like while Glass Dark was the active skin.
+            auto acc = [&](float a) {
+                ImVec4 c = sk.acc;
+                c.w = (std::min)(1.0f, a * 1.9f);
+                return ImGui::GetColorU32(c);
+            };
+            const ImU32 keyCol  = fade(a_warn ? sk.sel : sk.acc);
+            const ImU32 textCol = fade(a_warn ? sk.sel : sk.inkDim);
+            const ImU32 sepCol  = acc(0.22f * a_fade);
+
+            for (std::size_t i = 0; i < a_bits.size(); ++i) {
+                const auto& b = a_bits[i];
+                if (b.sep && i) {
+                    const float sx = x + wide;
+                    fg->AddLine(ImVec2(sx, y + 2.0f * S),
+                                ImVec2(sx, y + capH - 2.0f * S), sepCol, 1.0f);
+                }
+                x += lead(i);
+                if (!b.key.empty()) {
+                    const float w = capW(b.key);
+                    // keycap: ghost fill + accent rim, so it reads as a KEY
+                    // rather than as another word in the sentence
+                    fg->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + capH),
+                        acc((a_warn ? 0.10f : 0.09f) * a_fade), 3.0f * S);
+                    fg->AddRect(ImVec2(x, y), ImVec2(x + w, y + capH),
+                        a_warn ? fade(sk.sel) : acc(0.55f * a_fade), 3.0f * S);
+                    const ImVec2 ts = ImGui::CalcTextSize(b.key.c_str());
+                    fg->AddText(ImVec2(x + (w - ts.x) * 0.5f,
+                                       y + (capH - ts.y) * 0.5f), keyCol, b.key.c_str());
+                    x += w;
+                    if (!b.label.empty()) x += gap;
+                }
+                const ImVec2 ls = ImGui::CalcTextSize(b.label.c_str());
+                fg->AddText(ImVec2(x, y + (capH - ls.y) * 0.5f), textCol, b.label.c_str());
+                x += ls.x;
+            }
+        }
+
+        // Which state owns the bar this frame. Ordered by how modal each one is:
+        // an open 3D view is on top of everything, an overload warning is the
+        // background hum that anything else outranks.
+        void DrawPromptBar()
+        {
+            using S = Lang::Str;
+            auto T = [](S s) { return std::string(Lang::T(s)); };
+            auto K = [](Act a) { return std::string(KeyLabel(a)); };
+            std::vector<PromptBit> bits;
+            bool warn = false;
+
+            const auto mode = LootBarter::CurrentMode();
+
+            // a hovered control's own words outrank the ambient hints
+            if (g_hoverHintFrame == ImGui::GetFrameCount() && !g_hoverHint.empty()) {
+                bits = { { "", g_hoverHint } };
+            } else if (IsInspectOpen()) {
+                bits = { { "", T(S::PromptDrag) }, { "", T(S::PromptOrbit) },
+                         { "", T(S::PromptWheel), true }, { "", T(S::PromptZoom) },
+                         { K(Act::kDrop), T(S::PromptReset), true },
+                         { "ESC", T(S::PromptClose), true } };
+            // an explicit click deserves an answer, so this outranks every
+            // ambient state below — but not an open 3D view, which is modal
+            // and cannot be reached from the settings window anyway
+            } else if (ImGui::GetTime() < g_flatReloadNote) {
+                bits = { { "", T(S::IconReloadDone) } };
+            } else if (LootBarter::SliderActive() || Grid::IsPouchOpen()) {
+                // the pouch withdraw window answers the same keys as the
+                // quantity slider -- it just is not a LootBarter one
+                bits = { { "\xE2\x86\x90", "" }, { "\xE2\x86\x92", T(S::PromptStep) },
+                         { "Enter", T(S::Confirm), true },
+                         { "ESC", T(S::Cancel), true } };
+                if (LootBarter::SliderActive()) {
+                    bits.insert(bits.begin() + 2, { "MAX", T(S::PromptMax), true });
+                }
+            } else if (Grid::IsHolding()) {
+                bits = { { K(Act::kPrimary), T(S::PromptPlace) },
+                         { K(Act::kSecondary), T(S::Cancel), true } };
+                if (Grid::HeldCanRotate()) {
+                    bits.insert(bits.begin(), { K(Act::kRotateCCW), "" });
+                    bits.insert(bits.begin() + 1, { K(Act::kRotateCW), T(S::ActRotate) });
+                    bits[2].sep = true;   // divider after the rotate group
+                }
+            } else if (Grid::IsTrashOpen()) {
+                warn = true;
+                bits = { { "", T(S::WarnTrashClose) },
+                         { K(Act::kSecondary), T(S::ActRestore), true } };
+            } else if (Editor::IsEditMode()) {
+                // ★★Hovering an item has to answer even here. EDIT's own hints
+                // describe the 3D preview — what you do AFTER choosing
+                // something — so sitting ahead of the hover branch left the one
+                // action that STARTS the whole mode with no prompt at all.
+                // Split inside this branch rather than reordering the chain:
+                // the item prompts below assume the normal (carry) verbs, and
+                // in EDIT a click selects instead of picking up.
+                // ★An edit that is about to be lost outranks every hint here.
+                // Discarding is silent by design (a confirm on every item
+                // switch would make EDIT unusable), so the bar is where the
+                // player is told it happened — and told beforehand that
+                // something is still unsaved.
+                if (Editor::DiscardNoteActive()) {
+                    warn = true;
+                    bits = { { "", T(S::EditDiscarded) } };
+                } else if (Editor::HasUnsavedEdits()) {
+                    warn = true;
+                    bits = { { "", T(S::EditUnsaved) },
+                             { "", T(S::EditSave), true } };
+                } else if (const auto hp = Grid::HoveredPrompt(); hp.active) {
+                    bits = { { K(Act::kPrimary), T(S::PromptSelect) } };
+                } else {
+                    bits = { { "", T(S::PromptDrag) }, { "", T(S::PromptOrbit) },
+                             { "", T(S::PromptWheel), true }, { "", T(S::PromptZoom) } };
+                }
+            } else if (const auto hp = Grid::HoveredPrompt(); hp.active) {
+                // ★Hovering an item takes the bar, and it carries EVERY key the
+                // tooltip used to list. They appear only when they apply: the
+                // right-click verb is whatever this item does (equip / use /
+                // read / learn / sell / store / buy / steal / open bag /
+                // restore / withdraw / unequip), Shift only on a stack, compare
+                // only on gear.
+                // Grouped, not evenly spaced: the two mouse buttons belong
+                // together, the two Shift forms together, discard and star
+                // together. A divider before every entry turns six prompts into
+                // six competing ones -- three groups reads as a sentence.
+                if (hp.canPick) {
+                    bits.push_back({ K(Act::kPrimary), T(S::ActPickUp) });
+                }
+                if (hp.hasVerb) {
+                    bits.push_back({ K(Act::kSecondary), T(hp.verb) });
+                }
+                if (hp.canCompare) {
+                    bits.push_back({ K(Act::kSplit), T(S::ActCompare), !bits.empty() });
+                }
+                if (hp.canSplit) {
+                    bits.push_back({ K(Act::kSplit) + "+" + K(Act::kPrimary),
+                                     T(S::PromptQty), !bits.empty() && !hp.canCompare });
+                }
+                if (hp.canDrop) {
+                    bits.push_back({ K(Act::kDrop), T(S::ActDrop), !bits.empty() });
+                }
+                if (hp.canFav) {
+                    bits.push_back({ K(Act::kFavorite), T(S::ActFavorite),
+                                     !bits.empty() && !hp.canDrop });
+                }
+                bits.push_back({ K(Act::kInspect), T(S::PromptInspect),
+                                 !bits.empty() });
+            } else if (mode == LootBarter::Mode::kPickpocket) {
+                warn = true;
+                bits = { { "", T(S::WarnPickpocket) } };
+            // ★No barter row on purpose. The tooltip already names the verb
+            // (buy / sell, which side of the counter decides) AND offers Shift
+            // to set a quantity -- and it only offers it on a stack, which a
+            // standing bar cannot know. Repeating it here would be the exact
+            // duplication this bar exists to avoid, so barter falls through to
+            // the overload warning instead.
+            } else if (LootBarter::IsLootMode(mode)) {
+                bits = { { K(Act::kDrop), T(S::PromptTakeAll) } };
+            } else if (Grid::IsOverloaded()) {
+                warn = true;
+                bits = { { "", T(S::WarnOverload) }, { "", T(S::WarnOverloadFix), true } };
+            }
+
+            // ★Fade, and hold the last row while it fades OUT. Without the
+            // hold there is nothing left to draw the moment the state ends, so
+            // the strip would vanish on the frame it was told to leave and the
+            // fade would only ever be visible on the way in.
+            static float s_fade = 0.0f;
+            static std::vector<PromptBit> s_shown;
+            static bool s_shownWarn = false;
+            if (!bits.empty()) {
+                s_shown = bits;
+                s_shownWarn = warn;
+            }
+            const float dt = (std::min)(ImGui::GetIO().DeltaTime, 0.1f);
+            const float target = bits.empty() ? 0.0f : 1.0f;
+            s_fade += (target - s_fade) * (1.0f - std::exp(-dt * 14.0f));
+            if (s_fade > 0.995f) s_fade = 1.0f;
+            DrawPromptRow(s_shown, s_shownWarn, s_fade);
+        }
+
         void DrawMainWindow()
         {
             const auto& io = ImGui::GetIO();
@@ -1003,7 +2435,11 @@ namespace FUI::UIRoot
             // window. Plain inventory keeps the full left column.
             const bool  compact = LootBarter::CurrentMode() != LootBarter::Mode::kNormal;
             const float barH   = 34.0f * S;
-            const float pad    = 12.0f * S;
+            const float pad    = Theme::PadX() * S;
+            // ★The BOTTOM margin is not the side margin. `pad` closes the
+            // window under the gold bar as well as spacing the columns, so
+            // narrowing the sides silently cropped the window's foot too.
+            const float padB   = 12.0f * S;
             const float leftW  = compact ? 0.0f : Equip::PanelW();
             // exact grid width — the legacy +20 scrollbar slack made the
             // right margin visibly wider than the left (v10.7 feedback)
@@ -1012,22 +2448,49 @@ namespace FUI::UIRoot
             // 30px bottom strip (GOLD bar / trash button). The label row was
             // missing here, so the strip's baseline sat ON the last grid row
             // and the trash button overlapped the cells (user-reported).
-            const float itemsLabelH = ImGui::GetTextLineHeightWithSpacing() + 3.0f * S;
+            float itemsLabelH = ImGui::GetTextLineHeightWithSpacing() + 3.0f * S;
+            // ★GI77: with the doll beside it, the grid starts on the SAME line
+            // as the first equipment slot. The two columns are read as one
+            // board, and a grid whose top edge floats above the doll's makes
+            // the window look like two panels that happened to be stacked.
+            // The offset is the tab strip's measured height from last frame —
+            // 0 only before the first draw, where the label height stands in.
+            if (!compact) {
+                if (const float slotsTop = Equip::SlotsTopOffset(); slotsTop > 0.0f) {
+                    itemsLabelH = slotsTop;
+                }
+            }
             const float gridBodyH = itemsLabelH + Grid::kMinRows * Grid::CellPx() + 30.0f * S;
             // left column must fit doll + stats panel + GOLD bar (S1); compact
             // reserves the GOLD-bar strip under the grid instead
+            // ★The doll-to-stats gap is what's LEFT OVER, not a fixed 44.
+            // BottomStripY is derived from bodyH, so whenever the grid column
+            // is the taller of the two the stats panel's last rule lands on
+            // exactly the grid's last row line — the layout was always built
+            // to do that. A fixed gap made the left column win instead, by a
+            // different amount at every cell size (the grid shrinks with the
+            // cell, the stats panel doesn't — it is type). Letting the gap
+            // absorb the difference keeps the two columns level.
+            const float dollGap = (std::max)(12.0f * S,
+                gridBodyH - Equip::PanelH() - StatsPanelH());
             const float bodyH  = (compact
                 ? gridBodyH + 30.0f * S
-                : (std::max)(Equip::PanelH() + 44.0f * S + StatsPanelH(), gridBodyH)) + 8.0f * S;
+                : (std::max)(Equip::PanelH() + dollGap + StatsPanelH(), gridBodyH)) + 8.0f * S;
             const ImVec2 mainSize(compact
                     ? pad + gridW + pad + 2.0f * insX
                     : pad + leftW + pad + 1.0f + pad + gridW + pad + 2.0f * insX,
-                barH + bodyH + pad + 2.0f * insY);
+                barH + bodyH + padB + 2.0f * insY);
 
+            // ★Pin the RIGHT edge across the compact/normal size change. The
+            //  item grid is the half that exists in both layouts and it sits
+            //  against the right frame, so anchoring there keeps the grid --
+            //  and anything the user docked beside it -- perfectly still while
+            //  the equipment column folds away to the left, into the space the
+            //  partner window occupies anyway.
             wm->ApplyNext("main",
                 ImVec2((io.DisplaySize.x - mainSize.x) * 0.5f,
                        (io.DisplaySize.y - mainSize.y) * 0.5f),
-                mainSize);
+                mainSize, WinManager::Anchor::kTopRight);
 
             if (!ImGui::Begin("##fablerim_main", nullptr, kManagedWinFlags)) {
                 ImGui::End();
@@ -1077,8 +2540,7 @@ namespace FUI::UIRoot
                 if (sk.diamondLabels) {   // v10.4: "◇ LABEL" in crimson
                     ImGui::TextColored(sk.sel, "\xE2\x97\x87 %s", Lang::T(Lang::Str::Items));
                 } else {
-                    ImGui::TextColored(ImVec4(sk.acc.x, sk.acc.y, sk.acc.z, 0.6f), "%s",
-                        Lang::T(Lang::Str::Items));
+                    OutlinedText(Theme::Chrome(1.0f), Lang::T(Lang::Str::Items));
                 }
                 auto* cache = IconCache::GetSingleton();
                 if (cache->IsBusy()) {
@@ -1086,7 +2548,44 @@ namespace FUI::UIRoot
                     ImGui::TextColored(sk.inkDim, "  %s %zu",
                         Lang::T(Lang::Str::Caching), cache->QueuedCount());
                 }
+                // ★Search rides the ITEMS header, right-aligned. It belongs to
+                // the board underneath it — putting it in the settings window
+                // would make "where is my healing potion" a two-window job.
+                // Right-aligned so it never pushes the label around as the
+                // caching counter comes and goes.
+                {
+                    // ★★Position from the child's RIGHT EDGE, not from what is
+                    // left at the cursor. GetContentRegionAvail was being read
+                    // BEFORE SameLine — at that moment the cursor sits on the
+                    // next line at x=0, so it reported the FULL width, and
+                    // adding it to the post-SameLine cursor pushed the box past
+                    // the edge by the width of the "ITEMS" label. The overflow
+                    // was larger than any margin could hide, which is why the
+                    // right border stayed missing after the first fix.
+                    // GetContentRegionMax is the edge itself and does not move
+                    // with the cursor.
+                    const float S = Theme::Scale();
+                    const float edge = 2.0f * S;   // clear of the clip boundary
+                    const float sw = 148.0f * S;
+                    const float right = ImGui::GetContentRegionMax().x;
+                    if (right > sw + edge + 8.0f) {
+                        ImGui::SameLine(0.0f, 0.0f);
+                        ImGui::SetCursorPosX(right - sw - edge);
+                        static char s_find[64] = "";
+                        // ESC clears the model; the widget has to follow or the
+                        // box would still show a term that no longer applies
+                        if (!Grid::SearchActive() && s_find[0]) s_find[0] = '\0';
+                        ImGui::SetNextItemWidth(sw);
+                        if (ImGui::InputTextWithHint("##find",
+                                Lang::T(Lang::Str::SearchHint), s_find, sizeof(s_find))) {
+                            Grid::SetSearch(s_find);
+                        }
+                    }
+                }
             }
+            // ★GI77: drop to the equipment column's first slot line. The label
+            // keeps its own place at the top; only the grid moves.
+            ImGui::SetCursorPosY(itemsLabelH);
             Grid::Draw();
             if (compact) {
                 // GOLD strip under the grid; amount clears the trash button
@@ -1100,7 +2599,27 @@ namespace FUI::UIRoot
     }
 
 
-    void DrawItemIcon(ImDrawList* a_dl, void* a_srv, const ImVec2& a_min, const ImVec2& a_max)
+    namespace
+    {
+        // GI52: the drawn icons carry their own rotation, so every pass below
+        // submits a QUAD rather than an axis-aligned rect. An unrotated call
+        // passes the rect's four corners and is pixel-identical to before.
+        void IconPass(ImDrawList* a_dl, ImTextureID a_tex, const ImVec2 a_p[4],
+                      std::uint32_t a_col)
+        {
+            a_dl->AddImageQuad(a_tex, a_p[0], a_p[1], a_p[2], a_p[3],
+                ImVec2(0.0f, 0.0f), ImVec2(1.0f, 0.0f),
+                ImVec2(1.0f, 1.0f), ImVec2(0.0f, 1.0f), a_col);
+        }
+    }
+
+    void NoteHoverHint(const char* a_text)
+    {
+        g_hoverHint = a_text ? a_text : "";
+        g_hoverHintFrame = ImGui::GetFrameCount();
+    }
+
+    void DrawItemIconQuad(ImDrawList* a_dl, void* a_srv, const ImVec2 a_p[4])
     {
         const float g = Theme::IconGain();
         const auto  tex = reinterpret_cast<ImTextureID>(a_srv);
@@ -1109,15 +2628,13 @@ namespace FUI::UIRoot
         // highlights cannot blow out. Live, no texture rebake.
         const auto c = static_cast<std::uint32_t>(
             255.0f * (std::min)(1.0f, g) + 0.5f);
-        a_dl->AddImage(tex, a_min, a_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
-            IM_COL32(c, c, c, 255));
+        IconPass(a_dl, tex, a_p, IM_COL32(c, c, c, 255));
         if (g > 1.0f && g_fillBlend) {
             // slider top (1.6) maps to full lift strength
             const float tf = (std::min)(1.0f, (g - 1.0f) / 0.6f);
             const auto t = static_cast<std::uint32_t>(tf * 255.0f + 0.5f);
             a_dl->AddCallback(&FillLightBlendCB, nullptr);
-            a_dl->AddImage(tex, a_min, a_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
-                IM_COL32(t, t, t, 255));
+            IconPass(a_dl, tex, a_p, IM_COL32(t, t, t, 255));
             // GI58: one screen pass tops out at +25% midtone, which left the
             // slider's upper range feeling dim (1.0 IS the raw capture — the
             // old additive default merely hid that by inflating highlights).
@@ -1128,36 +2645,47 @@ namespace FUI::UIRoot
             if (tf > 0.5f) {
                 const auto t2 = static_cast<std::uint32_t>(
                     (tf - 0.5f) * 2.0f * 255.0f + 0.5f);
-                a_dl->AddImage(tex, a_min, a_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
-                    IM_COL32(t2, t2, t2, 255));
+                IconPass(a_dl, tex, a_p, IM_COL32(t2, t2, t2, 255));
             }
             a_dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+            // the reset just re-bound the backend's MaxLOD-0 sampler — every
+            // icon drawn after this fill-light pass needs the mips back
+            a_dl->AddCallback(&MipSamplerCB, nullptr);
         }
+    }
+
+    void DrawItemIcon(ImDrawList* a_dl, void* a_srv, const ImVec2& a_min, const ImVec2& a_max)
+    {
+        const ImVec2 p[4] = { a_min, ImVec2(a_max.x, a_min.y),
+                              a_max, ImVec2(a_min.x, a_max.y) };
+        DrawItemIconQuad(a_dl, a_srv, p);
+    }
+
+    void DrawItemIconRot(ImDrawList* a_dl, void* a_srv, const ImVec2& a_centre,
+                         const ImVec2& a_size, float a_deg)
+    {
+        const float hx = a_size.x * 0.5f;
+        const float hy = a_size.y * 0.5f;
+        if (std::fabs(a_deg) < 0.01f) {   // the common case stays a plain rect
+            DrawItemIcon(a_dl, a_srv, ImVec2(a_centre.x - hx, a_centre.y - hy),
+                                      ImVec2(a_centre.x + hx, a_centre.y + hy));
+            return;
+        }
+        const float r = a_deg * 3.14159265f / 180.0f;
+        const float cs = std::cos(r);
+        const float sn = std::sin(r);
+        const ImVec2 o[4] = { { -hx, -hy }, { hx, -hy }, { hx, hy }, { -hx, hy } };
+        ImVec2 p[4];
+        for (int i = 0; i < 4; ++i) {
+            p[i] = ImVec2(a_centre.x + o[i].x * cs - o[i].y * sn,
+                          a_centre.y + o[i].x * sn + o[i].y * cs);
+        }
+        DrawItemIconQuad(a_dl, a_srv, p);
     }
 
     void* GlowTexture()
     {
         return g_glowSRV;
-    }
-
-    void* TornGlowA()
-    {
-        return g_tornGlowA.srv;
-    }
-
-    void* TornGlowB()
-    {
-        return g_tornGlowB.srv;
-    }
-
-    void* TornCreamA()
-    {
-        return g_tornCreamA.srv;
-    }
-
-    void* TornBrightB()
-    {
-        return g_tornBrightB.srv;
     }
 
     void RegisterMenu()
@@ -1199,6 +2727,7 @@ namespace FUI::UIRoot
             return false;
         }
 
+        g_gameWnd = hwnd;
         // keyboard/char input: chained WndProc (see WndProcThunk above)
         if (!g_origWndProc) {
             g_origWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(
@@ -1214,6 +2743,14 @@ namespace FUI::UIRoot
         io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
         io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
         io.IniFilename = nullptr;
+        // ★We push exactly ONE authoritative mouse position per frame, at the
+        //  end of the queue. Trickling exists to spread a burst of real device
+        //  events over several frames, and here it does the opposite of what we
+        //  want: the Win32 backend also queues a position (the OS cursor, which
+        //  the game parks at screen centre on a pad), and with trickling on,
+        //  that stale one can win the frame whenever a button event splits the
+        //  queue. Off = last write wins, which is ours.
+        io.ConfigInputTrickleEventQueue = false;
 
         // fonts are baked at the saved UI scale (WinManager may not have
         // loaded yet here — OnShow re-requests a bake if the scale differs)
@@ -1223,18 +2760,11 @@ namespace FUI::UIRoot
         Theme::Apply();
         CreateGlowTexture(device);
         CreateFillLightBlend(device);
+        CreateMipSampler(device);
 
-        // OATHVEIN TORN 9-slice panels: baked from the user's torn PNG with a
-        // light rim/glow (in-game has no CSS filter — glow is in the texture)
-        IconCache::LoadFicTexture(
-            "Data/SKSE/Plugins/GridInventory_slots/frame_torn_glowA.fic", g_tornGlowA);
-        IconCache::LoadFicTexture(
-            "Data/SKSE/Plugins/GridInventory_slots/frame_torn_glowB.fic", g_tornGlowB);
-        // skins 5/6: light cream rebakes (V1/V2, bake_torn_skins.py)
-        IconCache::LoadFicTexture(
-            "Data/SKSE/Plugins/GridInventory_slots/frame_torn_creamA.fic", g_tornCreamA);
-        IconCache::LoadFicTexture(
-            "Data/SKSE/Plugins/GridInventory_slots/frame_torn_brightB.fic", g_tornBrightB);
+        // ★The four frame_torn_*.fic sheets that used to load here are gone:
+        // the torn frame is drawn (Theme::TornPanel), so there is no texture to
+        // pick between and no 9-slice to stretch.
 
         g_initialized.store(true);
         SKSE::log::info("[UI] ImGui initialized (hwnd={:#x})", reinterpret_cast<uintptr_t>(hwnd));
@@ -1275,7 +2805,7 @@ namespace FUI::UIRoot
         g_inspRx = g_inspRx0 = d.rx;
         g_inspRy = g_inspRy0 = d.ry;
         g_inspRz = g_inspRz0 = d.rz;
-        g_inspZoom = 1.0f;
+        g_inspZoom = kInspZoomMin;
         g_inspDrag = false;
         g_inspOpenFrame = ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1;
         IconCache::GetSingleton()->SetInspect(a_obj, g_inspRx, g_inspRy, g_inspRz);
@@ -1348,13 +2878,13 @@ namespace FUI::UIRoot
                 }
                 if (io.MouseWheel != 0.0f) {
                     g_inspZoom = std::clamp(g_inspZoom * (1.0f + io.MouseWheel * 0.12f),
-                        0.5f, 3.5f);
+                        kInspZoomMin, kInspZoomMax);
                 }
                 if (ImGui::IsKeyPressed(ImGuiKey_R, false) && !io.WantTextInput) {
                     g_inspRx = g_inspRx0;
                     g_inspRy = g_inspRy0;
                     g_inspRz = g_inspRz0;
-                    g_inspZoom = 1.0f;
+                    g_inspZoom = kInspZoomMin;   // R returns to the opening shot
                     moved = true;
                 }
                 // the capture itself is driven by IconCache::PreRender, which
@@ -1388,13 +2918,11 @@ namespace FUI::UIRoot
                 if (const char* nm = g_inspObj->GetName(); nm && nm[0]) {
                     const ImVec2 nw = ImGui::CalcTextSize(nm);
                     dl->AddText(ImVec2((io.DisplaySize.x - nw.x) * 0.5f, 26.0f * S),
-                        Theme::Col(sk.hi, 1.0f), nm);
+                        Theme::Val(), nm);
                 }
-                const char* hint = Lang::T(Lang::Str::InspectHint);
-                const ImVec2 hw = ImGui::CalcTextSize(hint);
-                dl->AddText(ImVec2((io.DisplaySize.x - hw.x) * 0.5f,
-                                   io.DisplaySize.y - 40.0f * S),
-                    Theme::Col(sk.inkDim, 1.0f), hint);
+                // GI63: the control hint used to be printed HERE, at the same
+                // screen-bottom spot the prompt bar now owns -- the two drew on
+                // top of each other. One statement of the controls, one place.
 
                 // (no widgets here by design — see the drag comment above:
                 // icon rotation is edited in the EDIT panel / IconStudio)
@@ -1412,25 +2940,96 @@ namespace FUI::UIRoot
         }
     }
 
+    namespace
+    {
+        // ★★I/ESC close the LAST thing opened, not a fixed priority list. The
+        // chain this replaces read top-down — inspect, popups, trash, pouch,
+        // settings, EDIT — so opening the SETTINGS and then turning EDIT on
+        // closed the settings first, which is not what the player did last.
+        //
+        // The order is OBSERVED, not reported. Every layer already owns a bool
+        // and asking all eight once a frame costs nothing, whereas threading a
+        // push/pop through six modules' open paths would miss one sooner or
+        // later — and that miss would be silent, showing up only as a window
+        // closing out of turn.
+        enum class Layer : std::uint8_t {
+            kInspect, kTrashConfirm, kLootPopup, kEquipPopup,
+            kTrash, kPouch, kSettings, kEdit, kSearch, kCount
+        };
+
+        [[nodiscard]] bool LayerOpen(Layer a_l)
+        {
+            switch (a_l) {
+            case Layer::kInspect:      return g_inspObj != nullptr;
+            case Layer::kTrashConfirm: return Grid::IsTrashConfirmOpen();
+            case Layer::kLootPopup:    return LootBarter::IsPopupOpen();
+            case Layer::kEquipPopup:   return Equip::IsPopupOpen();
+            case Layer::kTrash:        return Grid::IsTrashOpen();
+            case Layer::kPouch:        return Grid::IsPouchOpen();
+            case Layer::kSettings:     return g_showSettings.load();
+            case Layer::kEdit:         return Editor::IsEditMode();
+            case Layer::kSearch:       return Grid::SearchActive();
+            default:                   return false;
+            }
+        }
+
+        bool CloseLayer(Layer a_l)
+        {
+            switch (a_l) {
+            case Layer::kInspect:      return CloseInspect();
+            case Layer::kTrashConfirm: return Grid::CloseTrashConfirm();
+            case Layer::kLootPopup:    return LootBarter::CloseTopPopup();
+            case Layer::kEquipPopup:   return Equip::CloseTopPopup();
+            case Layer::kTrash:        return Grid::CloseTrash();
+            case Layer::kPouch:        return Grid::ClosePouch();
+            case Layer::kSettings:
+                if (!g_showSettings.load()) return false;
+                g_showSettings.store(false);
+                return true;
+            case Layer::kEdit:
+                if (!Editor::IsEditMode()) return false;
+                Editor::ToggleEditMode();   // same path as clicking EDIT off
+                return true;
+            case Layer::kSearch:       return Grid::ClearSearch();
+            default: return false;
+            }
+        }
+
+        std::vector<Layer> g_layerStack;   // oldest first, newest last
+    }
+
+    void TrackLayers()
+    {
+        // whatever was shut by its own button, confirm or X leaves the stack
+        std::erase_if(g_layerStack, [](Layer l) { return !LayerOpen(l); });
+        // ...and whatever is newly up joins the top. Two layers appearing in
+        // the SAME frame is rare and their relative order is arbitrary anyway,
+        // so enum order breaks that tie.
+        for (std::uint8_t i = 0; i < static_cast<std::uint8_t>(Layer::kCount); ++i) {
+            const auto l = static_cast<Layer>(i);
+            if (!LayerOpen(l)) continue;
+            if (std::find(g_layerStack.begin(), g_layerStack.end(), l) ==
+                g_layerStack.end()) {
+                g_layerStack.push_back(l);
+            }
+        }
+    }
+
     bool CloseTopWindow()
     {
-        if (CloseInspect()) return true;   // modal 3D inspect sits on top
-        // sub-popups close first, one per keypress (topmost priority):
-        // quantity slider / sale confirm -> loadout popups -> coin pouch ->
-        // settings -> EDIT mode; only when all are closed does the caller
-        // close the inventory itself
-        if (Grid::CloseTrashConfirm()) return true;   // F2 favorite ask (popup tier)
-        if (LootBarter::CloseTopPopup()) return true;
-        if (Equip::CloseTopPopup()) return true;
-        if (Grid::CloseTrash()) return true;          // F2: confirm-all + close
-        if (Grid::ClosePouch()) return true;
-        if (g_showSettings) {
-            g_showSettings = false;
-            return true;
-        }
-        if (Editor::IsEditMode()) {
-            Editor::ToggleEditMode();   // same path as clicking EDIT off
-            return true;
+        // the key can arrive before the next frame observes a layer that a
+        // click just opened, so look once more here
+        TrackLayers();
+        while (!g_layerStack.empty()) {
+            const Layer l = g_layerStack.back();
+            if (CloseLayer(l)) {
+                // a module holding several popups of its own (loot slider under
+                // a sale confirm) keeps its PLACE in line until the last one is
+                // gone — popping it here would re-append it at the top instead
+                if (!LayerOpen(l)) g_layerStack.pop_back();
+                return true;
+            }
+            g_layerStack.pop_back();   // stale entry: try the one beneath
         }
         return false;
     }
@@ -1445,6 +3044,10 @@ namespace FUI::UIRoot
     void OnShow()
     {
         g_menuOpenSfx = 10;   // clear of the open transition (3 was too early)
+        // Re-ask the engine which button carries what: the player may have
+        // rebound the controls since the last time the menu was up. Done HERE,
+        // on the game thread, so the render thread only ever reads the result.
+        ResolvePadLabels();
         // Park anchor = the SAVED main-window centre — set BEFORE the first
         // capture request so no frame is ever exposed.
         {
@@ -1494,6 +3097,10 @@ namespace FUI::UIRoot
         Grid::ClearPendingEquips();   // no queued equip outlives the menu
         Equip::OnMenuClosed();        // GI53: nor does a loadout confirm popup
         if (Grid::IsHolding()) Grid::CancelHold();   // never close mid-carry
+        Grid::NoteInventorySeen();    // GI65: closing the menu IS "I have seen it"
+        // ★A search is about THIS visit. Carrying it over means the next open
+        // shows a dimmed board for a term the player has long forgotten typing.
+        Grid::ClearSearch();
         g_showSettings = false;
         g_textInputOn = false;
         if (ImGui::GetCurrentContext()) {
@@ -1539,9 +3146,186 @@ namespace FUI::UIRoot
         return false;
     }
 
+    bool IsPadActive() { return g_padActive.load(); }
+
+    const char* KeyLabel(Act a_act)
+    {
+        // Mouse/keyboard side is ours to choose (these are hardcoded above in
+        // the ImGui translation), so it needs no lookup.
+        static constexpr const char* kKeyboard[] = {
+            "LMB", "RMB", "R", "F", "C", "Shift", "A", "D",
+        };
+        const auto i = static_cast<std::size_t>(a_act);
+        if (i >= std::size(kKeyboard)) return "";
+        // Read-only on the render thread: the table is filled on the game
+        // thread in OnShow, so nothing here touches ControlMap. An unresolved
+        // or unbound action still names the key, so a hint never goes blank.
+        if (!g_padActive.load() || !g_padLabelReady) return kKeyboard[i];
+        return g_padLabel[i] ? g_padLabel[i] : kKeyboard[i];
+    }
+
+    bool WantsGameCursor()
+    {
+        // Mouse mode always wants the vanilla arrow. On a pad we want it too —
+        // unless we have concluded it will not follow and are drawing our own,
+        // in which case asking for it just strands a second arrow on screen.
+        return !g_padActive.load() || g_padCursorMode != PadCursorMode::kOwn;
+    }
+
+    void FeedEngineCursor(RE::ThumbstickEvent* a_event)
+    {
+        if (!a_event) return;
+        if (g_padCursorMode == PadCursorMode::kOwn) return;   // settled: don't poke it
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui || !ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)) return;
+        const auto menu = ui->GetMenu(RE::CursorMenu::MENU_NAME);
+        if (!menu) return;
+        auto* handler = static_cast<RE::CursorMenu*>(menu.get())->AsMenuEventHandler();
+        if (!handler) return;
+
+        // CanProcess is the engine's own gate. We log its first verdict — a
+        // refusal is the single most useful thing to know if this path stays
+        // dead — but still offer the event: we are deliberately driving a
+        // cursor the engine has concluded nobody is driving.
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            SKSE::log::info("[PAD] CursorMenu handler reached (CanProcess={})",
+                            handler->CanProcess(a_event) ? "yes" : "no");
+        }
+        handler->ProcessThumbstick(a_event);
+    }
+
+    void NotePadStick(bool a_right, float a_x, float a_y)
+    {
+        // Radial dead zone, then a squared response: small deflections stay
+        // precise enough to land on one cell, full deflection still crosses
+        // the board quickly.
+        constexpr float kDead = 0.20f;
+        const float mag = std::sqrt(a_x * a_x + a_y * a_y);
+        float nx = 0.0f, ny = 0.0f;
+        if (mag > kDead) {
+            const float t = (mag - kDead) / (1.0f - kDead);
+            const float s = t * t / mag;
+            nx = a_x * s;
+            ny = a_y * s;
+        }
+        if (a_right) {
+            g_padScrollY.store(ny);
+        } else {
+            g_padMoveX.store(nx);
+            g_padMoveY.store(-ny);   // stick +Y is up, screen +Y is down
+        }
+        if (nx != 0.0f || ny != 0.0f) MarkPadActive(true);
+    }
+
+    void NotePadButton(std::uint32_t a_idCode, bool a_pressed)
+    {
+        using K = RE::BSWin32GamepadDevice::Keys;
+        // The triggers are analog axes with no bit in the XInput button mask —
+        // give them one above every real bit so they ride the same bookkeeping.
+        std::uint32_t bit = a_idCode;
+        if (a_idCode == K::kLeftTrigger)  bit = 1u << 16;
+        if (a_idCode == K::kRightTrigger) bit = 1u << 17;
+        if (bit == 0 || (bit & (bit - 1)) != 0) return;   // single bit only
+
+        const int idx = std::countr_zero(bit);
+        if (a_pressed) {
+            // Resolve at PRESS time and remember it, so the release clears the
+            // same action even if the binding changed in between.
+            g_btnAction[idx] = ActionForButton(a_idCode);
+            g_padRaw.fetch_or(bit);
+            // One line per button, first press only: what the engine called it
+            // and what we made of it. Without this the binding is invisible.
+            static std::uint32_t s_logged = 0;
+            if ((s_logged & bit) == 0) {
+                s_logged |= bit;
+                auto* cm = RE::ControlMap::GetSingleton();
+                using Ctx = RE::UserEvents::INPUT_CONTEXT_ID;
+                std::string_view nm{};
+                if (cm) {
+                    for (const auto ctx : { Ctx::kItemMenu, Ctx::kMenuMode, Ctx::kInventory }) {
+                        nm = cm->GetUserEventName(a_idCode, RE::INPUT_DEVICE::kGamepad, ctx);
+                        if (!nm.empty()) break;
+                    }
+                }
+                SKSE::log::info("[PAD] button {:#06x} -> user event '{}' -> action {:#x}",
+                                a_idCode, nm.empty() ? "(unbound)" : std::string(nm),
+                                g_btnAction[idx]);
+            }
+        } else {
+            g_padRaw.fetch_and(~bit);
+        }
+
+        // Two buttons can carry the same action (both triggers = split), so the
+        // held set is the OR over everything still down — never a single bit
+        // cleared by whichever was released first.
+        const std::uint32_t raw = g_padRaw.load();
+        std::uint32_t actions = 0;
+        for (std::uint32_t r = raw; r != 0; r &= (r - 1)) {
+            actions |= g_btnAction[std::countr_zero(r)];
+        }
+        g_padHeld.store(actions);
+        MarkPadActive(true);
+    }
+
+    void NoteMouseInput()
+    {
+        // A real mouse event — the only trustworthy "the user grabbed the
+        // mouse" signal. Suppression holds until an actual pad event arrives.
+        g_padSuppressed.store(true);
+        g_padActive.store(false);
+    }
+
+    bool IsBookOpen()
+    {
+        auto* ui = RE::UI::GetSingleton();
+        return ui && ui->IsMenuOpen(RE::BookMenu::MENU_NAME);
+    }
+
+    bool IsConsoleOpen()
+    {
+        auto* ui = RE::UI::GetSingleton();
+        return ui && ui->IsMenuOpen(RE::Console::MENU_NAME);
+    }
+
     void Render()
     {
         if (!g_initialized.load()) return;
+        // The book the player just right-clicked is a real Scaleform menu
+        // UNDER our overlay. Skip the whole frame (not just the windows) so
+        // nothing of ours is drawn and no ImGui state is touched meanwhile.
+        if (IsBookOpen()) {
+            if (!g_bookWasOpen) {
+                g_bookWasOpen = true;
+                // ★The click that opened the book never gets its release here
+                // (our input relay stands down too), so queue one. Without it
+                // ImGui resumes with the button still down and the first
+                // frame back cancels a carry / fires a drop by itself.
+                auto& io = ImGui::GetIO();
+                io.AddMouseButtonEvent(0, false);
+                io.AddMouseButtonEvent(1, false);
+            }
+            return;
+        }
+        g_bookWasOpen = false;
+
+        // ★★The console just came up. Keys stop reaching us from this frame on
+        // (GridMenu::ProcessScaleformEvent), so anything HELD when it opened
+        // would never see its release and would read as stuck. Dropping the
+        // text focus too is what actually stops the typing: a focused ImGui
+        // field keeps its caret and would resume mid-word when the console
+        // closes, on a term the player was not editing.
+        {
+            static bool s_consoleWas = false;
+            const bool consoleNow = IsConsoleOpen();
+            if (consoleNow && !s_consoleWas) {
+                ImGui::GetIO().ClearInputKeys();
+                ImGui::ClearActiveID();
+                g_textInputOn = false;
+            }
+            s_consoleWas = consoleNow;
+        }
 
         // rebake outside the frame; the DX11 backend recreates the font
         // texture inside NewFrame after InvalidateDeviceObjects
@@ -1579,6 +3363,12 @@ namespace FUI::UIRoot
         }
 
         ImGui::NewFrame();
+        // ★First command of the frame: swap the backend's MaxLOD-0 sampler
+        // for the mip-enabled one (see CreateMipSampler). The background list
+        // renders before every window, and the backend never re-binds its
+        // sampler mid-frame except through ResetRenderState (handled at its
+        // one call site) — so this single callback covers the whole UI.
+        ImGui::GetBackgroundDrawList()->AddCallback(&MipSamplerCB, nullptr);
         g_overlayPrev.swap(g_overlayNow);
         g_overlayNow.clear();
         // hover-sound edge detection re-arms once nothing is hovered, so
@@ -1597,13 +3387,40 @@ namespace FUI::UIRoot
         Editor::DrawPanel();      // B-6 EDIT panel (edit mode only)
         DrawInspect();            // C key: modal 3D inspect (drawn last = modal)
         Grid::FinishFrame();      // carry input + deferred rebuilds
+        // GI63: LAST, so it sees this frame's hover -- the tooltips that record
+        // it are drawn above. Being on the foreground list, drawing late costs
+        // it no z-order: it still sits over every window.
+        DrawPromptBar();
         WinManager::GetSingleton()->Update();   // drag / magnet / dock / clamp
+        // ★AFTER every window drew, so a layer a click opened THIS frame is
+        // already up when we look. Recording the order is the whole reason
+        // I/ESC can close things in the order they were opened.
+        TrackLayers();
         ImGui::Render();
+        // ★★The draw-data outline pass is GONE, and it was the answer to a
+        // week of "why do these two strings look different".
+        //
+        // Two outline systems were running at once. Chrome text draws its own
+        // (Theme::TextOutlined). The pass then walked the finished frame and
+        // outlined every glyph it recognised — including the black copies the
+        // first system had just laid down, so a label ended up with an outline
+        // ON its outline. Measured: our own coat is 0.50, a label came out at
+        // 0.87, which is three coats.
+        //
+        // ★It did NOT touch the window title, and that is why the title looked
+        // right while everything else looked heavy. The title draws through
+        // AddText(font, SIZE, ...) — an explicit size lands on a different
+        // baked font and a different draw command, which the pass's texture
+        // filter then skipped. One string opted out by accident.
+        //
+        // Nothing needs the pass any more: every string that wants an edge
+        // asks for one directly.
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     }
 
     void Tick()
     {
+        Grid::ProcessBookRead();   // raise the Book Menu OUTSIDE the render pass
         Grid::ProcessFavorites();  // GI32: favourites, same reason
         Equip::ProcessPending();   // equip/unequip OUTSIDE the render pass
         Loadout::ProcessPending();  // L1: deferred loadout tab switch
@@ -1625,6 +3442,14 @@ namespace FUI::UIRoot
         }
         if (g_iconsReset.exchange(false)) {
             IconCache::GetSingleton()->ResetDiskCache();
+            Grid::RequestRebuild();
+        }
+        if (g_flatReload.exchange(false)) {
+            // Drawn icons are looked up once per key and negative-cached, so a
+            // file edited while the game runs is otherwise invisible until a
+            // restart — which is the difference between "author a PNG" being a
+            // loop and being a chore.
+            Fallback::ReloadAssets();
             Grid::RequestRebuild();
         }
     }

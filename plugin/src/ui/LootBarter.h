@@ -116,6 +116,10 @@ namespace FUI::LootBarter
 
     // I/ESC layering: close the topmost open popup (confirm > slider);
     // returns false when neither is open (the caller may close more UI)
+    // true while EITHER sub-popup is up (confirm sits above the slider). The
+    // close-order stack treats this module as one layer and lets CloseTopPopup
+    // keep its own internal order.
+    [[nodiscard]] bool IsPopupOpen();
     bool CloseTopPopup();
 
     // ---- barter pricing (Phase 4) -----------------------------------------
@@ -173,6 +177,7 @@ namespace FUI::LootBarter
         int                 occXlIdx = -1;
         int                 occOrd = 0;
         std::string         occSpotKey;
+        int                 occRot = 0;   // GI62: and the angle it lies at
     };
     [[nodiscard]] StoreDrop QueryStoreDrop();
 
@@ -185,13 +190,16 @@ namespace FUI::LootBarter
     // swap / in-container move); footprint size comes from the def resolver
     // GI18: a_sig = Grid::HeldInstanceSig() of the unit being stored (0 for a
     // plain one). The spot is claimed by the matching cell once it lands.
+    // GI62: a_rot = the quarter-turn the player dropped it at. This is how a
+    // rotation crosses from the inventory into a container -- the spot on this
+    // side is created from the hint, so it is created already turned.
     void NoteStoreSpot(RE::TESBoundObject* a_obj, int a_col, int a_row,
-                       std::uint16_t a_sig = 0);
+                       std::uint16_t a_sig = 0, int a_rot = 0);
 
     // drop-cell spot for a STACK store: kept until the quantity slider
     // confirms (kStore applies it) or cancels
     void SetStoreSpotHint(RE::TESBoundObject* a_obj, int a_col, int a_row,
-                          std::uint16_t a_sig = 0);
+                          std::uint16_t a_sig = 0, int a_rot = 0);
 
     // cosave 'GCLY' v1: container ref FormID -> (item key -> spot), LRU 128.
     // main.cpp owns the record loop.

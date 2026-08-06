@@ -1,5 +1,6 @@
 #include "game/GoldCoins.h"
 
+#include "game/BagFilter.h"
 #include "ui/Grid.h"
 
 #include <algorithm>
@@ -17,7 +18,7 @@ namespace FUI::GoldCoins
         constexpr const char*   kPlugin = "Grid Inventory.esp";
         constexpr RE::FormID    kGold001 = 0x0000000F;
         constexpr int           kPouchCap = 10000;
-        constexpr std::uint32_t kVersion = 4;   // v2:+world sacks v3:+away gold v4:+pinned purses
+        constexpr std::uint32_t kVersion = 5;   // v2:+world sacks v3:+away gold v4:+pinned purses v5:+vendor cycle
 
         RE::TESBoundObject* g_coins[4] = {};   // 0x800..0x803 (tiers 1..4)
         RE::TESBoundObject* g_pouch = nullptr;
@@ -39,6 +40,19 @@ namespace FUI::GoldCoins
         // Subtracted from walking gold so the auto tier-decomposition ignores
         // them; each keeps its exact value & position until merged/dropped.
         std::map<std::string, int> g_pinned;
+
+        // ★Vendor restock: the last stock CYCLE we seeded for each merchant.
+        // Not a timestamp — a cycle index, floor(daysPassed / iDaysToRespawnVendor).
+        // Storing the index rather than the time is what makes the shelf stable:
+        // every visit inside one cycle computes the same number, so re-opening
+        // the barter window cannot re-roll the lineup or refill something the
+        // player just bought (which is exactly what the old "stock it whenever
+        // it is missing" rule did — bags were infinitely purchasable).
+        std::map<RE::FormID, std::uint32_t> g_vendorCycle;
+
+        // how many general-purpose bags a general store shows per cycle
+        constexpr int kGenericBagsPerCycle = 3;
+        std::vector<BagWare> g_bagWares;
 
         // stored gold travelling INSIDE a pouch that left the inventory
         // (chest storage / drop / companion). Global concept, not per-item:
@@ -177,6 +191,23 @@ namespace FUI::GoldCoins
         return g_pouch && g_pouch->GetFormID() == a_id;
     }
 
+    const char* FallbackIconKey(RE::FormID a_id)
+    {
+        static constexpr const char* kTiers[4] = {
+            "msc_gold1", "msc_gold2", "msc_gold3", "msc_gold4",
+        };
+        for (int i = 0; i < 4; ++i) {
+            if (g_coins[i] && g_coins[i]->GetFormID() == a_id) return kTiers[i];
+        }
+        // the pouch, its draw-time icon variants, and the purse sizes all read
+        // as one thing: a bag of coins
+        for (auto* p : { g_pouch, g_pouchS, g_pouchM, g_pouchF,
+                         g_sack, g_sackMed, g_sackSmall }) {
+            if (p && p->GetFormID() == a_id) return "msc_coinpouch";
+        }
+        return nullptr;
+    }
+
     int PouchStored() { return g_pouchStored; }
 
     RE::TESBoundObject* PouchIconObject()
@@ -193,6 +224,15 @@ namespace FUI::GoldCoins
     int PouchCap() { return kPouchCap; }
 
     RE::TESBoundObject* PouchForm() { return g_pouch; }
+
+    void SetBagWares(std::vector<BagWare> a_wares)
+    {
+        g_bagWares = std::move(a_wares);
+        int typed = 0;
+        for (const auto& w : g_bagWares) typed += w.accept.empty() ? 0 : 1;
+        logger::info("[VENDOR] {} bag ware(s): {} typed, {} general",
+            g_bagWares.size(), typed, g_bagWares.size() - typed);
+    }
 
     void SeedVendorStock(RE::Actor* a_merchant, RE::TESObjectREFR* a_container)
     {
@@ -213,31 +253,89 @@ namespace FUI::GoldCoins
         if (!clutter) return;
         const bool inList = list->HasForm(clutter);
         // The list is a whitelist unless notBuySell flips it into a blacklist.
-        if (fac->vendorData.vendorValues.notBuySell ? inList : !inList) return;
+        // ★No longer an early return: a SPECIALIST (alchemist, blacksmith) is
+        // not a general store but still stocks its own typed bag, so the two
+        // questions had to come apart.
+        const bool isGeneral = !(fac->vendorData.vendorValues.notBuySell ? inList : !inList);
 
-        // §RELEASE-B: the shipped bags ride the same shelf as the pouch --
-        // one of each per general-goods vendor, refilled on a later visit
-        // once bought. Same "already stocked (ours from a previous visit, or
-        // the player sold one back) -- never stack them up" rule per item.
-        auto* dh = RE::TESDataHandler::GetSingleton();
-        RE::TESBoundObject* wares[] = {
-            g_pouch,
-            dh ? dh->LookupForm<RE::TESObjectMISC>(0x818, kPlugin) : nullptr,   // Satchel
-            dh ? dh->LookupForm<RE::TESObjectMISC>(0x819, kPlugin) : nullptr,   // Knapsack
-        };
-        for (auto* item : wares) {
-            if (!item) continue;
-            bool stocked = false;
+        // ---- restock cycle ------------------------------------------------
+        // The merchant chest respawns on its own (CONT DATA bit1 is set on
+        // every Merchant* chest, verified) every iDaysToRespawnVendor days,
+        // and that reset WIPES what we put in — our items were never in the
+        // chest's leveled entries, so they are not regenerated, just gone.
+        // Nothing to clean up on our side; we only decide what goes back.
+        auto* cal = RE::Calendar::GetSingleton();
+        if (!cal) return;
+        float days = 2.0f;
+        if (auto* gs = RE::GameSettingCollection::GetSingleton()) {
+            if (auto* set = gs->GetSetting("iDaysToRespawnVendor")) {
+                days = static_cast<float>(set->GetSInt());
+            }
+        }
+        // ★Read the setting, never hardcode 2: merchant overhauls routinely
+        // change it, and a hardcoded rhythm would leave OUR wares on a
+        // different clock from every other item on the shelf.
+        if (days < 0.1f) days = 2.0f;
+        const auto cycle = static_cast<std::uint32_t>(cal->GetDaysPassed() / days);
+
+        const RE::FormID mid = a_merchant->GetFormID();
+        if (const auto it = g_vendorCycle.find(mid);
+            it != g_vendorCycle.end() && it->second >= cycle) {
+            return;   // already stocked this cycle — buying does not refill it
+        }
+        g_vendorCycle[mid] = cycle;
+
+        auto place = [&](RE::TESBoundObject* item, const char* why) {
+            if (!item) return;
             for (const auto& [obj, data] : a_container->GetInventory(
                      [&](RE::TESBoundObject& o) { return &o == item; })) {
                 (void)obj;
-                if (data.first > 0) stocked = true;
+                if (data.first > 0) return;   // already there (player sold one back)
             }
-            if (stocked) continue;
             a_container->AddObjectToContainer(item, nullptr, 1, nullptr);
-            logger::info("[GOLD] seeded '{}' into {}'s stock",
-                item->GetName(), a_merchant->GetDisplayFullName());
+            logger::info("[VENDOR] cycle {} {}: stocked '{}' ({})",
+                cycle, a_merchant->GetDisplayFullName(), item->GetName(), why);
+        };
+
+        // the pouch is core kit, not a lucky find: general goods, every cycle
+        if (isGeneral) place(g_pouch, "always");
+
+        // ---- typed bags: the shop that trades what the bag holds -----------
+        // Guaranteed, not rotated. A player who walks to the alchemist for an
+        // alchemy pouch should find one; making it a lucky draw would turn a
+        // deliberate errand into a chore.
+        std::vector<RE::TESBoundObject*> generic;
+        for (const auto& w : g_bagWares) {
+            if (!w.obj) continue;
+            if (w.accept.empty()) { generic.push_back(w.obj); continue; }
+            auto* kw = BagFilter::VendorKeyword(w.accept);
+            if (kw && list->HasForm(kw) == !fac->vendorData.vendorValues.notBuySell) {
+                place(w.obj, "typed");
+            }
         }
+
+        // ---- general-purpose bags: a fresh draw at the general store --------
+        // Deterministic in (merchant, cycle): re-opening the window cannot
+        // reshuffle the shelf, and no roll has to be stored anywhere.
+        if (isGeneral && !generic.empty()) {
+            const int n = static_cast<int>(generic.size());
+            const int want = (std::min)(kGenericBagsPerCycle, n);
+            std::uint32_t h = mid * 2654435761u ^ (cycle * 40503u);
+            std::vector<int> idx(n);
+            for (int i = 0; i < n; ++i) idx[i] = i;
+            // Fisher-Yates off the same hash: picking `want` distinct entries
+            // rather than `want` independent rolls, so the shelf never shows
+            // the same bag twice.
+            for (int i = n - 1; i > 0; --i) {
+                h = h * 1664525u + 1013904223u;
+                const int j = static_cast<int>(h % static_cast<std::uint32_t>(i + 1));
+                std::swap(idx[i], idx[j]);
+            }
+            for (int i = 0; i < want; ++i) place(generic[idx[i]], "rotating");
+        }
+        logger::info("[VENDOR] cycle {} for {} — {} typed candidate(s), {} generic",
+            cycle, a_merchant->GetDisplayFullName(),
+            g_bagWares.size() - generic.size(), generic.size());
     }
 
     namespace
@@ -699,6 +797,12 @@ namespace FUI::GoldCoins
             WriteStr(a_intfc, key);
             a_intfc->WriteRecordData(static_cast<std::int32_t>(val));
         }
+        // v5: which restock cycle each merchant was last stocked for
+        a_intfc->WriteRecordData(static_cast<std::uint32_t>(g_vendorCycle.size()));
+        for (const auto& [id, cyc] : g_vendorCycle) {
+            a_intfc->WriteRecordData(id);
+            a_intfc->WriteRecordData(cyc);
+        }
     }
 
     void LoadRecord(SKSE::SerializationInterface* a_intfc, std::uint32_t a_version)
@@ -751,6 +855,21 @@ namespace FUI::GoldCoins
                 }
             }
         }
+        if (a_version >= 5) {
+            std::uint32_t n = 0;
+            if (!a_intfc->ReadRecordData(n)) return;
+            if (n > 65536) {   // GI53: corrupt count -> stop (see v2 note)
+                SKSE::log::error("[GOLD] GPCH vendor count {} rejected -- record dropped", n);
+                return;
+            }
+            for (std::uint32_t i = 0; i < n; ++i) {
+                RE::FormID    id = 0;
+                std::uint32_t cyc = 0;
+                if (!a_intfc->ReadRecordData(id) || !a_intfc->ReadRecordData(cyc)) break;
+                RE::FormID resolved = 0;
+                if (a_intfc->ResolveFormID(id, resolved)) g_vendorCycle[resolved] = cyc;
+            }
+        }
         g_dirty = true;
     }
 
@@ -760,6 +879,9 @@ namespace FUI::GoldCoins
         g_sackRefs.clear();
         g_awayGold = 0;
         g_pinned.clear();
+        // per-save state: a new game must not inherit the last save's cycles,
+        // or its first merchants look "already stocked" and skip a rotation
+        g_vendorCycle.clear();
         g_pending.clear();
         g_lastLedger = -1;   // skip auto-store on the first tick after load
         g_dirty = true;

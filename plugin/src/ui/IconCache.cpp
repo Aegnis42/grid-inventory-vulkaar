@@ -1,9 +1,13 @@
 #include "ui/IconCache.h"
-#include "ui/IconFilterB.h"
 #include "ui/ItemPreview.h"
 #include "ui/Theme.h"
 
 #include <d3d11.h>
+// ★PNG decoding uses WIC — part of the Windows SDK, already on every machine
+// that runs the game. A vendored decoder (stb_image et al) would be a new
+// third-party source file in a mod that people install from a download page;
+// this is the same trade the D3D11 dependency already makes.
+#include <wincodec.h>
 
 #include <cstring>
 #include <filesystem>
@@ -13,14 +17,12 @@ namespace FUI
 {
     static constexpr const char* kIconDir = "Data/SKSE/Plugins/GridInventory_icons";   // legacy (absorbed)
     static constexpr const char* kPakPath = "Data/SKSE/Plugins/GridInventory_icons.pak";
-    // low-poly style pak: AUTHORED by IconStudio (PNG import), read-only in
-    // game — keys are model slot << 32 (no rotation hash), same v5 records
-    // GI59: derived "style B" sprites -- a cache like the capture pak, not
-    // authored content (regenerated from the realistic pak whenever absent)
-    static constexpr const char* kStylPakPath = "Data/SKSE/Plugins/GridInventory_icons_styl.pak";
     // capture keys that permanently failed (e.g. mod items whose preview
     // model never renders) — persisted so a relog does NOT retry them
     static constexpr const char* kFailPath = "Data/SKSE/Plugins/GridInventory_iconfail.txt";
+    // GI68: ran out of window while still LOADING - retried on request,
+    // unlike the fail list which is never retried
+    static constexpr const char* kSlowPath = "Data/SKSE/Plugins/GridInventory_iconslow.txt";
     static constexpr const char* kPakTmp  = "Data/SKSE/Plugins/GridInventory_icons.pak.tmp";
     // 'FIC5': v5 = rotation-verified captures — v4 files may hold the engine's
     // default pose from the landing-frame race (older files re-capture)
@@ -297,165 +299,115 @@ namespace FUI
             SKSE::log::info("[ICONS] pak scanned: {} icons", g_pakIndex.size());
         }
 
-        // ---- stylized pak (GI59, derived cache) ----
-        std::unordered_map<std::uint64_t, PakEntry> g_stylIndex;
-        bool g_stylScanned = false;
-        // per-frame derivation budget (reset in PreRender): the first style
-        // toggle over a full board must not stylize 100 icons in one frame
-        int  g_stylBudget = 0;
-
-        // v5-records-only reader; appends keep the index current inline, so
-        // no rescan is ever needed mid-session
-        void ScanStylPak()
-        {
-            if (g_stylScanned) return;
-            g_stylScanned = true;
-            g_stylIndex.clear();
-
-            std::ifstream in(kStylPakPath, std::ios::binary);
-            if (!in) return;
-            in.seekg(0, std::ios::end);
-            const std::uint64_t fileSize = static_cast<std::uint64_t>(in.tellg());
-            in.seekg(0);
-            while (true) {
-                const std::uint64_t off = static_cast<std::uint64_t>(in.tellg());
-                std::uint32_t magic = 0, w = 0, h = 0, fmt = 0, len = 0;
-                std::uint64_t key = 0;
-                if (!in.read(reinterpret_cast<char*>(&magic), 4) ||
-                    magic != kIconMagic ||
-                    !in.read(reinterpret_cast<char*>(&key), 8) ||
-                    !in.read(reinterpret_cast<char*>(&w), 4) ||
-                    !in.read(reinterpret_cast<char*>(&h), 4) ||
-                    !in.read(reinterpret_cast<char*>(&fmt), 4) ||
-                    !in.read(reinterpret_cast<char*>(&len), 4)) {
-                    break;   // clean EOF or truncated tail
-                }
-                if (w == 0 || h == 0 || w > 2048 || h > 2048 ||
-                    len != w * h * 4 || off + kPakHdrSize + len > fileSize) {
-                    break;   // corrupt record: drop it and the tail
-                }
-                g_stylIndex[key] = PakEntry{ off, w, h, fmt, len };
-                in.seekg(static_cast<std::streamoff>(off + kPakHdrSize + len));
-            }
-            SKSE::log::info("[ICONS] stylized pak scanned: {} icons", g_stylIndex.size());
-        }
     }
 
-    // Silhouette glow sprite (rarity halo, plan A): downscale the sprite's
-    // alpha into a small padded canvas, dilate + blur, upload as a white
-    // texture the tile draw tints per rarity. Built once per icon at cache
-    // time (capture harvest or disk load) — never per frame. ~20KB each;
-    // the padding lets the halo bleed OUTSIDE the icon rect.
-    static constexpr int kGlowCoreSize = 48;   // long side of the downscaled alpha
-    static constexpr int kGlowPadPx    = 12;   // halo margin each side (glow px)
+    // ★★★1.0.5 — THE SILHOUETTE SPRITE IS GONE.
+    //
+    // It downscaled each icon's alpha into a small padded canvas, blurred it,
+    // and uploaded a white texture the tile draw tinted: first as the rarity
+    // halo, then, once rarity became a corner wedge, as the item's drop shadow.
+    //
+    // The canvas is why it had to go. A 300px capture was box-averaged down to
+    // a 96px core, blurred there, then stretched back up to a ~40px tile, and
+    // that round trip put a FLOOR under the softness — the shape was destroyed
+    // by the downsample, not by the blur, so shrinking the radius stopped
+    // helping well before the shadow got crisp. Four tunings all landed in the
+    // same place for that reason.
+    //
+    // Grid::DrawItemShadow now stamps the icon's OWN sprite in black on a ring
+    // instead. Full capture resolution, the blur radius means the pixels it
+    // says, and this path costs nothing at all: no CPU blur per capture, no
+    // 43KB of VRAM per on-screen icon, one less upload on every cache fill.
+    //
+    // Icon::glowSrv / glowTex / gw / gh / gpad survive as always-null fields —
+    // every reader already checked them for null, and the release paths are
+    // harmless on a null. See IconCache.h.
 
-    static void BuildGlowSprite(ID3D11Device* a_device, const std::uint8_t* a_rgba,
-                                int a_w, int a_h, IconCache::Icon& a_icon)
+    // ★Icon textures carry a FULL CPU-built mip chain. The grid draws a
+    // ~250px capture into a ~40px cell; a mipless texture makes the GPU pick
+    // colours from one several-times-too-fine level, and that aliasing read
+    // as "the icon is lower quality than the model it was captured from"
+    // (user report). Built on the CPU on purpose: GenerateMips needs the
+    // immediate CONTEXT, which is not thread-safe, while device->Create* is —
+    // this path must stay callable from wherever uploads happen today.
+    // Alpha-WEIGHTED 2x2 box per level — averaging straight RGBA would pull
+    // edge colours toward the transparent black margin and ring every sprite
+    // with a dark fringe. Per-channel, so RGBA and BGRA both work.
+    static ID3D11Texture2D* CreateMippedTexture(ID3D11Device* a_device,
+        const std::uint8_t* a_px, int a_w, int a_h, DXGI_FORMAT a_fmt,
+        ID3D11ShaderResourceView** a_srv)
     {
-        if (!a_device || !a_rgba || a_w <= 0 || a_h <= 0) return;
-        const int longSide = (std::max)(a_w, a_h);
-        const int cw = (std::max)(1, a_w * kGlowCoreSize / longSide);
-        const int ch = (std::max)(1, a_h * kGlowCoreSize / longSide);
-        const int gw = cw + kGlowPadPx * 2;
-        const int gh = ch + kGlowPadPx * 2;
+        int levels = 1;
+        for (int m = (std::max)(a_w, a_h); m > 1; m >>= 1) ++levels;
 
-        std::vector<float> a(static_cast<size_t>(gw) * gh, 0.0f);
-        std::vector<float> b(a.size(), 0.0f);
-        auto at = [&](const std::vector<float>& v, int x, int y) -> float {
-            if (x < 0 || y < 0 || x >= gw || y >= gh) return 0.0f;
-            return v[static_cast<size_t>(y) * gw + x];
-        };
-
-        // box-average downsample of the alpha channel into the padded canvas
-        for (int y = 0; y < ch; ++y) {
-            const int sy0 = y * a_h / ch;
-            const int sy1 = (std::max)(sy0 + 1, (y + 1) * a_h / ch);
-            for (int x = 0; x < cw; ++x) {
-                const int sx0 = x * a_w / cw;
-                const int sx1 = (std::max)(sx0 + 1, (x + 1) * a_w / cw);
-                float sum = 0.0f;
-                for (int sy = sy0; sy < sy1; ++sy) {
-                    for (int sx = sx0; sx < sx1; ++sx) {
-                        sum += a_rgba[(static_cast<size_t>(sy) * a_w + sx) * 4 + 3];
+        std::vector<std::vector<std::uint8_t>> mips;
+        mips.reserve(static_cast<size_t>(levels));
+        mips.emplace_back(a_px, a_px + static_cast<size_t>(a_w) * a_h * 4);
+        int pw = a_w, ph = a_h;
+        for (int l = 1; l < levels; ++l) {
+            const int w = (std::max)(1, pw >> 1), h = (std::max)(1, ph >> 1);
+            std::vector<std::uint8_t> dst(static_cast<size_t>(w) * h * 4);
+            const auto& src = mips.back();
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const int sx0 = (std::min)(x * 2, pw - 1), sx1 = (std::min)(x * 2 + 1, pw - 1);
+                    const int sy0 = (std::min)(y * 2, ph - 1), sy1 = (std::min)(y * 2 + 1, ph - 1);
+                    const std::uint8_t* s[4] = {
+                        &src[(static_cast<size_t>(sy0) * pw + sx0) * 4],
+                        &src[(static_cast<size_t>(sy0) * pw + sx1) * 4],
+                        &src[(static_cast<size_t>(sy1) * pw + sx0) * 4],
+                        &src[(static_cast<size_t>(sy1) * pw + sx1) * 4],
+                    };
+                    int asum = 0, csum[3] = { 0, 0, 0 };
+                    for (const auto* p : s) {
+                        const int a = p[3];
+                        asum += a;
+                        csum[0] += p[0] * a;
+                        csum[1] += p[1] * a;
+                        csum[2] += p[2] * a;
                     }
-                }
-                a[static_cast<size_t>(y + kGlowPadPx) * gw + (x + kGlowPadPx)] =
-                    sum / static_cast<float>((sy1 - sy0) * (sx1 - sx0));
-            }
-        }
-
-        // dilate r=1 (thin blades gain enough body to glow), then 2x
-        // separable box blur r=4 — a gaussian-like falloff wide enough to
-        // read as a soft halo once stretched onto the tile
-        for (int y = 0; y < gh; ++y) {
-            for (int x = 0; x < gw; ++x) {
-                float m = 0.0f;
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        m = (std::max)(m, at(a, x + dx, y + dy));
+                    std::uint8_t* d = &dst[(static_cast<size_t>(y) * w + x) * 4];
+                    if (asum > 0) {
+                        d[0] = static_cast<std::uint8_t>(csum[0] / asum);
+                        d[1] = static_cast<std::uint8_t>(csum[1] / asum);
+                        d[2] = static_cast<std::uint8_t>(csum[2] / asum);
+                    } else {
+                        d[0] = d[1] = d[2] = 0;
                     }
-                }
-                b[static_cast<size_t>(y) * gw + x] = m;
-            }
-        }
-        a.swap(b);
-        constexpr int kR = 4;
-        for (int pass = 0; pass < 2; ++pass) {
-            for (int y = 0; y < gh; ++y) {
-                for (int x = 0; x < gw; ++x) {
-                    float s = 0.0f;
-                    for (int d = -kR; d <= kR; ++d) s += at(a, x + d, y);
-                    b[static_cast<size_t>(y) * gw + x] = s / (kR * 2 + 1);
+                    d[3] = static_cast<std::uint8_t>((asum + 2) / 4);
                 }
             }
-            a.swap(b);
-            for (int y = 0; y < gh; ++y) {
-                for (int x = 0; x < gw; ++x) {
-                    float s = 0.0f;
-                    for (int d = -kR; d <= kR; ++d) s += at(a, x, y + d);
-                    b[static_cast<size_t>(y) * gw + x] = s / (kR * 2 + 1);
-                }
-            }
-            a.swap(b);
+            mips.push_back(std::move(dst));
+            pw = w;
+            ph = h;
         }
 
-        // gain: plateau near 1 under the silhouette so the draw tint's alpha
-        // alone sets the perceived strength; the blur tail is the falloff
-        std::vector<std::uint8_t> px(static_cast<size_t>(gw) * gh * 4);
-        for (size_t i = 0; i < a.size(); ++i) {
-            const float v = (std::min)(255.0f, a[i] * 2.6f);
-            px[i * 4 + 0] = 255;
-            px[i * 4 + 1] = 255;
-            px[i * 4 + 2] = 255;
-            px[i * 4 + 3] = static_cast<std::uint8_t>(v + 0.5f);
+        std::vector<D3D11_SUBRESOURCE_DATA> init(static_cast<size_t>(levels));
+        int w = a_w, h = a_h;
+        for (int l = 0; l < levels; ++l) {
+            init[static_cast<size_t>(l)].pSysMem     = mips[static_cast<size_t>(l)].data();
+            init[static_cast<size_t>(l)].SysMemPitch = static_cast<UINT>(w * 4);
+            w = (std::max)(1, w >> 1);
+            h = (std::max)(1, h >> 1);
         }
 
         D3D11_TEXTURE2D_DESC td = {};
-        td.Width            = static_cast<UINT>(gw);
-        td.Height           = static_cast<UINT>(gh);
-        td.MipLevels        = 1;
+        td.Width            = static_cast<UINT>(a_w);
+        td.Height           = static_cast<UINT>(a_h);
+        td.MipLevels        = static_cast<UINT>(levels);
         td.ArraySize        = 1;
-        td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.Format           = a_fmt;
         td.SampleDesc.Count = 1;
         td.Usage            = D3D11_USAGE_DEFAULT;
         td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
 
-        D3D11_SUBRESOURCE_DATA init = {};
-        init.pSysMem     = px.data();
-        init.SysMemPitch = static_cast<UINT>(gw * 4);
-
         ID3D11Texture2D* tex = nullptr;
-        if (FAILED(a_device->CreateTexture2D(&td, &init, &tex))) return;
-        ID3D11ShaderResourceView* srv = nullptr;
-        if (FAILED(a_device->CreateShaderResourceView(tex, nullptr, &srv))) {
+        if (FAILED(a_device->CreateTexture2D(&td, init.data(), &tex))) return nullptr;
+        if (FAILED(a_device->CreateShaderResourceView(tex, nullptr, a_srv))) {
             tex->Release();
-            return;
+            return nullptr;
         }
-        a_icon.glowTex = tex;
-        a_icon.glowSrv = srv;
-        a_icon.gw      = gw;
-        a_icon.gh      = gh;
-        a_icon.gpad    = kGlowPadPx;
+        return tex;
     }
 
     // pixels -> GPU texture (+ optional silhouette glow) — shared by the pak
@@ -469,31 +421,17 @@ namespace FUI
         auto* device = reinterpret_cast<ID3D11Device*>(data->forwarder);
         if (!device) return false;
 
-        D3D11_TEXTURE2D_DESC td = {};
-        td.Width            = static_cast<UINT>(a_w);
-        td.Height           = static_cast<UINT>(a_h);
-        td.MipLevels        = 1;
-        td.ArraySize        = 1;
-        td.Format           = static_cast<DXGI_FORMAT>(a_fmt);
-        td.SampleDesc.Count = 1;
-        td.Usage            = D3D11_USAGE_DEFAULT;
-        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
-
-        D3D11_SUBRESOURCE_DATA init = {};
-        init.pSysMem     = a_px;
-        init.SysMemPitch = static_cast<UINT>(a_w * 4);
-
         IconCache::Icon icon;
         icon.w = a_w;
         icon.h = a_h;
-        if (FAILED(device->CreateTexture2D(&td, &init, &icon.tex))) return false;
-        if (FAILED(device->CreateShaderResourceView(icon.tex, nullptr, &icon.srv))) {
-            icon.tex->Release();
-            return false;
-        }
-        if (a_makeGlow) {
-            BuildGlowSprite(device, a_px, a_w, a_h, icon);
-        }
+        icon.tex = CreateMippedTexture(device, a_px, a_w, a_h,
+            static_cast<DXGI_FORMAT>(a_fmt), &icon.srv);
+        if (!icon.tex) return false;
+        // a_makeGlow is inert since 1.0.5 — the silhouette sprite it asked for
+        // is gone (see the note above). Kept in the signature because it is a
+        // public loader flag with call sites outside this file, and dropping it
+        // would churn them for nothing.
+        (void)a_makeGlow;
         a_out = icon;
         return true;
     }
@@ -558,13 +496,40 @@ namespace FUI
         ReleaseIcon(m_inspectIcon);
     }
 
+    // ★★1.0.5: the lamp angle a capture is actually taken at — the GLOBAL
+    // setting plus this item's own offset, both measured from the shipped rig.
+    // ONE function so the cache key and the capture request can never be
+    // computed from different sums; two copies of this addition would show up
+    // as icons that are cached under one light and photographed under another.
+    static void CaptureLightFor(const IconDef& a_def, float& a_az, float& a_el)
+    {
+        a_az = Theme::CaptureLightAz() + a_def.lightAz;
+        a_el = Theme::CaptureLightEl() + a_def.lightEl;
+    }
+
     // Rotation only (whole-degree quantised): scale is a DRAW-time zoom
     // and must not force a re-capture or split cache keys.
     static std::uint32_t RotHash(const IconDef& a_def)
     {
+        // ★★The LIGHT belongs in this hash for exactly the reason the rotation
+        // does: it changes the pixels. Leave it out and moving an item's lamp
+        // produces the same cache key, so the old sprite is served straight
+        // back and the setting looks like it does nothing — the failure would
+        // read as "light offsets are broken" rather than "the cache answered".
+        // ★And it is the TOTAL angle, not the def's own: the global setting
+        // re-lights every item including the thousands that carry 0/0, so a
+        // hash over the def alone would leave all of them answering from the
+        // pak under the old light. Changing the global therefore misses every
+        // key at once — which is correct, because every pixel really did
+        // change — and changing it BACK hits again, so comparing two global
+        // angles costs one re-capture each way rather than two.
+        float laz = 0.0f, lel = 0.0f;
+        CaptureLightFor(a_def, laz, lel);
         return static_cast<std::uint32_t>(static_cast<int>(a_def.rx)) * 73856093u ^
                static_cast<std::uint32_t>(static_cast<int>(a_def.ry)) * 19349663u ^
-               static_cast<std::uint32_t>(static_cast<int>(a_def.rz)) * 83492791u;
+               static_cast<std::uint32_t>(static_cast<int>(a_def.rz)) * 83492791u ^
+               static_cast<std::uint32_t>(static_cast<int>(laz)) * 2654435761u ^
+               static_cast<std::uint32_t>(static_cast<int>(lel)) * 40503u;
     }
 
     // Model-shared slot: FNV-1a of the normalised world-model path. Items
@@ -603,6 +568,14 @@ namespace FUI
             if (c == '/') c = '\\';
             h = (h ^ static_cast<std::uint8_t>(c)) * 16777619u;
         }
+        // ★★1.0.5 — the base-form ENCHANTMENT deliberately does NOT join this
+        // hash, though it looks like it should: Iron Sword and Iron Sword of
+        // Burning share a nif, and an enchant glow would make them different
+        // pictures. It was tried and reverted, because the glow never reaches
+        // a cache capture in the first place (see Inv3D::Load) — so splitting
+        // the key would multiply the icon set for pixel-identical results.
+        // Enchanted items are told apart by the rarity halo, which is drawn at
+        // tile time and costs no capture at all.
         return h;
     }
 
@@ -627,6 +600,48 @@ namespace FUI
                s.find("marker") != std::string::npos;
     }
 
+    // ...and the same category, for forms the path heuristic above cannot see.
+    // These reach the inventory in NO circumstance, so an icon for them can
+    // never be displayed and rendering one is pure waste.
+    //
+    // Coinpurse: a world object. Activating it plays the pickup and raises the
+    // player's gold — the MISC form itself is never added to any container, so
+    // no inventory ever shows it. That is also why Bethesda never noticed its
+    // model points at 'Clutter\CoinBagLarge.nif' while the mesh actually ships
+    // as 'meshes\plants\coinbaglarge.nif'; USSEP leaves it alone for the same
+    // reason. Correcting the path would only buy an icon nothing can draw.
+    static bool IsUnobtainable(RE::TESBoundObject* a_obj)
+    {
+        struct Entry
+        {
+            const char*  plugin;
+            RE::FormID   local;
+        };
+        static constexpr Entry kEntries[] = {
+            { "Skyrim.esm", 0x09DA9C },   // Coinpurse (large)
+            { "Skyrim.esm", 0x09DA9D },   // Coinpurse (medium)
+            { "Skyrim.esm", 0x09DA9E },   // Coinpurse (small)
+        };
+        // Resolved once and then reused -- the load order cannot change while
+        // the game runs, and this is consulted for every item ever queued.
+        // NOT a `static const` initialised in place: that latches whatever the
+        // first call sees, so one call before the data handler exists would
+        // cache an empty table for the rest of the session.
+        static std::unordered_set<RE::FormID> s_ids;
+        static bool                           s_built = false;
+        if (!s_built) {
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            if (!dh) return false;   // too early -- try again next call
+            for (const auto& e : kEntries) {
+                if (const auto id = dh->LookupFormID(e.local, e.plugin)) {
+                    s_ids.insert(id);
+                }
+            }
+            s_built = true;
+        }
+        return s_ids.contains(a_obj->GetFormID());
+    }
+
     std::uint64_t IconCache::KeyFor(RE::TESBoundObject* a_obj, const IconDef& a_def) const
     {
         return (static_cast<std::uint64_t>(ModelSlot32(a_obj)) << 32) | RotHash(a_def);
@@ -640,38 +655,36 @@ namespace FUI
     const IconCache::Icon* IconCache::Get(RE::TESBoundObject* a_obj) const
     {
         if (!a_obj) return nullptr;
-        // GI59 stylized style: the derived sprite shares the realistic key.
-        // The PINNED editor item is exempt so live rotation edits stay
-        // visible. A miss falls through to the realistic icon (and its
-        // capture queue) -- once the capture lands, a later Get derives the
-        // stylized sprite within the per-frame budget.
-        if (m_stylized && a_obj != m_pin) {
-            auto*        self = const_cast<IconCache*>(this);
-            const IconDef sdef = ResolveDef(a_obj);
-            const std::uint64_t keys[2] = { KeyFor(a_obj, sdef),
-                                            LegacyKeyFor(a_obj, sdef) };
-            for (const auto key : keys) {
-                const auto st = m_stylIcons.find(key);
-                if (st != m_stylIcons.end()) return &st->second;
-            }
-            for (const auto key : keys) {
-                if (m_stylTried.contains(key)) continue;
-                if (self->LoadStylizedFromDisk(key)) {
-                    self->m_stylTried.insert(key);
-                    return &self->m_stylIcons[key];
-                }
-                if (g_stylBudget > 0) {
-                    --g_stylBudget;
-                    if (self->StylizeFromRealistic(key)) {
-                        self->m_stylTried.insert(key);
-                        return &self->m_stylIcons[key];
-                    }
-                    self->m_stylTried.insert(key);   // realistic missing too
-                }
-            }
-        }
+        // ★GI52 flat style: there is no sprite to find — every caller already
+        // falls through to Fallback::Get on a miss, so answering "nothing"
+        // here is the whole switch. Paired with Capturable() refusing to queue,
+        // this style renders the entire inventory with zero engine work.
+        if (m_style == Style::kFlat) return nullptr;
         const IconDef def = ResolveDef(a_obj);
-        auto it = m_icons.find(KeyFor(a_obj, def));
+        const std::uint64_t key = KeyFor(a_obj, def);
+        // ★PIXEL: a derived sprite keyed like the realistic one. A miss is not
+        // a failure — it queues the derivation and falls through to the
+        // realistic sprite for now, so the grid never blanks while a style
+        // switch sweeps through.
+        if (m_style == Style::kPixel) {
+            // ★The dot RESOLUTION comes from the FOOTPRINT, which is not part
+            // of the key (that carries the model and the rotation only). So an
+            // editor footprint change — 1x1 to 2x4 — leaves a matching key
+            // whose sprite has a quarter of the dots it now needs, blown up
+            // over four cells and four times chunkier than its neighbours.
+            // Compare the size the sprite was DERIVED at, not just the key.
+            const std::pair<int, int> cells{ (std::max)(1, def.w), (std::max)(1, def.h) };
+            const auto cit = m_pixelCells.find(key);
+            const bool sized = cit != m_pixelCells.end() && cit->second == cells;
+            const auto pit = m_pixelIcons.find(key);
+            if (pit != m_pixelIcons.end() && sized) return &pit->second;
+            m_pixelCells[key] = cells;
+            if (m_pixelQueued.insert(key).second) m_pixelQueue.push_back(key);
+            // a wrong-sized sprite still beats snapping back to the realistic
+            // one for the frame the re-derive takes
+            if (pit != m_pixelIcons.end()) return &pit->second;
+        }
+        auto it = m_icons.find(key);
         if (it == m_icons.end()) {
             it = m_icons.find(LegacyKeyFor(a_obj, def));   // pre-migration pak
         }
@@ -682,6 +695,14 @@ namespace FUI
         if (a_obj == m_pin && m_pinLastKey) {
             const auto it2 = m_icons.find(m_pinLastKey);
             if (it2 != m_icons.end()) return &it2->second;
+        }
+        // ★★...and the same for every other item, which is what a board-wide
+        // re-key needs. Drawing the previous angle for the frames the new one
+        // takes is strictly better than drawing nothing: the icon is still the
+        // right item, still the right shape, and only the lighting lags.
+        if (const auto lg = m_lastGood.find(a_obj); lg != m_lastGood.end()) {
+            const auto it3 = m_icons.find(lg->second);
+            if (it3 != m_icons.end()) return &it3->second;
         }
         return nullptr;
     }
@@ -724,6 +745,408 @@ namespace FUI
             static_cast<int>(h), fmt, a_makeGlow, a_out);
     }
 
+    namespace
+    {
+        // One factory for the process. WIC needs COM, and an SKSE plugin cannot
+        // assume the thread it runs on was initialised — the game does call
+        // CoInitializeEx, but on ITS schedule, and the first icon can be asked
+        // for before that. So: try, and if COM says it is not up yet, bring it
+        // up on this thread and try once more. Apartment threading matches what
+        // the game's UI thread uses; RPC_E_CHANGED_MODE just means somebody
+        // already chose, which is fine — WIC works either way.
+        IWICImagingFactory* WicFactory()
+        {
+            static IWICImagingFactory* s_factory = nullptr;
+            static bool s_tried = false;
+            if (s_tried) return s_factory;
+            s_tried = true;
+            HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&s_factory));
+            if (hr == CO_E_NOTINITIALIZED) {
+                CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                    CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&s_factory));
+            }
+            if (FAILED(hr)) {
+                SKSE::log::error("[ICONS] WIC unavailable (0x{:08X}) — PNG icons off", static_cast<std::uint32_t>(hr));
+                s_factory = nullptr;
+            }
+            return s_factory;
+        }
+    }
+
+    bool IconCache::LoadPngTexture(const std::string& a_path, Icon& a_out, bool a_makeGlow)
+    {
+        auto* factory = WicFactory();
+        if (!factory) return false;
+
+        // widen: WIC takes UTF-16 only, and a load order can put anything in a
+        // file name. MultiByteToWideChar with CP_UTF8 keeps non-ASCII names
+        // working instead of mangling them through the ANSI code page.
+        const int need = MultiByteToWideChar(CP_UTF8, 0, a_path.c_str(), -1, nullptr, 0);
+        if (need <= 0) return false;
+        std::wstring wide(static_cast<size_t>(need), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, a_path.c_str(), -1, wide.data(), need);
+
+        IWICBitmapDecoder* decoder = nullptr;
+        if (FAILED(factory->CreateDecoderFromFilename(wide.c_str(), nullptr,
+                GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder))) {
+            return false;   // missing file is the common case — not an error
+        }
+
+        bool ok = false;
+        IWICBitmapFrameDecode* frame = nullptr;
+        IWICFormatConverter* conv = nullptr;
+        if (SUCCEEDED(decoder->GetFrame(0, &frame))) {
+            UINT w = 0, h = 0;
+            if (SUCCEEDED(frame->GetSize(&w, &h)) && w && h && w <= 2048 && h <= 2048 &&
+                SUCCEEDED(factory->CreateFormatConverter(&conv))) {
+                // ★Convert to STRAIGHT RGBA, matching what .fic files hold and
+                // what CreateIconTexture expects. Asking WIC for a premultiplied
+                // format instead would darken every semi-transparent edge once
+                // the draw path multiplies again.
+                if (SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA,
+                        WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+                    std::vector<std::uint8_t> px(static_cast<size_t>(w) * h * 4);
+                    if (SUCCEEDED(conv->CopyPixels(nullptr, w * 4,
+                            static_cast<UINT>(px.size()), px.data()))) {
+                        ok = CreateIconTexture(px.data(), static_cast<int>(w),
+                            static_cast<int>(h), 28 /*R8G8B8A8_UNORM*/, a_makeGlow, a_out);
+                    }
+                }
+            }
+        }
+        if (conv) conv->Release();
+        if (frame) frame->Release();
+        decoder->Release();
+        return ok;
+    }
+
+    namespace
+    {
+        // ---- pixel style: fixed palette + dot grid ------------------------
+        // ★A muted Skyrim-leaning ramp. The palette is the whole reason a
+        // DERIVED style still reads as one art set: every sprite, vanilla or
+        // modded, is forced through these 36 colours, so nothing can clash.
+        // ★NO fixed palette. Every colour complaint this feature has had
+        // came from one — rust speckles on plain leather, greens resolving
+        // to grey, greys picking up a tint — because a shared ramp always
+        // has a nearest entry, and "nearest" across 44 fixed colours is
+        // often the wrong hue. The palette is now derived PER ITEM from its
+        // own dots (see BuildAdaptivePalette), so every entry is by
+        // construction a colour that item actually contains.
+        constexpr int kPixelColours = 12;   // entries per item
+
+        // k-means over the item's dot colours. Seeded DETERMINISTICALLY by
+        // walking the luma-sorted dots at even intervals: a random seed
+        // would give the same item a different palette on every re-derive,
+        // and the icon would flicker as the style is toggled.
+        void BuildAdaptivePalette(const std::vector<std::array<double, 3>>& a_dots,
+                                  std::vector<std::array<double, 3>>& a_out)
+        {
+            a_out.clear();
+            if (a_dots.empty()) return;
+            const int k = (std::min)(kPixelColours, static_cast<int>(a_dots.size()));
+            std::vector<int> order(a_dots.size());
+            for (std::size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
+            std::sort(order.begin(), order.end(), [&](int x, int y) {
+                const auto lum = [&](int i) {
+                    return 0.2126 * a_dots[i][0] + 0.7152 * a_dots[i][1] + 0.0722 * a_dots[i][2];
+                };
+                return lum(x) < lum(y);
+            });
+            for (int i = 0; i < k; ++i) {
+                a_out.push_back(a_dots[order[(i * 2 + 1) * order.size() / (2 * k)]]);
+            }
+            std::vector<int> owner(a_dots.size(), 0);
+            for (int iter = 0; iter < 12; ++iter) {
+                bool moved = false;
+                for (std::size_t d = 0; d < a_dots.size(); ++d) {
+                    int best = 0; double bd = 1e30;
+                    for (int c = 0; c < k; ++c) {
+                        const double dr = a_dots[d][0] - a_out[c][0];
+                        const double dg = a_dots[d][1] - a_out[c][1];
+                        const double db = a_dots[d][2] - a_out[c][2];
+                        const double dd = dr * dr + dg * dg + db * db;
+                        if (dd < bd) { bd = dd; best = c; }
+                    }
+                    if (owner[d] != best) { owner[d] = best; moved = true; }
+                }
+                std::vector<double> sr(k, 0.0), sg(k, 0.0), sb(k, 0.0);
+                std::vector<int> n(k, 0);
+                for (std::size_t d = 0; d < a_dots.size(); ++d) {
+                    const int c = owner[d];
+                    sr[c] += a_dots[d][0]; sg[c] += a_dots[d][1]; sb[c] += a_dots[d][2];
+                    ++n[c];
+                }
+                for (int c = 0; c < k; ++c) {
+                    if (n[c] == 0) continue;
+                    a_out[c] = { sr[c] / n[c], sg[c] / n[c], sb[c] / n[c] };
+                }
+                if (!moved) break;   // converged
+            }
+        }
+
+        // ★NO per-channel contrast expansion here — it was tried and reverted.
+        // Stretching R, G and B independently about a pivot also stretches the
+        // DISTANCE BETWEEN them, i.e. saturation: a leather brown (R>G>B) came
+        // out redder, crossed into the palette's rust entries, and speckled
+        // the sprite with red dots that exist nowhere in the source. Any tone
+        // correction here has to leave chroma alone.
+
+        // src RGBA (w x h) -> dot grid (dw x dh), palette-locked, hard alpha,
+        // 1-dot outline. Area-weighted and alpha-weighted for the same reason
+        // the mip chain is: averaging straight RGBA drags edge colour toward
+        // the transparent margin and rings the sprite.
+        std::vector<std::uint8_t> Pixelize(const std::uint8_t* a_src, int a_w, int a_h,
+                                           bool a_bgra, int& a_dw, int& a_dh)
+        {
+            const int ri = a_bgra ? 2 : 0, bi = a_bgra ? 0 : 2;
+            // content bounds first: the capture is trimmed, but a derived
+            // sprite must fill its dot box or small items lose half their dots
+            int x0 = a_w, y0 = a_h, x1 = -1, y1 = -1;
+            for (int y = 0; y < a_h; ++y) {
+                for (int x = 0; x < a_w; ++x) {
+                    if (a_src[(static_cast<size_t>(y) * a_w + x) * 4 + 3] <= 40) continue;
+                    x0 = (std::min)(x0, x); x1 = (std::max)(x1, x);
+                    y0 = (std::min)(y0, y); y1 = (std::max)(y1, y);
+                }
+            }
+            if (x1 < x0 || y1 < y0) return {};
+            const int cw = x1 - x0 + 1, ch = y1 - y0 + 1;
+            // fit inside the box keeping aspect, one dot of breathing room
+            const double s = (std::min)(static_cast<double>(a_dw - 2) / cw,
+                                        static_cast<double>(a_dh - 2) / ch);
+            const int nw = (std::max)(1, static_cast<int>(cw * s));
+            const int nh = (std::max)(1, static_cast<int>(ch * s));
+
+            std::vector<std::uint8_t> out(static_cast<size_t>(a_dw) * a_dh * 4, 0);
+            std::vector<std::array<double, 3>> dots;   // pass 1: dot colours
+            std::vector<int> slot;                     // ...and where each goes
+            const double fx = static_cast<double>(cw) / nw;
+            const double fy = static_cast<double>(ch) / nh;
+            const int offX = (a_dw - nw) / 2, offY = (a_dh - nh) / 2;
+
+            for (int y = 0; y < nh; ++y) {
+                const double sy0 = y0 + y * fy, sy1 = y0 + (y + 1) * fy;
+                for (int x = 0; x < nw; ++x) {
+                    const double sx0 = x0 + x * fx, sx1 = x0 + (x + 1) * fx;
+                    double aw = 0.0, wsum = 0.0, c[3] = { 0, 0, 0 };
+                    for (int sy = static_cast<int>(sy0);
+                         sy <= (std::min)(a_h - 1, static_cast<int>(std::ceil(sy1)) - 1); ++sy) {
+                        const double wy = (std::min)(sy1, sy + 1.0) - (std::max)(sy0, 1.0 * sy);
+                        if (wy <= 0.0) continue;
+                        for (int sx = static_cast<int>(sx0);
+                             sx <= (std::min)(a_w - 1, static_cast<int>(std::ceil(sx1)) - 1); ++sx) {
+                            const double wx = (std::min)(sx1, sx + 1.0) - (std::max)(sx0, 1.0 * sx);
+                            if (wx <= 0.0) continue;
+                            const auto* p = &a_src[(static_cast<size_t>(sy) * a_w + sx) * 4];
+                            const double w = wx * wy, av = p[3] * w;
+                            wsum += w; aw += av;
+                            c[0] += p[ri] * av; c[1] += p[1] * av; c[2] += p[bi] * av;
+                        }
+                    }
+                    if (wsum <= 0.0) continue;
+                    const double cov = aw / wsum;
+                    if (cov <= 100.0) continue;               // hard alpha: no partial dots
+                    double r = c[0] / aw, g = c[1] / aw, b = c[2] / aw;
+                    // ★Modest chroma lift around LUMA — not a per-channel
+                    // contrast stretch (that one manufactured red dots). The
+                    // engine's menu lighting washes colour out, so a green
+                    // sack arrives barely green and resolves to grey; lifting
+                    // saturation while holding brightness recovers the hue
+                    // (green 46%->47%, teal 42%->50%) and, because neutrals
+                    // have no chroma to lift, leaves grey exactly where it is.
+                    {
+                        constexpr double kSat = 1.15;
+                        const double l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                        r = std::clamp(l + (r - l) * kSat, 0.0, 255.0);
+                        g = std::clamp(l + (g - l) * kSat, 0.0, 255.0);
+                        b = std::clamp(l + (b - l) * kSat, 0.0, 255.0);
+                    }
+                    // pass 1 records the colour; the palette does not exist
+                    // yet (it is built FROM these dots, just below)
+                    dots.push_back({ r, g, b });
+                    slot.push_back(static_cast<int>((offY + y)) * a_dw + (offX + x));
+                }
+            }
+
+            // ---- pass 2: this item's own palette, then quantise to it ----
+            std::vector<std::array<double, 3>> pal;
+            BuildAdaptivePalette(dots, pal);
+            for (std::size_t d = 0; d < dots.size(); ++d) {
+                int best = 0; double bd = 1e30;
+                for (std::size_t c = 0; c < pal.size(); ++c) {
+                    const double dr = dots[d][0] - pal[c][0];
+                    const double dg = dots[d][1] - pal[c][1];
+                    const double db = dots[d][2] - pal[c][2];
+                    const double dd = dr * dr + dg * dg + db * db;
+                    if (dd < bd) { bd = dd; best = static_cast<int>(c); }
+                }
+                auto* dp = &out[static_cast<size_t>(slot[d]) * 4];
+                dp[ri] = static_cast<std::uint8_t>(std::lround(std::clamp(pal[best][0], 0.0, 255.0)));
+                dp[1]  = static_cast<std::uint8_t>(std::lround(std::clamp(pal[best][1], 0.0, 255.0)));
+                dp[bi] = static_cast<std::uint8_t>(std::lround(std::clamp(pal[best][2], 0.0, 255.0)));
+                dp[3]  = 255;
+            }
+            // one-dot outline so the silhouette reads against the cell
+            std::vector<std::uint8_t> ol = out;
+            for (int y = 0; y < a_dh; ++y) {
+                for (int x = 0; x < a_dw; ++x) {
+                    auto* dp = &ol[(static_cast<size_t>(y) * a_dw + x) * 4];
+                    if (dp[3] != 0) continue;
+                    bool nb = false;
+                    if (x > 0)          nb |= out[(static_cast<size_t>(y) * a_dw + x - 1) * 4 + 3] != 0;
+                    if (!nb && x < a_dw-1) nb |= out[(static_cast<size_t>(y) * a_dw + x + 1) * 4 + 3] != 0;
+                    if (!nb && y > 0)   nb |= out[(static_cast<size_t>(y-1) * a_dw + x) * 4 + 3] != 0;
+                    if (!nb && y < a_dh-1) nb |= out[(static_cast<size_t>(y+1) * a_dw + x) * 4 + 3] != 0;
+                    if (!nb) continue;
+                    dp[ri] = 0x0D; dp[1] = 0x0B; dp[bi] = 0x0A; dp[3] = 255;
+                }
+            }
+            // ★Trim to the dots that carry content — AFTER the outline, so
+            // the border survives the cut. The realistic sprite is alpha-
+            // trimmed and the tile scales whatever it draws by the sprite's
+            // LONG SIDE, so returning the full dot box (content fitted
+            // inside it with a margin) drew every pixel icon several
+            // percent smaller than its realistic twin.
+            int tx0 = a_dw, ty0 = a_dh, tx1 = -1, ty1 = -1;
+            for (int y = 0; y < a_dh; ++y) {
+                for (int x = 0; x < a_dw; ++x) {
+                    if (ol[(static_cast<size_t>(y) * a_dw + x) * 4 + 3] == 0) continue;
+                    tx0 = (std::min)(tx0, x); tx1 = (std::max)(tx1, x);
+                    ty0 = (std::min)(ty0, y); ty1 = (std::max)(ty1, y);
+                }
+            }
+            if (tx1 < tx0 || ty1 < ty0) return ol;
+            const int tw = tx1 - tx0 + 1, th = ty1 - ty0 + 1;
+            if (tw == a_dw && th == a_dh) return ol;
+            std::vector<std::uint8_t> cut(static_cast<size_t>(tw) * th * 4);
+            for (int y = 0; y < th; ++y) {
+                std::memcpy(&cut[(static_cast<size_t>(y) * tw) * 4],
+                            &ol[(static_cast<size_t>(ty0 + y) * a_dw + tx0) * 4],
+                            static_cast<size_t>(tw) * 4);
+            }
+            a_dw = tw;
+            a_dh = th;
+            return cut;
+        }
+
+        // pak pixels for one key, without building a texture
+        bool ReadPakPixels(std::uint64_t a_key, std::vector<std::uint8_t>& a_px,
+                           int& a_w, int& a_h, std::uint32_t& a_fmt)
+        {
+            ScanPak();
+            const auto it = g_pakIndex.find(a_key);
+            if (it == g_pakIndex.end()) return false;
+            std::ifstream in(kPakPath, std::ios::binary);
+            if (!in) return false;
+            in.seekg(static_cast<std::streamoff>(it->second.off + it->second.hdrSize()));
+            a_px.resize(it->second.len);
+            if (!in.read(reinterpret_cast<char*>(a_px.data()),
+                    static_cast<std::streamsize>(a_px.size()))) {
+                return false;
+            }
+            a_w = static_cast<int>(it->second.w);
+            a_h = static_cast<int>(it->second.h);
+            a_fmt = it->second.fmt;
+            return true;
+        }
+    }
+
+    bool IconCache::DerivePixelIcon(std::uint64_t a_key, int a_cw, int a_ch)
+    {
+        std::vector<std::uint8_t> px;
+        int w = 0, h = 0;
+        std::uint32_t fmt = 0;
+        if (!ReadPakPixels(a_key, px, w, h, fmt)) {
+            // ★LIVE EDIT: a pinned item's captures are deliberately kept OFF
+            // disk (a drag would write one file per degree), so the pak lookup
+            // misses on exactly the key the editor is working on. Falling back
+            // to the in-memory sprite is what makes a rotation edit visible in
+            // THIS style — without it the tile quietly reverted to the
+            // realistic sprite for the whole edit, and the dot version could
+            // only be judged after leaving the item.
+            if (a_key != m_pinLastKey || m_pinSprite.empty()) return false;
+            px = m_pinSprite;
+            w = m_pinW;
+            h = m_pinH;
+            fmt = m_pinFmt;
+        }
+        const bool bgra = (fmt == 87 || fmt == 88);
+        int dw = (std::max)(1, a_cw) * kPixelDots;
+        int dh = (std::max)(1, a_ch) * kPixelDots;
+        auto dots = Pixelize(px.data(), w, h, bgra, dw, dh);
+        if (dots.empty()) return false;
+
+        // ★Blow the dots up 4x with NEAREST before handing them over. The UI
+        // samples linearly with a mip chain, and a 24-dot sprite stretched
+        // across a 46px cell that way comes out soft — the one thing pixel
+        // art cannot be. Enlarging first means the chain's own levels land
+        // ON the dot grid (96 -> 48 -> 24), so whichever level the GPU picks
+        // for the cell is a clean multiple and the edges stay hard. Cheaper
+        // than a second sampler: that would need a callback pair per icon.
+        constexpr int kZoom = 4;
+        const int zw = dw * kZoom, zh = dh * kZoom;
+        std::vector<std::uint8_t> big(static_cast<size_t>(zw) * zh * 4);
+        for (int y = 0; y < zh; ++y) {
+            const auto* srow = &dots[(static_cast<size_t>(y / kZoom) * dw) * 4];
+            auto* drow = &big[(static_cast<size_t>(y) * zw) * 4];
+            for (int x = 0; x < zw; ++x) {
+                std::memcpy(&drow[x * 4], &srow[(x / kZoom) * 4], 4);
+            }
+        }
+
+        Icon icon;
+        // no glow sprite: a dot silhouette with a halo reads as a smudge
+        if (!CreateIconTexture(big.data(), zw, zh, fmt, false, icon)) return false;
+        // a re-derive (footprint change / live edit) REPLACES the entry — free
+        // the previous texture or every editor drag leaks one
+        if (auto old = m_pixelIcons.find(a_key); old != m_pixelIcons.end()) {
+            ReleaseIcon(old->second);
+        }
+        m_pixelIcons[a_key] = icon;
+        return true;
+    }
+
+    void IconCache::TickPixelDerive()
+    {
+        // deferred from SetStyle — safe here, outside any draw list
+        if (m_pixelDropPending) {
+            m_pixelDropPending = false;
+            ReleasePixelIcons();
+            m_pixelCells.clear();
+        }
+        if (m_style != Style::kPixel) return;
+        int budget = kPixelPerFrame;
+        while (budget > 0 && !m_pixelQueue.empty()) {
+            const auto key = m_pixelQueue.front();
+            m_pixelQueue.pop_front();
+            m_pixelQueued.erase(key);
+            // NO "already derived -> skip" here: Get() queues a key it already
+            // has a sprite for when the footprint changed under it, and the
+            // editor re-queues the pinned key on every capture. Both need the
+            // derivation to actually RUN and replace the entry.
+            const auto cit = m_pixelCells.find(key);
+            const int cw = cit == m_pixelCells.end() ? 1 : cit->second.first;
+            const int ch = cit == m_pixelCells.end() ? 1 : cit->second.second;
+            if (!DerivePixelIcon(key, cw, ch)) {
+                // nothing in the pak yet (capture still pending) — the grid
+                // keeps showing the realistic sprite and asks again later
+                continue;
+            }
+            --budget;
+        }
+    }
+
+    void IconCache::ReleasePixelIcons()
+    {
+        for (auto& [k, ic] : m_pixelIcons) ReleaseIcon(ic);
+        m_pixelIcons.clear();
+        m_pixelQueue.clear();
+        m_pixelQueued.clear();
+    }
+
     bool IconCache::LoadFromDisk(std::uint64_t a_key)
     {
         ScanPak();
@@ -748,99 +1171,23 @@ namespace FUI
         return true;
     }
 
-    bool IconCache::LoadStylizedFromDisk(std::uint64_t a_key)
+    void IconCache::SetStyle(Style a_style)
     {
-        ScanStylPak();
-        const auto it = g_stylIndex.find(a_key);
-        if (it == g_stylIndex.end()) return false;
-
-        std::ifstream in(kStylPakPath, std::ios::binary);
-        if (!in) return false;
-        in.seekg(static_cast<std::streamoff>(it->second.off + kPakHdrSize));
-        std::vector<std::uint8_t> px(it->second.len);
-        if (!in.read(reinterpret_cast<char*>(px.data()),
-                static_cast<std::streamsize>(px.size()))) {
-            return false;
+        // ★Leaving pixel style frees its derived textures: they are cheap to
+        // rebuild (one pak read + a downscale) and there is no reason to hold
+        // a second copy of every icon in VRAM for a style nobody is looking
+        // at. Re-entering re-derives on the frame budget.
+        // ★★But NOT here. This runs from the settings button, i.e. from
+        // inside the ImGui frame, and the frame's draw list is already
+        // holding the very SRVs this would release — the grid drew its dot
+        // sprites moments earlier. Releasing them mid-frame hands the
+        // renderer a dead view and the crash lands inside the D3D driver
+        // with no frame of ours on the stack. Hand it to Tick instead, the
+        // same way the cache reset and the drawn-icon reload already do.
+        if (m_style == Style::kPixel && a_style != Style::kPixel) {
+            m_pixelDropPending = true;
         }
-
-        Icon icon;
-        if (!CreateIconTexture(px.data(), static_cast<int>(it->second.w),
-                static_cast<int>(it->second.h), it->second.fmt, true, icon)) {
-            return false;
-        }
-        m_stylIcons[a_key] = icon;
-        return true;
-    }
-
-    bool IconCache::StylizeFromRealistic(std::uint64_t a_key)
-    {
-        ScanPak();
-        const auto it = g_pakIndex.find(a_key);
-        if (it == g_pakIndex.end()) return false;
-
-        std::vector<std::uint8_t> px(it->second.len);
-        {
-            std::ifstream in(kPakPath, std::ios::binary);
-            if (!in) return false;
-            in.seekg(static_cast<std::streamoff>(it->second.off + it->second.hdrSize()));
-            if (!in.read(reinterpret_cast<char*>(px.data()),
-                    static_cast<std::streamsize>(px.size()))) {
-                return false;
-            }
-        }
-        const int w = static_cast<int>(it->second.w);
-        const int h = static_cast<int>(it->second.h);
-        if (it->second.fmt == 87) {   // BGRA -> RGBA: filter + pak stay fmt 28
-            for (size_t i = 0; i + 3 < px.size(); i += 4) {
-                std::swap(px[i], px[i + 2]);
-            }
-        }
-        IconFilterB::Stylize(px, w, h);
-
-        // persist next to the capture pak (v5 record) + index inline
-        std::error_code ec;
-        const std::uint64_t base = std::filesystem::exists(kStylPakPath, ec)
-            ? static_cast<std::uint64_t>(std::filesystem::file_size(kStylPakPath, ec))
-            : 0;
-        {
-            std::ofstream out(kStylPakPath, std::ios::binary | std::ios::app);
-            if (out) {
-                const std::uint32_t magic = kIconMagic;
-                const std::uint32_t w32 = static_cast<std::uint32_t>(w);
-                const std::uint32_t h32 = static_cast<std::uint32_t>(h);
-                const std::uint32_t fmt32 = 28;
-                const std::uint32_t len = static_cast<std::uint32_t>(px.size());
-                out.write(reinterpret_cast<const char*>(&magic), 4);
-                out.write(reinterpret_cast<const char*>(&a_key), 8);
-                out.write(reinterpret_cast<const char*>(&w32), 4);
-                out.write(reinterpret_cast<const char*>(&h32), 4);
-                out.write(reinterpret_cast<const char*>(&fmt32), 4);
-                out.write(reinterpret_cast<const char*>(&len), 4);
-                out.write(reinterpret_cast<const char*>(px.data()),
-                    static_cast<std::streamsize>(px.size()));
-                if (out) {
-                    ScanStylPak();   // ensure the index exists before we add
-                    g_stylIndex[a_key] = PakEntry{ base, static_cast<std::uint32_t>(w),
-                        static_cast<std::uint32_t>(h), 28,
-                        static_cast<std::uint32_t>(px.size()) };
-                }
-            }
-        }
-
-        Icon icon;
-        if (!CreateIconTexture(px.data(), w, h, 28, true, icon)) return false;
-        m_stylIcons[a_key] = icon;
-        return true;
-    }
-
-    void IconCache::SetStylizedStyle(bool a_on)
-    {
-        if (a_on && !m_stylized) {
-            // realistic captures may have landed since the last miss -- let
-            // every key try again (index/pixels reload lazily per key)
-            m_stylTried.clear();
-        }
-        m_stylized = a_on;
+        m_style = a_style;
     }
 
     void IconCache::SaveToDisk(std::uint64_t a_key, int a_w, int a_h, std::uint32_t a_fmt,
@@ -868,9 +1215,13 @@ namespace FUI
         std::filesystem::remove(kPakPath, ec);
         std::filesystem::remove(kPakTmp, ec);
         std::filesystem::remove(kFailPath, ec);      // failed keys get a fresh chance
-        std::filesystem::remove(kStylPakPath, ec);   // derivative resets too (GI59)
-        g_stylIndex.clear();
-        g_stylScanned = true;
+        std::filesystem::remove(kSlowPath, ec);      // GI68: and the deferred ones
+        m_deferred.clear();
+        m_deferredObj.clear();
+        m_slowLoaded = false;
+        // GI60: the retired "stylized" derivative. The style is gone, so the
+        // file is dead weight in the player's folder — sweep it here.
+        std::filesystem::remove("Data/SKSE/Plugins/GridInventory_icons_styl.pak", ec);
         std::filesystem::remove_all(kIconDir, ec);   // legacy leftovers too
         SKSE::log::info("[ICONS] disk cache reset (retexture refresh)");
     }
@@ -920,19 +1271,22 @@ namespace FUI
         Clear();
         g_pakScanned = false;
         ScanPak();
-        // GI59: the stylized pak derives from the realistic one -- after a
-        // merge its overlapped keys are stale. Cheapest correct move: drop
-        // the whole derivative and let it regenerate lazily.
-        {
-            std::error_code sec;
-            std::filesystem::remove(kStylPakPath, sec);
-            g_stylIndex.clear();
-            g_stylScanned = true;
-        }
         SKSE::log::info("[ICONS] preset pak merged -> {} keys indexed",
             g_pakIndex.size());
         return true;
     }
+
+    // ★GI68b: a list written before the deferred split is not trustworthy —
+    // back then ANY straggler was recorded as a permanent failure, including
+    // items that were merely still loading. Those keys are skipped forever and
+    // the user has no way to know which ones deserve another look, so a list
+    // without the marker is discarded wholesale. Costs one re-capture attempt
+    // per key; recovers every icon the old logic wrote off by mistake.
+    // Bumped whenever the rules that PUT a key here change, because entries
+    // written under the old rules are no longer evidence of anything. v3: the
+    // empty-world-model and missing-mesh cases are now caught before a capture
+    // is ever armed, so anything the old gate recorded deserves a clean look.
+    static constexpr const char* kFailVer = "; ver 3";
 
     void IconCache::EnsureFailLoaded()
     {
@@ -941,14 +1295,28 @@ namespace FUI
         std::ifstream in(kFailPath);
         if (!in) return;
         std::string line;
-        int n = 0;
+        int  n = 0;
+        bool versioned = false;
         while (std::getline(in, line)) {
+            if (line.starts_with(kFailVer)) {
+                versioned = true;
+                continue;
+            }
             if (line.empty() || line[0] == ';') continue;
             const auto key = std::strtoull(line.c_str(), nullptr, 16);
             if (key) {
                 m_failed.insert(key);
                 ++n;
             }
+        }
+        in.close();
+        if (!versioned) {
+            std::error_code ec;
+            std::filesystem::remove(kFailPath, ec);
+            SKSE::log::info(
+                "[ICONS] fail list discarded ({} pre-GI68 keys) - they get another chance", n);
+            m_failed.clear();
+            return;
         }
         if (n) {
             SKSE::log::info("[ICONS] {} permanently-failed capture keys loaded", n);
@@ -957,9 +1325,15 @@ namespace FUI
 
     void IconCache::PersistFail(std::uint64_t a_key)
     {
-        std::ofstream out(kFailPath, std::ios::app);
+        // ios::ate, not bare ios::app: MSVC's append stream only seeks to the
+        // end AT WRITE TIME, so tellp() on a freshly opened app-mode file
+        // reports 0 no matter how much is already in it. Without ate, the
+        // "file is empty -> write the header" test was true on every single
+        // append and a 16-key list came out 48 lines long.
+        std::ofstream out(kFailPath, std::ios::app | std::ios::ate);
         if (!out) return;
         if (out.tellp() == 0) {
+            out << kFailVer << "\n";
             out << "; Capture keys that permanently failed - never retried across sessions\n";
             out << "; 캡처가 계속 실패한 키 목록 - 재접속 후에도 재시도하지 않습니다 (캐시 초기화 시 함께 삭제)\n";
         }
@@ -967,6 +1341,115 @@ namespace FUI
         std::snprintf(buf, sizeof(buf), "%016llX\n",
             static_cast<unsigned long long>(a_key));
         out << buf;
+    }
+
+    // ---- GI68: the deferred list ------------------------------------------
+    // Same file format as the fail list, different meaning: these WILL be
+    // retried, just not during a pass that other items are waiting on.
+
+    void IconCache::EnsureSlowLoaded()
+    {
+        if (m_slowLoaded) return;
+        m_slowLoaded = true;
+        std::ifstream in(kSlowPath);
+        if (!in) return;
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] == ';') continue;
+            if (const auto key = std::strtoull(line.c_str(), nullptr, 16); key) {
+                m_deferred.insert(key);
+            }
+        }
+        if (!m_deferred.empty()) {
+            SKSE::log::info("[ICONS] {} deferred (slow) capture keys loaded",
+                m_deferred.size());
+        }
+    }
+
+    void IconCache::PersistSlow(std::uint64_t a_key)
+    {
+        std::ofstream out(kSlowPath, std::ios::app | std::ios::ate);   // see PersistFail
+        if (!out) return;
+        if (out.tellp() == 0) {
+            out << "; Captures that ran out of time while still loading - retried on request\n";
+            out << "; 로딩 중에 시간이 부족했던 아이콘 - 설정에서 '다시 시도'를 누르면 재처리합니다\n";
+        }
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "%016llX\n",
+            static_cast<unsigned long long>(a_key));
+        out << buf;
+    }
+
+    void IconCache::RewriteSlow()
+    {
+        std::error_code ec;
+        if (m_deferred.empty()) {
+            std::filesystem::remove(kSlowPath, ec);
+            return;
+        }
+        std::ofstream out(kSlowPath, std::ios::trunc);
+        if (!out) return;
+        out << "; Captures that ran out of time while still loading - retried on request\n";
+        out << "; 로딩 중에 시간이 부족했던 아이콘 - 설정에서 '다시 시도'를 누르면 재처리합니다\n";
+        char buf[24];
+        for (const auto k : m_deferred) {
+            std::snprintf(buf, sizeof(buf), "%016llX\n",
+                static_cast<unsigned long long>(k));
+            out << buf;
+        }
+    }
+
+    size_t IconCache::DeferredCount()
+    {
+        EnsureSlowLoaded();
+        // entries whose icon has since been captured another way are not owed a
+        // retry -- count only what is still missing
+        size_t n = 0;
+        for (const auto k : m_deferred) {
+            if (!m_icons.contains(k) && !g_pakIndex.contains(k)) ++n;
+        }
+        return n;
+    }
+
+    size_t IconCache::RetryDeferred()
+    {
+        EnsureSlowLoaded();
+        if (m_deferred.empty()) return 0;
+        // ★The form pointers are only known for keys deferred THIS session; a
+        // list read from disk carries keys but no objects, so there is nothing
+        // to re-queue for those. They are DROPPED rather than left on the list:
+        // the button reports how many items it still owes a retry, and a key it
+        // can never act on would keep that number up forever and do nothing
+        // when pressed. Dropped is also the right outcome -- with the key gone
+        // the item takes a fresh full window the next time it is queued
+        // normally, which is the retry it was owed.
+        const size_t before = m_deferred.size();
+        size_t       n      = 0;
+        m_retryPass = true;
+        for (auto it = m_deferred.begin(); it != m_deferred.end();) {
+            const auto k   = *it;
+            const auto obj = m_deferredObj.find(k);
+            if (obj == m_deferredObj.end() || !obj->second) {
+                it = m_deferred.erase(it);
+                continue;
+            }
+            ++it;
+            if (m_icons.contains(k) || m_queued.contains(k)) continue;
+            m_queue.push_back(Pending{ obj->second, obj->second->GetFormID(), k, false, 0.0f });
+            m_queued.insert(k);
+            ++n;
+        }
+        SKSE::log::info("[ICONS] retry pass: {} of {} deferred re-queued ({} dropped, no form)",
+            n, before, before - m_deferred.size());
+        return n;
+    }
+
+    void IconCache::ClearDeferred()
+    {
+        m_deferred.clear();
+        m_deferredObj.clear();
+        m_slowLoaded = true;
+        RewriteSlow();
     }
 
     namespace
@@ -978,16 +1461,129 @@ namespace FUI
         // walks raw GetInventory() output — gate every queue entry here.
         bool Capturable(RE::TESBoundObject* a_obj)
         {
-            return a_obj && !a_obj->Is(RE::FormType::LeveledItem);
+            if (!a_obj || a_obj->Is(RE::FormType::LeveledItem)) return false;
+            // GI52 flat style: nothing is ever drawn from a capture, so don't
+            // spend a single engine render on one. This is what makes the
+            // style's "no first scan" claim literally true.
+            if (IconCache::GetSingleton()->FlatStyle()) return false;
+            // ★GI51: an empty world model can NEVER render, so queueing it only
+            // buys 20-45 frames of waiting x up to 4 retries before the gates
+            // give up -- each. On a heavily modded load order that dead weight
+            // is a large part of what makes a first scan feel endless. This
+            // used to be checked in PrecacheAll only, which is the one path
+            // that already knew better; the two paths that actually run during
+            // play did not.
+            if (auto* mdl = a_obj->As<RE::TESModel>();
+                mdl && (!mdl->GetModel() || !mdl->GetModel()[0])) {
+                return false;
+            }
+            // ★GI68c: ...and the line above is BLIND TO ARMOR. ARMO does not
+            // inherit TESModel at all (see TESObjectARMO's base list: it takes
+            // TESBipedModelForm instead), so As<TESModel> returns null for
+            // every single piece of armor and the guard silently never fires.
+            // Body/skin slots -- nude bodies, skeletons, "hide underwear"
+            // placeholders -- carry no ground model, so there is nothing to
+            // render and no amount of waiting produces one. Two measured full
+            // precache runs ended with the SAME 16 timeouts in the SAME order,
+            // and 12 of them were exactly this: 45 frames each, 9 seconds of a
+            // 71-second scan spent proving a blank string is still blank.
+            if (auto* bip = a_obj->As<RE::TESBipedModelForm>()) {
+                const char* m = bip->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
+                const char* f = bip->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel();
+                if ((!m || !m[0]) && (!f || !f[0])) return false;
+            }
+            if (IsUnobtainable(a_obj)) return false;
+            return true;
+        }
+
+        // EVERY nif the engine could draw this object from -- an object is only
+        // unrenderable when all of them are gone.
+        //
+        // ★A weapon has TWO sources: MODL, and the 1st-person STAT in WNAM
+        // that the loader falls back to. Measured: a Dark Souls weapon whose
+        // MODL pointed into an uninstalled mesh pack ('Xerperious\DS3\...')
+        // rendered perfectly from its WNAM every run -- until a first draft of
+        // this probe judged it on MODL alone and threw the working icon away.
+        // ARMO likewise keeps its paths on TESBipedModelForm, one per sex.
+        void ModelPathsOf(RE::TESBoundObject* a_obj, std::vector<const char*>& a_out)
+        {
+            const auto add = [&a_out](const char* p) {
+                if (p && p[0]) a_out.push_back(p);
+            };
+            if (auto* bip = a_obj->As<RE::TESBipedModelForm>()) {
+                add(bip->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel());
+                add(bip->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel());
+            }
+            if (auto* mdl = a_obj->As<RE::TESModel>()) {
+                add(mdl->GetModel());
+            }
+            if (auto* weap = a_obj->As<RE::TESObjectWEAP>();
+                weap && weap->firstPersonModelObject) {
+                if (auto* fp = weap->firstPersonModelObject->As<RE::TESModel>()) {
+                    add(fp->GetModel());
+                }
+            }
+        }
+
+        // First named path, for diagnostics only.
+        const char* ModelPathOf(RE::TESBoundObject* a_obj)
+        {
+            std::vector<const char*> paths;
+            ModelPathsOf(a_obj, paths);
+            return paths.empty() ? "<none>" : paths.front();
+        }
+
+        // ★GI68c: does the nif this record names actually EXIST? A record can
+        // carry a perfectly well-formed path to a file that was never shipped,
+        // and the engine's loader then returns without creating anything --
+        // indistinguishable, from the outside, from a load that is merely slow.
+        // The only way to tell them apart is to ask the archive directly.
+        //
+        // All four survivors of the armor fix turned out to be this, and three
+        // of them are Bethesda's own: the vanilla Coinpurse records point at
+        // 'Clutter\CoinBagLarge.nif' while the mesh actually ships as
+        // 'meshes\plants\coinbaglarge.nif'. Cut content, wrong folder, never
+        // fixed. Worth catching in general, not for these four: a load order
+        // missing a mod's meshes has HUNDREDS of them, and each one used to
+        // cost 45 frames of waiting to learn nothing.
+        //
+        // Memoised per PATH, not per item — a load order full of retextures
+        // shares the same handful of nifs — so the archive is hit once each.
+        bool PathMissing(const char* a_rel)
+        {
+            std::string path = a_rel;
+            for (auto& c : path) {
+                if (c == '/') c = '\\';
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            static std::unordered_map<std::string, bool> s_missing;
+            if (const auto it = s_missing.find(path); it != s_missing.end()) {
+                return it->second;
+            }
+            // records store the path relative to meshes\, but not always
+            const std::string full =
+                path.starts_with("meshes\\") ? path : ("meshes\\" + path);
+            const bool missing = !RE::BSResourceNiBinaryStream(full.c_str()).good();
+            s_missing.emplace(path, missing);
+            return missing;
+        }
+
+        bool MeshMissing(RE::TESBoundObject* a_obj)
+        {
+            std::vector<const char*> paths;
+            ModelPathsOf(a_obj, paths);
+            if (paths.empty()) return true;   // nothing named at all
+            // ONE survivor is enough -- the engine only needs one nif to draw.
+            for (const char* p : paths) {
+                if (!PathMissing(p)) return false;
+            }
+            return true;
         }
     }
 
     void IconCache::QueueCapture(RE::TESBoundObject* a_obj)
     {
         if (!Capturable(a_obj)) return;
-        // GI59: the stylized style DERIVES from realistic captures, so the
-        // capture pipeline runs identically in both styles (the old authored
-        // low-poly pak used to suppress captures here).
         const auto key = KeyFor(a_obj, ResolveDef(a_obj));
 
         // live edit: a drag produces a new key every frame — drop the stale
@@ -1017,7 +1613,11 @@ namespace FUI
             return;
         }
 
-        m_queue.push_back({ a_obj, a_obj->GetFormID(), key });
+        // ★GI51: FRONT of the queue. QueueCapture means "something on screen
+        // right now has no sprite" — Prefetch means "we may need this later".
+        // Draining them in insertion order filled the cache with items the
+        // player could not see while the visible grid stayed blank.
+        m_queue.push_front({ a_obj, a_obj->GetFormID(), key });
         m_queued.insert(key);
     }
 
@@ -1057,12 +1657,8 @@ namespace FUI
                 if (!obj) continue;
                 const char* nm = obj->GetName();
                 if (!nm || !nm[0]) continue;   // nameless = dummy/system form
-                // guaranteed-failure guard: an empty world model never renders
-                // (As<TESModel> is null for armor — its model lives on ARMA)
-                if (auto* mdl = obj->template As<RE::TESModel>();
-                    mdl && (!mdl->GetModel() || !mdl->GetModel()[0])) {
-                    continue;
-                }
+                // (the empty-world-model guard that used to be duplicated here
+                // now lives in Capturable, which every queueing path shares)
                 if (IsDisplayOnlyModel(obj)) continue;
                 if (!obj->GetPlayable()) continue;   // hidden scripting forms
                 Prefetch(obj, true);   // pak-only: VRAM stays flat
@@ -1093,7 +1689,6 @@ namespace FUI
 
     void IconCache::PreRender()
     {
-        g_stylBudget = 2;   // GI59: per-frame stylize budget (see Get)
         auto* pv = ItemPreview::GetSingleton();
         if (!pv->IsRunning()) return;
 
@@ -1107,8 +1702,24 @@ namespace FUI
             m_pendingBusy = true;
             m_frames = 0;
         }
+        // GI68: the retry pass owns the generous window only while ITS entries
+        // are in flight. Once the queue drains, ordinary captures must go back
+        // to the short window or one straggler would hold up a whole menu.
+        if (m_retryPass && m_queue.empty() && !m_pendingBusy) {
+            m_retryPass = false;
+            RewriteSlow();   // whatever survived stays on the list
+            SKSE::log::info("[ICONS] retry pass done: {} still deferred",
+                m_deferred.size());
+        }
         if (!m_pendingBusy) {
-            while (!m_queue.empty()) {
+            // A skipped entry does NOT end the frame's work -- the loop keeps
+            // going until it arms something -- so a run of skips is paid all at
+            // once. First-time archive probes are the expensive kind, and a
+            // load order missing a whole mesh pack can have hundreds in a row,
+            // which would land as one long hitch. Bound it: what does not get
+            // decided this frame gets decided on the next.
+            int budget = 64;
+            while (!m_queue.empty() && budget-- > 0) {
                 const Pending p = m_queue.front();
                 m_queue.pop_front();
                 m_queued.erase(p.key);
@@ -1119,16 +1730,36 @@ namespace FUI
                     RE::TESForm::LookupByID<RE::TESBoundObject>(p.id) != p.obj) {
                     continue;
                 }
+                // ★GI68c: probe the archive BEFORE spending the slot. A nif
+                // that is not there cannot load, so arming this entry would
+                // buy a guaranteed 45 frames of nothing. NOT persisted to the
+                // fail list on purpose: the probe is instant, so re-deciding
+                // every session costs nothing and the item heals itself the
+                // moment the missing mesh is installed.
+                if (MeshMissing(p.obj)) {
+                    SKSE::log::warn("[ICONS] '{}' skipped: mesh not found ('{}')",
+                        p.obj->GetName(), ModelPathOf(p.obj));
+                    continue;
+                }
                 if (!m_icons.contains(p.key)) {
                     m_pending = p;
                     m_pendingInspect = false;
                     m_pendingBusy = true;
                     m_frames = 0;
+                    m_captureShrink = 1.0f;   // fresh ladder per item
                     break;
                 }
             }
         }
         if (!m_pendingBusy) {
+            // capture idle: hand the engine its own item scale back. Normal
+            // captures push kIconCaptureScale (see the Request site below) and
+            // UpdateParking's restore path only runs once the scale is zeroed
+            // — leaving it set would hand a 2.5x model to whatever uses
+            // Inventory3DManager next. The open inspect keeps its own scale.
+            if (!m_inspect) {
+                pv->SetInspectScale(0.0f);
+            }
             // translucent skins: lingering models sit at the park point in
             // PLAIN SIGHT (no opaque window covers them). Once the queue
             // drains, purge stragglers that resisted Unload (pre-landing
@@ -1159,8 +1790,28 @@ namespace FUI
         }
         // Always capture at the STANDARD crop — def.scale is applied when the
         // tile draws (linear, instant, no capture-boundary nonlinearities).
-        // Inspect asks for a bigger box to match its enlarged model.
-        const float boxPx = m_pendingInspect ? kInspectRequestSize : kIconRequestSize;
+        //
+        // ★Resolution comes from the MODEL SCALE (see kIconCaptureScale): the
+        // engine renders the item at its own ~275px regardless of the box, so
+        // every capture now pushes the inspect-zoom scale lever and the box
+        // just grows to cover the enlarged model. The box is still clamped to
+        // what the screen can physically render (margin included) — pixels
+        // the backbuffer cannot hold do not exist to capture.
+        pv->SetInspectScale(m_pendingInspect ? kInspectModelScale
+                                             : kIconCaptureScale * m_captureShrink);
+        // ★★The capture lamp belongs to the ITEM, and it has to be set from the
+        // SAME def this request carries — set it anywhere else and a slow
+        // precache would light one item with the previous item's angle. Zero
+        // offsets are the default rig, so items that never needed tuning cost
+        // nothing here.
+        float laz = 0.0f, lel = 0.0f;
+        CaptureLightFor(def, laz, lel);   // same sum RotHash keyed on
+        pv->SetLightOffset(laz, lel);
+        float boxPx = m_pendingInspect ? kInspectRequestSize
+                                       : kIconRequestSize * kIconCaptureScale;
+        const float screenCap =
+            ImGui::GetIO().DisplaySize.y / ItemPreview::kSafetyMargin - 8.0f;
+        if (screenCap > 64.0f) boxPx = (std::min)(boxPx, screenCap);
         pv->Request(m_pending.obj, ImVec2(0.0f, 0.0f),
             ImVec2(boxPx, boxPx), -1.0f, 0.0f, 0.0f, &def);
         if (m_pending.boost > 0.0f) {
@@ -1170,19 +1821,17 @@ namespace FUI
 
     void IconCache::GiveUpPending(const char* a_why)
     {
-        constexpr int kMaxAttempts = 4;
         SKSE::log::warn("[ICONS] '{}' skipped ({})", m_pending.obj->GetName(), a_why);
         ItemPreview::GetSingleton()->UnloadCurrent();
         m_pendingBusy = false;
         // an inspect frame carries no cache key (0): its failures must never
-        // reach the attempt counters or the PERSISTED fail list
+        // reach the PERSISTED fail list
         if (m_pendingInspect) return;
-        // repeat offender -> permanent skip, PERSISTED across sessions
-        // (mod items whose preview never renders retried every relog)
-        if (++m_attempts[m_pending.key] >= kMaxAttempts) {
-            if (m_failed.insert(m_pending.key).second) {
-                PersistFail(m_pending.key);
-            }
+        // GI68: one verdict, no attempt counting. Reaching here means either the
+        // engine never even started a load (more time cannot help) or the retry
+        // pass already gave it ten seconds. Either way it is done.
+        if (m_failed.insert(m_pending.key).second) {
+            PersistFail(m_pending.key);
         }
     }
 
@@ -1190,8 +1839,21 @@ namespace FUI
     // pixel pipeline runs (body moved verbatim from the old front half).
     IconCache::GateResult IconCache::CheckPendingGates()
     {
-        constexpr int kMaxAttempts = 4;
+        // How long one capture may hold the slot before it is judged. Every
+        // capture is one per frame on a single engine scene, so a window is
+        // paid by EVERY item still in the queue, not just this one.
+        constexpr int kSoftFrames     = 20;    // ~0.33s: 3x the normal latency
+        constexpr int kPrecacheFrames = 45;    // ~0.75s: a mass pass, still cheap
+        constexpr int kRetryFrames    = 600;   // ~10s, but only in the retry pass
         auto* pv = ItemPreview::GetSingleton();
+
+        // ★★An enchant GLOW never survives a cache capture: the first shot of a
+        // freshly loaded model renders without the effect pass, and a second one
+        // only reaches ~11% of the tint a long-lived model shows (measured by
+        // channel share; EDIT looked right only because a rotation drag re-shoots
+        // the same model for seconds). Buying it would cost seconds PER ITEM, so
+        // it is not bought — the rarity halo already marks enchanted items and
+        // costs no capture. See Inv3D::Load for the loader side of the same call.
 
         // INSPECT: a live view, not a cache fill — no requeue, no attempt
         // counting, and never the PERSISTED fail list (its "key" is 0, which
@@ -1212,16 +1874,40 @@ namespace FUI
         // Precache entries WAIT IN PLACE instead of requeueing: a requeue is
         // Unload+reLoad, which throws away the in-flight async model load and
         // restarts it — the main "stall cluster" during a mass precache. One
-        // generous window, then give up for good (single attempt).
-        if (m_pending.evict && m_frames > 45) {
+        // generous window, then a verdict.
+        //
+        // ★GI68b: the verdict is the SAME two-way split the normal path uses.
+        // This branch used to send every straggler straight to the permanent
+        // fail list, so a full re-cache — the one operation that touches every
+        // item and is therefore most likely to meet a slow one — could never
+        // produce a deferred entry. A measured run blacklisted 'Coinpurse'
+        // while the log line one millisecond earlier read
+        //     [PREVIEW] state: models=3 cur='Coinpurse'
+        // i.e. the scene HAD the entry, its spModel was simply still null.
+        // FindCurrentModel() returning null does not mean "no model exists";
+        // only LoadPending() can tell a slow load from an absent one.
+        if (m_pending.evict &&
+            m_frames > (m_retryPass ? kRetryFrames
+                                    : kPrecacheFrames)) {
+            const bool loading = pv->LoadPending();
             // DIAGNOSTIC: which gate starved? (stamp = captures ran at all,
             // model/rot = scene state, content probe logs separately below)
             auto* dmdl = pv->FindCurrentModel();
             SKSE::log::warn(
-                "[ICONS] precache gates '{}': model={} radius={:.1f} rot={} stamp={}",
-                m_pending.obj->GetName(), dmdl != nullptr,
-                dmdl ? dmdl->worldBound.radius : -1.0f,
-                pv->RotationApplied(), pv->GetCaptureStamp());
+                "[ICONS] precache gates '{}': {} (model={} radius={:.1f} rot={} mesh='{}')",
+                m_pending.obj->GetName(), loading ? "deferred" : "no model",
+                dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
+                pv->RotationApplied(), ModelPathOf(m_pending.obj));
+            if (loading && !m_retryPass) {
+                if (m_deferred.insert(m_pending.key).second) {
+                    m_deferredObj[m_pending.key] = m_pending.obj;
+                    PersistSlow(m_pending.key);
+                }
+                GiveUpPending("precache deferred");
+                return GateResult::kAbandoned;
+            }
+            m_deferred.erase(m_pending.key);
+            m_deferredObj.erase(m_pending.key);
             if (m_failed.insert(m_pending.key).second) {   // no second chance,
                 PersistFail(m_pending.key);                // relogs included
             }
@@ -1232,28 +1918,58 @@ namespace FUI
         // Soft skip: a straggler must NOT stall the whole queue (3 stalled
         // items once accounted for 6s of a 6.5s first render). Requeue it at
         // the back quickly and keep moving; it retries after the scene state
-        // has moved on. Hard skip only after several attempts.
-        constexpr int kSoftFrames = 20;   // ~0.33s: 3x the normal load latency
-        if (!m_pending.evict && m_frames > kSoftFrames) {
-            const int tries = ++m_attempts[m_pending.key];
-            if (tries < kMaxAttempts) {
-                SKSE::log::info("[ICONS] '{}' slow - requeued (attempt {})",
-                    m_pending.obj->GetName(), tries);
-                // B4: keep any clip-boost progress — the next Request resets
-                // the boost on item change, which restarted the 1.6x ladder
-                // and made oversized items time out into the permanent
-                // fail list before ever reaching a big enough box
-                m_pending.boost = pv->CaptureBoost();
-                pv->UnloadCurrent();
-                if (auto* inv = RE::Inventory3DManager::GetSingleton();
-                    inv && inv->GetRuntimeData().loadedModels.size() >= 5) {
-                    pv->ResetScene();
+        // has moved on.
+        //
+        // ★GI68: the LAST attempt waits in place instead. A requeue is
+        // Unload + reLoad, which throws away the in-flight async model load and
+        // starts over -- the precache path already knew this (see the comment
+        // above) but the normal path did not, so an item that simply loads
+        // slower than 0.33s could never finish: every attempt restarted it and
+        // the fourth one gave up for good. Measured on a user's log, 65 items
+        // burned 20s each and every one of them landed in the PERSISTED fail
+        // list, which is why "mod icons never cache" was the report.
+        //
+        // Giving the final attempt a full second costs nothing in the common
+        // case (nothing reaches attempt 4 unless it is genuinely slow) and it
+        // breaks the loop below as well: fewer requeues means fewer ResetScene
+        // calls, and a reset is what makes the NEXT load land empty.
+        if (!m_pending.evict &&
+            m_frames > (m_retryPass ? kRetryFrames
+                                    : kSoftFrames)) {
+            // ★GI68: NO requeue. It used to try four times, and each try began
+            // with Unload+reLoad -- throwing away the in-flight async load and
+            // starting over. An item that simply loads slower than 0.33s could
+            // therefore never finish, no matter how many attempts it got: a
+            // user's log showed 65 items spending 20s each and every one of
+            // them landing in the PERSISTED fail list.
+            //
+            // One window, then a verdict, and the verdict comes from asking the
+            // ENGINE rather than counting frames:
+            //   loading  -> DEFERRED. It works, it is just slower than this pass
+            //               can afford. Waiting here would stall every other
+            //               item, so it gets its time in the retry pass.
+            //   not even -> FAILED. No task, no entry: more time changes
+            //               nothing (HDT/physics meshes, phantom weapons).
+            const bool loading = pv->LoadPending();
+            auto* dmdl = pv->FindCurrentModel();
+            SKSE::log::info(
+                "[ICONS] '{}' {} (model={} radius={:.1f} rot={} loading={})",
+                m_pending.obj->GetName(), loading ? "deferred" : "no model",
+                dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
+                pv->RotationApplied(), loading);
+
+            if (loading && !m_retryPass) {
+                if (m_deferred.insert(m_pending.key).second) {
+                    m_deferredObj[m_pending.key] = m_pending.obj;
+                    PersistSlow(m_pending.key);
                 }
-                m_queue.push_back(m_pending);
-                m_queued.insert(m_pending.key);
+                pv->UnloadCurrent();
                 m_pendingBusy = false;
                 return GateResult::kAbandoned;
             }
+            // retry pass ran out too, or the load never took at all
+            m_deferred.erase(m_pending.key);
+            m_deferredObj.erase(m_pending.key);
             GiveUpPending("timeout");
             return GateResult::kAbandoned;
         }
@@ -1277,6 +1993,16 @@ namespace FUI
         // icons). Accept only once the node carries the requested rotation —
         // UpdateParking re-applies it next frame.
         if (!pv->RotationApplied()) return GateResult::kNotReady;
+
+        // ★★RotationApplied is not enough on its own. It asks whether the node
+        // carries the requested rotation, and a leftover model from a DIFFERENT
+        // item answers yes whenever the two share one — which category defaults
+        // make routine (armor_head and armor_body_heavy are both rx:90). A body
+        // was being accepted a frame before its own park ran, so the pixels
+        // came from the previous item's model under the previous item's light.
+        // Measured: ACCEPT on f8977, that item's park on f8978.
+        // Weapons and bags never showed it only because their angles differ.
+        if (!pv->ParkSettled()) return GateResult::kNotReady;
 
         return GateResult::kReady;
     }
@@ -1401,10 +2127,37 @@ namespace FUI
             if (minX <= 0 || minY <= 0 || maxX >= w - 1 || maxY >= h - 1) {
                 const ImVec2 cover = pv->CaptureCover();
                 const float cur = (std::max)(cover.x, cover.y);
-                if (cur < static_cast<float>(ItemPreview::kTexSize) - 1.0f) {
-                    pv->BoostCapture(cur * 1.6f);
+                // ★The ladder's ceiling is the BACKBUFFER, not kTexSize. The
+                // capture copies screen pixels; a box larger than the screen
+                // reads out of bounds, D3D drops the copy, and the bake then
+                // harvests the PREVIOUS capture's stale pixels — the
+                // "rotating in EDIT suddenly zooms/crops the icon" report
+                // (2.5x models reach 2048 in two boost steps now). Past the
+                // screen no bigger box exists: bake the slightly clipped
+                // sprite, which is at least made of REAL pixels.
+                const auto scr = RE::BSGraphics::Renderer::GetScreenSize();
+                float cap = static_cast<float>(ItemPreview::kTexSize);
+                if (scr.width > 0 && scr.height > 0) {
+                    cap = (std::min)({ cap, static_cast<float>(scr.width),
+                                       static_cast<float>(scr.height) });
+                }
+                if (cur < cap - 1.0f) {
+                    const float grow = (std::min)(cap, cur * 1.6f);
+                    pv->BoostCapture(grow);
                     SKSE::log::info("[ICONS] '{}' clipped at {}x{} — retry with {:.0f}px box",
-                        m_pending.obj->GetName(), w, h, cur * 1.6f);
+                        m_pending.obj->GetName(), w, h, grow);
+                    return;
+                }
+                // Box is at the screen ceiling and the model still overflows.
+                // Rung two: render it smaller. A sprite at 70% of the pixels
+                // is a small loss; a sprite with its silhouette sliced off is
+                // wrong forever, and the pixel style outlines that cut into a
+                // rectangle around the icon.
+                if (!m_pendingInspect && m_captureShrink > kMinCaptureShrink) {
+                    m_captureShrink = (std::max)(kMinCaptureShrink, m_captureShrink * 0.7f);
+                    SKSE::log::info("[ICONS] '{}' still clipped at box ceiling {:.0f}px — "
+                        "retry at {:.0f}% model scale",
+                        m_pending.obj->GetName(), cap, m_captureShrink * 100.0f);
                     return;
                 }
             }
@@ -1466,34 +2219,94 @@ namespace FUI
             }
         }
 
-        D3D11_TEXTURE2D_DESC td = {};
-        td.Width            = static_cast<UINT>(trimW);
-        td.Height           = static_cast<UINT>(trimH);
-        td.MipLevels        = 1;
-        td.ArraySize        = 1;
-        td.Format           = srcDesc.Format;
-        td.SampleDesc.Count = 1;
-        td.Usage            = D3D11_USAGE_DEFAULT;
-        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
-
-        D3D11_SUBRESOURCE_DATA init = {};
-        init.pSysMem     = sprite.data();
-        init.SysMemPitch = static_cast<UINT>(trimW * 4);
+        // ★Store at the size the TILE can actually show, not the size we
+        // captured at. Rendering the model large is what buys the detail
+        // (see kIconCaptureScale) — keeping every one of those pixels
+        // afterwards does not: a 1x1 potion occupies ~46 screen px and its
+        // sprite was ~500, so the pak grew to 1.2GB of pixels no one ever
+        // sees. Downscaling from the big capture is SUPERSAMPLING, so the
+        // stored icon is sharper than one captured small would have been.
+        // The budget follows the footprint (a 2x4 greatbow really is four
+        // times a ring on screen), and the alpha-weighted box filter is the
+        // same one the mip chain uses — a plain average pulls edge colour
+        // toward the transparent margin and rings the sprite.
+        // Inspect is exempt: it draws at 62% of screen height, not in a cell.
+        if (!m_pendingInspect) {
+            const IconDef sd = ResolveDef(m_pending.obj);
+            const int cells = std::clamp((std::max)(sd.w, sd.h), 1, 4);
+            // ★160 per cell, not 128+96n. The first cut was measured against
+            // a 1x1 and left the 3-cell bags (Canvas / Buckled / Adventure)
+            // visibly softer than the capture — those carry buckle and strap
+            // detail across three cells, and 320px could not hold it.
+            const int limit = 160 * cells;   // 1x1 160 .. 2x4 640
+            const int longSide = (std::max)(trimW, trimH);
+            if (longSide > limit) {
+                const int nw = (std::max)(1, trimW * limit / longSide);
+                const int nh = (std::max)(1, trimH * limit / longSide);
+                // ★TRUE area resampling: every source pixel contributes in
+                // proportion to how much of it the destination pixel covers.
+                // The first version walked integer pixel ranges, so at a
+                // non-power-of-two ratio (600 -> 320) one output pixel took
+                // two source pixels and its neighbour took one — uneven
+                // sampling, which is exactly the shimmer that read as "lower
+                // quality" on the busiest icons. Weights are in 1/256ths of a
+                // pixel; alpha still weights the colour so the transparent
+                // margin cannot darken the edges.
+                std::vector<std::uint8_t> shrunk(static_cast<size_t>(nw) * nh * 4);
+                const double fx = static_cast<double>(trimW) / nw;
+                const double fy = static_cast<double>(trimH) / nh;
+                for (int y = 0; y < nh; ++y) {
+                    const double y0 = y * fy, y1 = (y + 1) * fy;
+                    const int iy0 = static_cast<int>(y0);
+                    const int iy1 = (std::min)(trimH - 1, static_cast<int>(std::ceil(y1)) - 1);
+                    for (int x = 0; x < nw; ++x) {
+                        const double x0 = x * fx, x1 = (x + 1) * fx;
+                        const int ix0 = static_cast<int>(x0);
+                        const int ix1 = (std::min)(trimW - 1, static_cast<int>(std::ceil(x1)) - 1);
+                        double aw = 0.0, wsum = 0.0, c[3] = { 0.0, 0.0, 0.0 };
+                        for (int sy = iy0; sy <= iy1; ++sy) {
+                            const double wy = (std::min)(y1, sy + 1.0) - (std::max)(y0, 1.0 * sy);
+                            if (wy <= 0.0) continue;
+                            for (int sx = ix0; sx <= ix1; ++sx) {
+                                const double wx = (std::min)(x1, sx + 1.0) - (std::max)(x0, 1.0 * sx);
+                                if (wx <= 0.0) continue;
+                                const auto* s = &sprite[(static_cast<size_t>(sy) * trimW + sx) * 4];
+                                const double w = wx * wy;
+                                const double a = s[3] * w;
+                                wsum += w;
+                                aw += a;
+                                c[0] += s[0] * a; c[1] += s[1] * a; c[2] += s[2] * a;
+                            }
+                        }
+                        auto* dp = &shrunk[(static_cast<size_t>(y) * nw + x) * 4];
+                        if (aw > 0.0) {
+                            dp[0] = static_cast<std::uint8_t>(std::lround(c[0] / aw));
+                            dp[1] = static_cast<std::uint8_t>(std::lround(c[1] / aw));
+                            dp[2] = static_cast<std::uint8_t>(std::lround(c[2] / aw));
+                        } else {
+                            dp[0] = dp[1] = dp[2] = 0;
+                        }
+                        dp[3] = wsum > 0.0
+                            ? static_cast<std::uint8_t>(std::clamp<long>(
+                                  std::lround(aw / wsum), 0, 255))
+                            : 0;
+                    }
+                }
+                sprite.swap(shrunk);
+                trimW = nw;
+                trimH = nh;
+            }
+        }
 
         Icon icon;
         icon.w = trimW;
         icon.h = trimH;
-        if (FAILED(device->CreateTexture2D(&td, &init, &icon.tex))) { giveUp("tex fail"); return; }
-        if (FAILED(device->CreateShaderResourceView(icon.tex, nullptr, &icon.srv))) {
-            icon.tex->Release();
-            giveUp("srv fail");
-            return;
-        }
-        // precache (evict) captures skip the glow sprite: it is CPU-built
-        // (dilate+blur) and would be released unused a few lines below
-        if (!m_pending.evict) {
-            BuildGlowSprite(device, sprite.data(), trimW, trimH, icon);
-        }
+        icon.tex = CreateMippedTexture(device, sprite.data(), trimW, trimH,
+            srcDesc.Format, &icon.srv);
+        if (!icon.tex) { giveUp("tex fail"); return; }
+        // ★1.0.5: the glow sprite that used to be built here is gone, and with
+        // it a CPU downscale+blur on EVERY capture. A precache already skipped
+        // it (evicting captures released it unused); now nothing pays for it.
 
         // (v7's capture-time geometry rotation record was removed: the offline
         // tool no longer needs it — its projection/root-transform bugs were
@@ -1517,7 +2330,6 @@ namespace FUI
         }
 
         m_icons[m_pending.key] = icon;
-        m_attempts.erase(m_pending.key);   // success: forget prior soft-skips
         if (m_pending.obj == m_pin) {
             // live edit: keep ONE slot — drop the previous intermediate
             // texture and defer the disk write until the pin moves/clears
@@ -1529,17 +2341,41 @@ namespace FUI
                     if (old->second.glowTex) old->second.glowTex->Release();
                     m_icons.erase(old);
                 }
+                // the derived dot version of that intermediate goes with it
+                if (auto pold = m_pixelIcons.find(m_pinLastKey); pold != m_pixelIcons.end()) {
+                    ReleaseIcon(pold->second);
+                    m_pixelIcons.erase(pold);
+                }
             }
             m_pinLastKey = m_pending.key;
             m_pinSprite  = std::move(sprite);
             m_pinW = trimW;
             m_pinH = trimH;
             m_pinFmt = static_cast<std::uint32_t>(srcDesc.Format);
+            // ★Queue the dot version HERE, not from the draw. TickPixelDerive
+            // runs between this harvest and the draw, so a key queued by the
+            // draw is only reached on the NEXT frame — by which time the next
+            // capture has already overwritten the in-memory sprite it needed,
+            // and a rotation drag would never resolve to dots at all.
+            if (m_style == Style::kPixel) {
+                const IconDef pd = ResolveDef(m_pending.obj);
+                m_pixelCells[m_pending.key] = { (std::max)(1, pd.w), (std::max)(1, pd.h) };
+                if (m_pixelQueued.insert(m_pending.key).second) {
+                    m_pixelQueue.push_front(m_pending.key);
+                }
+            }
         } else {
             SaveToDisk(m_pending.key, trimW, trimH,
                 static_cast<std::uint32_t>(srcDesc.Format), sprite);
             SKSE::log::info("[ICONS] cached '{}' {}x{} ({} total, {} queued)",
                 m_pending.obj->GetName(), trimW, trimH, m_icons.size(), m_queue.size());
+            // GI68: it made it -- off the deferred list. This also covers the
+            // case where a later, quieter frame captures it without any retry
+            // pass at all, which is the common outcome.
+            if (!m_deferred.empty() && m_deferred.erase(m_pending.key)) {
+                m_deferredObj.erase(m_pending.key);
+                if (!m_retryPass) RewriteSlow();   // the pass rewrites once at its end
+            }
             // mass precache: keep only the pak copy — the icon was created
             // this call and never drawn, so releasing it here is safe. A grid
             // that later shows the item reloads it from disk on demand.
@@ -1551,6 +2387,25 @@ namespace FUI
                     if (ev->second.glowTex) ev->second.glowTex->Release();
                     m_icons.erase(ev);
                 }
+            } else {
+                // ★★This item now has a newer picture, so the one the board has
+                // been falling back to is dead weight — release it here rather
+                // than let a light drag stack one sprite per angle in VRAM.
+                // Order matters: the new key is already in m_icons, so there is
+                // never a frame with nothing to draw.
+                if (const auto lg = m_lastGood.find(m_pending.obj);
+                    lg != m_lastGood.end() && lg->second != m_pending.key) {
+                    if (auto old = m_icons.find(lg->second); old != m_icons.end()) {
+                        ReleaseIcon(old->second);
+                        m_icons.erase(old);
+                    }
+                    if (auto pold = m_pixelIcons.find(lg->second); pold != m_pixelIcons.end()) {
+                        ReleaseIcon(pold->second);
+                        m_pixelIcons.erase(pold);
+                        m_pixelCells.erase(lg->second);
+                    }
+                }
+                m_lastGood[m_pending.obj] = m_pending.key;
             }
         }
         m_pendingBusy = false;
@@ -1562,10 +2417,28 @@ namespace FUI
         // translucent skins also unload the pinned item: keeping it loaded
         // parks a visible model at screen centre for the whole EDIT session.
         // Cost: rotation edits pay a reload round-trip (~a few frames).
+        //
         // Precache (evict) keeps the model loaded instead: the same-nif fast
         // path in ItemPreview::Request then chains enchanted variants without
-        // any reload (a different-nif Request unloads it, and the idle purge
-        // clears the tail once the queue drains).
+        // any reload (the idle purge clears the tail once the queue drains).
+        //
+        // ★★MEASURED, do not "fix" this again. The scene-reset count looks like
+        // this exception's fault — 357 resets over a 1823-item precache, one
+        // every five captures — so unloading on the precache path too was
+        // tried, on the theory that a returned slot would keep the engine's
+        // 7-entry array below the reset threshold. The A/B says otherwise:
+        //
+        //            resets   loads   same-nif reuse   elapsed
+        //   keep      357     1786    36               58s
+        //   unload    363     1822     0               58s
+        //
+        // Unloading every item left the reset cadence at EXACTLY five captures
+        // (359 of 363 gaps) — the same number, mechanically, as when nothing
+        // was unloaded at all. Inv3D::Unload is Inventory3DManager::Clear3D
+        // (RELOCATION_ID 50886/51759, see the NG header), and Clear3D does NOT
+        // give the slot back: loadedModels only empties at End3D. So the reset
+        // is structural — nothing this call site does can change it — and the
+        // exception's 36 saved loads are pure profit rather than a trade.
         if (!m_pending.evict && (m_pending.obj != m_pin || Theme::S().translucent)) {
             pv->UnloadCurrent();
         }
@@ -1586,21 +2459,43 @@ namespace FUI
     void IconCache::Clear()
     {
         for (auto& [key, icon] : m_icons) ReleaseIcon(icon);
-        for (auto& [key, icon] : m_stylIcons) ReleaseIcon(icon);
+        // ★The derived dot sprites go too. Their key is the model + rotation,
+        // which a RETEXTURE does not change — so an icon-cache reset (the one
+        // thing that exists for retextures) would re-capture every realistic
+        // sprite and still serve dots quantised from the OLD pixels. Same for
+        // a preset import, which replaces the pak under identical keys.
+        ReleasePixelIcons();
+        m_pixelCells.clear();
         ReleaseIcon(m_inspectIcon);
         m_inspectValid = false;
         m_inspectRetire = false;
         m_pendingInspect = false;
-        m_stylIcons.clear();
-        m_stylTried.clear();
         m_icons.clear();
         m_queue.clear();
         m_queued.clear();
-        m_attempts.clear();
         m_failed.clear();
         m_failLoaded = false;   // persisted fail keys reload on next access
         m_pendingBusy = false;
         m_pinLastKey = 0;
         m_pinSprite.clear();
+        // ★Every key it names was just released — leaving them would have Get()
+        // hand out a freed SRV, which is a crash, not a stale picture.
+        m_lastGood.clear();
+    }
+
+    // ★★Drop everything that has not started yet. The global capture light
+    // re-keys the whole board on every frame of a drag, and a queue keyed by
+    // VALUE cannot dedupe those: three seconds of dragging leaves thousands of
+    // entries, each asking for an angle the player has already scrolled past,
+    // and the cache spends minutes afterwards photographing history into the
+    // pak. QueueCapture already does this for the pinned item (one item, one
+    // key); this is the same idea when the change is board-wide.
+    // The in-flight capture is left alone — it is a single frame's work and
+    // cancelling it mid-engine-load is what the deferred-teardown path exists
+    // to avoid.
+    void IconCache::PurgeQueue()
+    {
+        for (const auto& e : m_queue) m_queued.erase(e.key);
+        m_queue.clear();
     }
 }

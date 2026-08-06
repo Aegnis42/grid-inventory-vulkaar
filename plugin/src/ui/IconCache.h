@@ -27,11 +27,13 @@ namespace FUI
             ID3D11Texture2D*          tex = nullptr;
             int                       w = 0;
             int                       h = 0;
-            // silhouette rarity halo: this icon's alpha channel downscaled,
-            // dilated and blurred — white RGB, tinted per rarity at draw time.
-            // gpad px of padding is baked around the core on each side so the
-            // halo can bleed OUTSIDE the icon rect. May be null (slot
-            // silhouettes / creation failure) — callers must check.
+            // ★1.0.5: ALWAYS NULL / ZERO. These held a blurred silhouette of
+            // the icon — first the rarity halo, then the drop shadow — baked
+            // onto a 96px canvas. Nothing builds one any more: the shadow
+            // stamps the icon's own sprite instead, at full resolution (see
+            // Grid::DrawItemShadow). The fields stay because every reader was
+            // already null-checking them and the release paths no-op on null,
+            // so leaving them costs 5 words per icon and churns nothing.
             ID3D11ShaderResourceView* glowSrv = nullptr;
             ID3D11Texture2D*          glowTex = nullptr;
             int                       gw = 0;     // glow canvas incl. padding
@@ -50,6 +52,13 @@ namespace FUI
                                    std::uint32_t a_exactMagic = 0,
                                    bool a_makeGlow = false);
 
+        // PNG loader (WIC) — the drawn icon set's format. Anything a player
+        // drops into the fallback folder comes through here, so it must fail
+        // QUIETLY on a missing or malformed file: the caller treats "no" as
+        // "this key has no drawing", which is a normal answer.
+        static bool LoadPngTexture(const std::string& a_path, Icon& a_out,
+                                   bool a_makeGlow = false);
+
         // main.cpp installs this: item -> capture orientation (category preset
         // + user ini override). The def is part of the cache key, so editing a
         // def naturally triggers a re-capture.
@@ -59,6 +68,12 @@ namespace FUI
 
         // Enqueue an item for capture (no-op if cached or already queued).
         void QueueCapture(RE::TESBoundObject* a_obj);
+
+        // ★Drop the not-yet-started backlog. For settings that re-key EVERY
+        // item at once (the global capture light) — without it a slider drag
+        // leaves thousands of queued captures at angles nobody asked for.
+        void PurgeQueue();
+
 
         // Prefetch (B): queue a capture WITHOUT touching the GPU — items
         // already in the disk pak are skipped by index (their texture uploads
@@ -70,6 +85,21 @@ namespace FUI
         // order (weapons/armor/potions/books/misc/...). Returns queued count.
         size_t PrecacheAll();
         void   CancelPrecache();   // drop the queue (current capture finishes)
+
+        // ---- GI68: the DEFERRED list ---------------------------------------
+        // An item whose model was still loading when its window closed is not a
+        // failure -- it just needed more time than the first pass can give it.
+        // ★The first pass must not wait for it: captures run one per frame on a
+        // single engine scene, so every frame spent waiting is a frame no OTHER
+        // item can use (three stragglers once ate 6s of a 6.5s first render).
+        // So it is set aside instead, and time is granted later, in a pass where
+        // holding the queue costs nobody anything.
+        //
+        // Persisted, or the same items would burn their window again every
+        // session and land right back here.
+        [[nodiscard]] size_t DeferredCount();
+        size_t RetryDeferred();    // queue them with a generous window
+        void   ClearDeferred();    // give up on them (they become plain misses)
 
         // Editor pin: keep this item's model loaded between captures so a
         // rotation edit re-captures every frame (live editing). While pinned,
@@ -99,7 +129,7 @@ namespace FUI
         // for users who install retexture mods after icons were captured.
         // Call OUTSIDE the ImGui frame only (UIRoot::Tick): the current draw
         // list may still reference the SRVs being released.
-        // The stylized pak is a derivative and resets along with it.
+        // The retired stylized derivative is swept here too (GI60).
         void ResetDiskCache();
 
         // GI47: preset icon bundle. Export copies our capture pak next to the
@@ -111,15 +141,42 @@ namespace FUI
         bool ExportPakTo(const char* a_path);
         bool MergePak(const char* a_path);
 
-        // Icon style. OFF = realistic auto-captures (default). ON (GI59) =
-        // STYLIZED: the approved "style B" flat-illustration filter, DERIVED
-        // on demand from the realistic capture and cached in its own pak --
-        // every item (mods included) is covered with nothing authored or
-        // shipped. An item whose realistic capture hasn't landed yet shows
-        // the realistic flow until it does. (Replaces the retired authored
-        // low-poly pak.)
-        void SetStylizedStyle(bool a_on);
-        [[nodiscard]] bool StylizedStyle() const { return m_stylized; }
+        // Icon style. REALISTIC = auto-captured from the game's own 3D models.
+        // DRAWN (GI52) = the hand-drawn category set on its own: it captures
+        // nothing at all, so a heavily modded load order is complete the moment
+        // the menu opens instead of after a long scan. (The C-key 3D view still
+        // works there: that path never goes through the icon queue.)
+        //
+        // Value 1 was a third style, "stylized" — a filter derived from the
+        // captures. Retired in GI60; the drawn set covers the same want with
+        // authored art and no scan. The NUMBER stays skipped so an old ini
+        // reading 1 can be mapped to realistic rather than silently meaning
+        // something else.
+        enum class Style : std::uint8_t
+        {
+            kRealistic = 0,
+            kFlat      = 2,
+            // ★PIXEL is DERIVED from the realistic capture at runtime, not a
+            // second art set: the sprite is quantised to a fixed palette on a
+            // 24-dot-per-cell grid and given a one-dot outline. That is what
+            // makes it cover mod items for free — anything the engine can
+            // capture, this style can draw — and why it ships no assets.
+            kPixel     = 3,
+        };
+        void SetStyle(Style a_style);
+        [[nodiscard]] Style GetStyle() const { return m_style; }
+        [[nodiscard]] bool  FlatStyle() const { return m_style == Style::kFlat; }
+        [[nodiscard]] bool  PixelStyle() const { return m_style == Style::kPixel; }
+
+        // Pixel derivation runs on a frame budget (see kPixelPerFrame): until
+        // an item's dot version exists the grid keeps drawing the realistic
+        // one, so switching styles reads as a sweep rather than a blank grid.
+        void TickPixelDerive();
+        // ★Deferred texture drop. Leaving pixel style frees its derived
+        // SRVs, and that MUST NOT happen inside the ImGui frame — the draw
+        // list already holds those exact views. Same rule ResetDiskCache
+        // spells out one screen down; the style switch just never got it.
+        bool m_pixelDropPending = false;
 
         // INSPECT mode (C key = vanilla "Item Zoom"): one item is captured
         // every frame at a mouse-driven rotation and drawn large, so the player
@@ -161,15 +218,23 @@ namespace FUI
         // PERSISTED permanent-fail list.
         void GiveUpPending(const char* a_why);
 
-        // Capture request size: generous (~512px capture region) — the stored
-        // icon is ALPHA-TRIMMED to the model's true pixel bounds afterwards,
-        // so clipping is structurally impossible and files stay tight.
-        static constexpr float kIconRequestSize = 290.0f;
-        // inspect: engine item-scale multiplier (the capture rect auto-grows
-        // to the projected bound, clamped to kTexSize, so this stays modest)
-        // and a matching minimum capture box for the enlarged model
-        static constexpr float kInspectModelScale  = 2.0f;
-        static constexpr float kInspectRequestSize = 560.0f;
+        // ★The RESOLUTION lever is the model scale, not the box. The engine
+        // renders the preview item at a size it chooses itself (~275px
+        // regardless of the request box — measured; growing the box only
+        // captured more empty margin, which the alpha-trim then removed, so
+        // "bigger box" changed nothing). Rendering SMALL is also what made
+        // items look glossy: at ~275px the GPU samples the low mips of the
+        // diffuse AND the normal map, and averaged normals read as a smooth,
+        // shiny surface. So captures push the same itemScale/node-scale pair
+        // the inspect zoom already uses (save/restore machinery included) and
+        // the box merely follows the enlarged model.
+        static constexpr float kIconCaptureScale = 2.5f;
+        static constexpr float kIconRequestSize  = 320.0f;   // box floor, x scale at request
+        // inspect: same lever, larger — its overlay draws into ~62% of screen
+        // height (890px at 1440p), so the model needs those pixels for real.
+        // Smaller displays clamp the box at capture time (height / margin).
+        static constexpr float kInspectModelScale  = 3.0f;
+        static constexpr float kInspectRequestSize = 900.0f;
 
         static void ReleaseIcon(Icon& a_icon);   // free SRV/tex (+ glow)
         static constexpr int   kTimeoutFrames   = 180;
@@ -184,10 +249,6 @@ namespace FUI
         // Disk cache: an item is captured once EVER (per def); later sessions
         // load the pixels straight from disk — no engine renders at all.
         bool LoadFromDisk(std::uint64_t a_key);
-        // stylized derivatives (GI59): load a cached entry, or derive one
-        // from the realistic pak via IconFilterB (appends to the styl pak)
-        bool LoadStylizedFromDisk(std::uint64_t a_key);
-        bool StylizeFromRealistic(std::uint64_t a_key);
         static void SaveToDisk(std::uint64_t a_key, int a_w, int a_h, std::uint32_t a_fmt,
                                const std::vector<std::uint8_t>& a_pixels);
 
@@ -204,27 +265,54 @@ namespace FUI
             float               boost = 0.0f;    // B4: clip-boost carried across requeues
         };
 
+        // ★Second rung of the anti-clipping ladder. The first grows the BOX,
+        // and it has a hard ceiling: the capture reads backbuffer pixels, so
+        // no box can exceed the screen. A model that still overflows there
+        // used to be baked clipped — which the realistic sprite shows as a
+        // sliced silhouette and the pixel style turns into a literal frame
+        // (its 1-dot outline traces the straight cut). When the box cannot
+        // grow, shrink the MODEL instead: fewer pixels, but real ones.
+        float m_captureShrink = 1.0f;
+        static constexpr float kMinCaptureShrink = 0.4f;   // 2.5x -> 1.0x floor
+
+        // Pixel style: derived sprites, keyed exactly like m_icons. Memory
+        // only — re-deriving costs a pak read plus a downscale, which is
+        // cheaper than owning a second pak file and keeping it in sync.
+        static constexpr int kPixelDots      = 24;   // dots per grid cell
+        static constexpr int kPixelPerFrame  = 4;    // derivations per frame
+        // mutable: Get() is const and only RECORDS a request here. The queue
+        // is lazy-evaluation bookkeeping, not observable state — what the
+        // caller sees is unchanged whether or not the derivation has run.
+        std::unordered_map<std::uint64_t, Icon>       m_pixelIcons;
+        mutable std::deque<std::uint64_t>             m_pixelQueue;
+        mutable std::unordered_set<std::uint64_t>     m_pixelQueued;
+        mutable std::unordered_map<std::uint64_t, std::pair<int, int>> m_pixelCells;
+        bool DerivePixelIcon(std::uint64_t a_key, int a_cw, int a_ch);
+        void ReleasePixelIcons();
+
         DefResolver                            m_resolver;
         std::unordered_map<std::uint64_t, Icon> m_icons;
-        // stylized style (GI59): derived sprites under the SAME keys as the
-        // realistic pak. m_stylTried = keys probed to a decisive end this
-        // session (loaded, derived, or realistic-missing); attempts skipped
-        // by the per-frame generation budget do NOT mark it, so they simply
-        // retry on a later frame.
-        std::unordered_map<std::uint64_t, Icon> m_stylIcons;
-        std::unordered_set<std::uint64_t>       m_stylTried;
-        bool                                    m_stylized = false;
+        Style                                   m_style = Style::kRealistic;
         std::deque<Pending>                    m_queue;
         std::unordered_set<std::uint64_t>      m_queued;    // membership for m_queue
-        std::unordered_map<std::uint64_t, int> m_attempts;  // soft-skip retry counts
         // permanently skipped this session: items whose capture keeps failing
         // (e.g. mod items with no inventory model) — without this the visible
         // grid re-queues them every frame and the caching spinner never ends
         std::unordered_set<std::uint64_t>      m_failed;
         bool                                   m_failLoaded = false;
+        // GI68: ran out of window while the engine was STILL LOADING. Not a
+        // failure -- a candidate for a later, unhurried pass. Kept apart from
+        // m_failed so a retry can target exactly these and nothing else.
+        std::unordered_set<std::uint64_t>      m_deferred;
+        std::unordered_map<std::uint64_t, RE::TESBoundObject*> m_deferredObj;
+        bool                                   m_slowLoaded = false;
+        bool                                   m_retryPass = false;   // generous window
 
         void EnsureFailLoaded();               // lazy read of the persisted list
         void PersistFail(std::uint64_t a_key); // append one permanently-failed key
+        void EnsureSlowLoaded();
+        void PersistSlow(std::uint64_t a_key);
+        void RewriteSlow();                    // after a retry resolves entries
         Pending                                m_pending;
         RE::TESBoundObject*                    m_pin = nullptr;   // editor selection
         RE::TESBoundObject*                    m_inspect = nullptr;   // C-key overlay
@@ -236,6 +324,18 @@ namespace FUI
         bool                                   m_pendingBusy = false;
         int                                    m_frames = 0;
         std::uint32_t                          m_stampBefore = 0;
+
+        // ★★1.0.5 — the same no-flicker guarantee the pinned item has, for
+        // EVERY item: the newest key that item has a sprite for. A miss on the
+        // current key falls back to this instead of drawing nothing.
+        //
+        // It exists because the GLOBAL capture light re-keys the whole board at
+        // once. Without it, dragging that slider blanks every icon on screen
+        // until each one is re-photographed one per frame — the grid empties
+        // and refills, which reads as a crash rather than as a preview.
+        // Written only for sprites that stay in memory; a precache eviction
+        // has nothing to fall back to and must not claim it does.
+        std::unordered_map<RE::TESBoundObject*, std::uint64_t> m_lastGood;
 
         // live-edit slot: latest completed capture of the pinned item (drawn
         // as a fallback while newer keys are still in flight -> no flicker)

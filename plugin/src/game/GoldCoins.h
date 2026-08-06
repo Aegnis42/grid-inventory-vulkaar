@@ -24,6 +24,14 @@ namespace FUI::GoldCoins
     [[nodiscard]] bool IsCoinForm(RE::FormID a_id);
     [[nodiscard]] bool IsPouch(RE::FormID a_id);
 
+    // GI52: the drawn-icon key for one of OUR gold forms ("msc_gold1".."4",
+    // "msc_coinpouch"), or nullptr if the form isn't ours. The category-icon
+    // rules are written against vanilla records, so without this every coin,
+    // purse and pouch fell through to the catch-all and drew a pickaxe.
+    // Answering here rather than in the icon module keeps the form list in the
+    // one place that owns it.
+    [[nodiscard]] const char* FallbackIconKey(RE::FormID a_id);
+
     [[nodiscard]] int PouchStored();   // 0..10000, cosave-persisted
     [[nodiscard]] int PouchCap();      // 10000
     [[nodiscard]] RE::TESBoundObject* PouchForm();
@@ -91,19 +99,39 @@ namespace FUI::GoldCoins
     void OnPouchLeftPlayer();
     void OnPouchReturned();
 
-    // How the player is meant to GET a pouch. The esp carries no leveled-list
-    // or vendor-list edit, so nothing stocks it -- and vendors sell out of the
-    // vendor faction's merchantContainer, not their own inventory, which is why
-    // SPID (an NPC distributor) cannot put it on the shelf either.
+    // How the player is meant to GET the pouch and the bags. The esp carries
+    // no leveled-list or vendor-list edit, so nothing stocks them -- and
+    // vendors sell out of the vendor faction's merchantContainer, not their
+    // own inventory, which is why SPID (an NPC distributor) cannot put them
+    // on the shelf either. So we seed that chest ourselves when a barter
+    // session opens. Nothing touches the esp's vendor lists, so no
+    // leveled-list override can conflict with a merchant mod.
     //
-    // So we stock it ourselves when a barter session opens: one pouch into this
-    // merchant's chest -- and (§RELEASE-B) one Satchel and one Knapsack, the
-    // shipped bag items -- but only for general-goods vendors and only when
-    // the chest has none. Nothing is added to the esp's vendor lists, so no
-    // leveled-list override can conflict with a merchant mod, and existing
-    // saves are covered on the next visit. A chest restock that clears them
-    // is re-seeded the visit after.
+    // Restocking runs on a CYCLE INDEX, floor(daysPassed / iDaysToRespawnVendor)
+    // -- one seeding per merchant per cycle, so re-opening the window or
+    // buying the shelf empty cannot refill it mid-cycle (the old "add
+    // whenever missing" rule made bags infinitely purchasable). The chest's
+    // own respawn wipes our items (they are not in its leveled entries);
+    // the next cycle's seeding is what brings them back.
+    //
+    // Per cycle: general-goods vendors get the pouch plus
+    // kGenericBagsPerCycle general-purpose bags, drawn deterministically
+    // from hash(merchant, cycle) -- a rotating lineup, not a refill. Every
+    // TYPED bag is a guaranteed item at the merchants whose sell/buy list
+    // carries its filter's vendor keyword (the shop that trades what the
+    // bag holds). The bag list itself arrives via SetBagWares below.
     void SeedVendorStock(RE::Actor* a_merchant, RE::TESObjectREFR* a_container);
+
+    // ★Which bags exist, and what each accepts ("" = general purpose). Handed
+    // in from main.cpp rather than hardcoded here: the bags are defined by the
+    // item defs, so a FormID list in this file would be a second source of
+    // truth that silently drifts the moment one is added.
+    struct BagWare
+    {
+        RE::TESBoundObject* obj = nullptr;
+        std::string         accept;
+    };
+    void SetBagWares(std::vector<BagWare> a_wares);
 
     void MarkDirty();   // player's Gold001 (or a coin form) changed
     void Tick();        // reconcile mirror -> inventory (game thread)
