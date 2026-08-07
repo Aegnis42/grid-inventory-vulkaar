@@ -318,6 +318,13 @@ namespace FUI::Grid
             // hand's list, and the accounting wrote the unit off as already worn.
             // (Appended last so the aggregate initialisers above stay valid.)
             bool          arriving = false;
+            // ★How MANY units this one entry stands for. One, for everything you
+            // wear a single copy of -- but a quiver is equipped by the tileful,
+            // and a suppression worth 1 against a 100-arrow equip left the board
+            // showing 99 spare arrows for the frame or two before the engine
+            // caught up. Only the stackable branch reads this; the per-unit
+            // walker never sees an entry worth more than one.
+            int           units = 1;
         };
         std::vector<OffBoardUnit>             g_pendingEquip;
         std::chrono::steady_clock::time_point g_pendingEquipWhen{};
@@ -415,6 +422,22 @@ namespace FUI::Grid
                 mixed = true;
                 mix(0x48454C54u); mix(bits);
             }
+            // ★★AMOUNT is part of identity, and dropping it was a mistake worth
+            // recording. It was removed once to stop a tile jumping when its
+            // pool changed mid-play: every swing of an enchanted weapon spends
+            // charge, the signature moved, the new prefix had no remembered
+            // slots, and the tile was reborn in the first free cell.
+            //
+            // That fixed the jump by making a half-charged sword and a full one
+            // THE SAME UNIT — and units inside one pool are deliberately
+            // indistinguishable, so the two could no longer be told apart or
+            // swapped. The player names them "the spent one" and "the full one";
+            // that is the definition of not interchangeable.
+            //
+            // Identity and placement are separate problems. This answers only
+            // "are these the same thing" — honestly, amount included. Keeping a
+            // unit's CELL when its answer changes is the slot-inheritance pass
+            // in the pool walker, which is where that belongs.
             if (const auto* x = xl->GetByType<RE::ExtraEnchantment>()) {
                 mixed = true;
                 mix(0x454E4348u);
@@ -575,10 +598,17 @@ namespace FUI::Grid
         // favourite star on the wrong sword).
         //
         // uid wins when the engine assigned one. Otherwise fall back to the
-        // position recorded at collection time, revalidated against the CURRENT
-        // list -- entry->extraLists is a linked list the engine mutates, so the
-        // index is a hint, never a promise. Returns nullptr for a plain unit,
-        // which is the correct answer: it genuinely has no list.
+        // position recorded at collection time. Returns nullptr for a plain
+        // unit, which is the correct answer: it genuinely has no list.
+        //
+        // ★The index is a HINT, not a promise: entry->extraLists is a linked
+        // list the engine reorders behind us, so between collection and this
+        // call the n-th entry may be a different unit. Nothing here revalidates
+        // it — an earlier version of this comment claimed it did, which is worse
+        // than silence, because a caller reading it would trust a check that was
+        // never written. Doing it properly needs the unit's signature passed in
+        // (ExtraForPool below takes one and is safe for that reason); prefer
+        // that resolver wherever the pool is known.
         RE::ExtraDataList* ExtraForTile(RE::InventoryEntryData* a_entry,
                                         std::uint16_t a_uid, int a_xlIdx)
         {
@@ -621,6 +651,21 @@ namespace FUI::Grid
                     continue;
                 }
                 if (InstanceSig(xl) == a_sig) return true;
+                // ★★The PLAIN pool owns no list, so a star for it has nowhere
+                // of its own to live. The engine only ever hangs an ExtraHotkey
+                // on an ExtraDataList, and a plain unit has none -- which is why
+                // starring one was impossible while a variant sibling existed:
+                // SetFavorite picked that sibling's list every time. Measured,
+                // not assumed (the log shows the engine minting a list only when
+                // the entry had none at all).
+                //
+                // So the plain pool reads ANY star on the entry as its own. The
+                // cost is visible and accepted: star a plain dagger and the
+                // stolen one lights up too, because they share the one mark the
+                // engine allows. They are the same dagger; the mark is coarser
+                // than the board, and the board says so honestly rather than
+                // showing nothing at all.
+                if (a_sig == 0) return true;
             }
             return false;
         }
@@ -862,8 +907,13 @@ namespace FUI::Grid
         std::unordered_map<RE::FormID, int> g_seenCount;   // counts as of the last look
         bool g_seenValid = false;   // false until a snapshot exists (fresh game / load)
         bool g_suppressNew = false; // one rebuild after a load: everything looks new
-        bool                                           g_poolTrace = false;   // debug switch: [POOL]/[FAV]/[XL] diagnostics
-
+        // ★Debug switch for the [POOL]/[FAV]/[XL]/[CHECK]/[FLICK] diagnostics.
+        // Ships OFF, and the call sites stay wired on purpose: these self-checks
+        // are what turned "a spare vanished" and "it flickers" into a log line
+        // naming the pool, so rebuilding them from scratch at the next report
+        // would cost far more than the dead branch does. Everything expensive
+        // (the per-tile string keys especially) lives INSIDE the guard.
+        bool g_poolTrace = false;
 
         // GI32: favourite syncs waiting for the game thread (see ToggleFavorite)
         struct FavSync
@@ -873,10 +923,12 @@ namespace FUI::Grid
             int                 xlIdx = -1;
         };
         std::vector<FavSync> g_favSync;
-        // TEMPORARY: last drawn set per gear pool, so a rebuild that changes what
-        // is on the board can say so. A flicker is a change that comes back --
-        // invisible to the conservation check, which only sees one frame at a
-        // time, but obvious as "2 -> 1 -> 2" in a transition log.
+        // Last drawn set per gear pool, so a rebuild that changes what is on the
+        // board can say so. A flicker is a change that comes back -- invisible
+        // to the conservation check, which only sees one frame at a time, but
+        // obvious as "2 -> 1 -> 2" in a transition log.
+        // (Read only under g_poolTrace; it was pencilled in as TEMPORARY and has
+        // outlived several bug hunts since.)
         std::unordered_map<std::string, std::string>   g_flickPrev;
         std::unordered_map<RE::FormID, int>            g_values;   // Phase 4: form -> GetValue (barter)
         // Phase 6 / GI26: NOT owned by the player, keyed by POOL (form + uid/sig).
@@ -1066,8 +1118,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         //          proved the new equip had landed before the engine ran it, the
         //          entry vanished, and the incoming unit fell straight back onto
         //          the board -- so the player saw it on the cursor AND in the
-        //          grid. The carried unit already owns one of those worn lists,
-        //          so a release needs one MORE than it accounts for.
+        //          grid. The carried unit already owns part of that worn total,
+        //          so a release needs MORE than it accounts for -- and "part"
+        //          is its whole COUNT, not one unit (a quiver is worn by the
+        //          hundred).
         //
         // Both only misfire when the two units share a pool, which is exactly why
         // this survived every test that used two DIFFERENT items.
@@ -1091,12 +1145,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         matching += (std::max)(1, xl->GetCount());
                     }
                 }
-                const bool carriedOwnsOne =
+                const bool carriedOwnsIt =
                     g_held && g_held->fromDoll && g_held->obj &&
                     FormKey(g_held->obj) == a_baseKey &&
                     g_held->uid == u.uid && g_held->sig == u.sig &&
                     (u.hand == 0 || g_held->hand == 0 || g_held->hand == u.hand);
-                return matching > (carriedOwnsOne ? 1 : 0);
+                // ★★"Owns ONE" was the whole assumption, and a quiver breaks it.
+                // `matching` is a sum of LIST COUNTS, so a carried 90-arrow
+                // quiver contributes 90 to it — and 90 > 1 released the incoming
+                // equip's suppression on the spot. The board then counted the
+                // arriving hundred as still-in-the-pack for the frame or two
+                // before the engine ran, which is the tile that flickered in
+                // and out at the front. Full stacks hid it: 100 worn against a
+                // 100 carry cancelled exactly, so nothing was left over to show.
+                const int carriedUnits =
+                    carriedOwnsIt ? (std::max)(1, g_held->count) : 0;
+                return matching > carriedUnits;
             });
         }
 
@@ -1962,22 +2026,75 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const float c = CellPx();
             float sx = 0.0f, sy = 0.0f;
             int n = 0;
+            // ★★fill is the REACH of the shape per axis, not its area.
+            //
+            // It used to be sqrt(occupied / box), which reads a T as 5 of 9
+            // cells and shrinks the icon to 74.5%. But a T spans all three
+            // columns AND all three rows -- there is nothing to shrink for. The
+            // area rule only makes sense for a shape that is genuinely smaller
+            // than its box (a diagonal pair, say), and it was punishing every
+            // shape that merely has a hole in it: a crossbow on a T footprint
+            // came out a quarter too small and could not be lined up with the
+            // arms it was drawn to fill.
+            //
+            // Widest row and tallest column, whichever is the tighter fraction:
+            //   T (3x3)         rows max 3/3, cols max 3/3  -> 1.00  (was 0.75)
+            //   diagonal (2x2)  rows max 1/2, cols max 1/2  -> 0.50  (was 0.71)
+            //   solid rect      every row and column full   -> 1.00  (unchanged)
+            //
+            // ★A shape narrower than its box still shrinks, which is the case
+            // the original rule was written for -- it just no longer counts the
+            // holes of a shape that reaches every edge.
+            int maxRow = 0;
+            int minX = a_mask.w, maxX = -1, minY = a_mask.h, maxY = -1;
+            std::vector<int> colN(static_cast<std::size_t>((std::max)(1, a_mask.w)), 0);
             for (int y = 0; y < a_mask.h; ++y) {
+                int rowN = 0;
                 for (int x = 0; x < a_mask.w; ++x) {
                     if (!a_mask.rows[y][x]) continue;
                     sx += static_cast<float>(x) + 0.5f;
                     sy += static_cast<float>(y) + 0.5f;
                     ++n;
+                    ++rowN;
+                    ++colN[static_cast<std::size_t>(x)];
+                    minX = (std::min)(minX, x); maxX = (std::max)(maxX, x);
+                    minY = (std::min)(minY, y); maxY = (std::max)(maxY, y);
                 }
+                maxRow = (std::max)(maxRow, rowN);
             }
-            const int box = (std::max)(1, a_mask.w * a_mask.h);
             if (n == 0) {
                 return { ImVec2(a_p0.x + a_mask.w * c * 0.5f,
                                 a_p0.y + a_mask.h * c * 0.5f), 1.0f };
             }
-            return { ImVec2(a_p0.x + sx / static_cast<float>(n) * c,
-                            a_p0.y + sy / static_cast<float>(n) * c),
-                     std::sqrt(static_cast<float>(n) / static_cast<float>(box)) };
+            int maxCol = 0;
+            for (const int v : colN) maxCol = (std::max)(maxCol, v);
+            // ★★The centre is the occupied BOX's middle, not the centroid.
+            //
+            // A centroid is pulled toward whichever side holds more cells: a T
+            // has three cells on its top row and two down its stem, so its
+            // centroid sits 0.4 of a cell above the middle and the sprite rides
+            // up by that much -- the crossbow's bow hung off the top edge while
+            // the bottom cell stayed empty.
+            //
+            // But the icon is DRAWN in the same shape as the footprint that was
+            // painted for it. The hole in a T is a hole in the picture too, so
+            // weighting by it moves the sprite away from the very cells it was
+            // meant to fill. Box against box is what lines them up.
+            //
+            // ★Occupied box, not the declared one, so a mask with an empty edge
+            // row still centres on what it actually covers. A painted shape is
+            // trimmed already (Editor's PainterToDef), so for those two the
+            // answer is identical -- and identical to plain w/2, h/2 for every
+            // solid rectangle, which is the 99% case.
+            const int bw = maxX - minX + 1;
+            const int bh = maxY - minY + 1;
+            const float fillX = static_cast<float>(maxRow) /
+                                static_cast<float>((std::max)(1, bw));
+            const float fillY = static_cast<float>(maxCol) /
+                                static_cast<float>((std::max)(1, bh));
+            return { ImVec2(a_p0.x + static_cast<float>(minX + maxX + 1) * 0.5f * c,
+                            a_p0.y + static_cast<float>(minY + maxY + 1) * 0.5f * c),
+                     (std::min)(fillX, fillY) };
         }
 
         void DrawItemsPass(View& a_view, const ImVec2& base)
@@ -2045,6 +2162,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const float fSc = it.def.fscale != 1.0f ? it.def.fscale : fbx.scale;
                 const float fRot = it.def.frot != 0.0f ? it.def.frot : fbx.rot;
                 const float fOfs = it.def.fx != 0.0f ? it.def.fx : fbx.x;
+                const float fOfsY = it.def.fy;   // the key xform has no Y
                 if (const auto* icon = iconPtr) {
                     // M1: mask-aware centre + size. fill == 1 and centre ==
                     // box middle for every solid rectangle.
@@ -2074,8 +2192,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         dw = icon->w / ms * target;
                         dh = icon->h / ms * target;
                     }
-                    const ImVec2 nudge = viaFallback ? RotatedOffset(fOfs, it.rot)
-                                                     : ImVec2(0.0f, 0.0f);
+                    // ★No longer drawn-icons-only. The nudge existed to correct
+                    // a ROTATED DRAWING's centre of mass, which a 3D capture
+                    // does not have -- but a free-form footprint gives a capture
+                    // the same problem from the other side: an L or a T has an
+                    // off-centre place the sprite belongs in, and the automatic
+                    // centre cannot know which. Both styles get to say.
+                    const ImVec2 nudge = RotatedOffset(fOfs, fOfsY, it.rot);
                     const ImVec2 c(fit.centre.x + nudge.x, fit.centre.y + nudge.y);
                     const float  deg = (viaFallback ? fRot : 0.0f) + it.rot * 90.0f;
                     DrawItemShadow(dl, icon->srv, c, dw, dh, deg);
@@ -2545,7 +2668,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // read (user report). Spell tomes keep the equip
                             // path -- that branch LEARNS them.
                             RequestBookRead(bk, it.uid, it.sig);
-                        } else {   // D3: right-click = equip (refresh even on reject)
+                        // ★Coins are a MIRROR of the gold ledger, not real
+                        // tiles, and the prompt bar already offers them no verb.
+                        // The old type gate refused them for the wrong reason
+                        // (they are MISC) and dropping the gate would have let a
+                        // click reach the engine with a coin form in hand — the
+                        // one place in this window where that is never wanted.
+                        // The pouch is excluded above by its own branch.
+                        } else if (GoldCoins::IsCoinForm(it.obj->GetFormID())) {
+                            // nothing: drag only
+                        } else {   // D3: right-click = use, the vanilla click
                             if (g_poolTrace) {
                                 const auto le = g_layout.count(it.key) ? g_layout[it.key]
                                                                       : LayoutEntry{};
@@ -2560,8 +2692,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // COUNT drops, and equipping never drops it, so the
                             // entry never cleared and repeated equips hid one
                             // more spare each time until the pool went blank.
-                            if (Equip::EquipItem(it.obj, "", it.uid, it.xlIdx,
-                                                 it.sig, it.key)) {
+                            // ★★UseItem, not EquipItem: a click is not a
+                            // request to WEAR. The old call went through the
+                            // doll's type gate, so anything outside
+                            // WEAP/ARMO/AMMO/LIGH/ALCH/SCRL was refused before
+                            // the engine ever saw it -- which is why mod items
+                            // whose whole purpose is "click me in the
+                            // inventory" did nothing at all (AddItemMenu).
+                            // it.count: what THIS tile holds. Ammo goes on by
+                            // the tileful (Equip::EquipCountFor); everything
+                            // else ignores it and takes one.
+                            Equip::UseItem(it.obj, it.uid, it.xlIdx, it.sig, it.key,
+                                           it.count);
+                            // ...and the board bookkeeping below runs only for
+                            // a unit that is actually LEAVING. A scripted item
+                            // stays put; vacating its cell would make it hop.
+                            if (Equip::IsWearOrConsume(it.obj)) {
                                 // right-click: weapons go to the right hand,
                                 // armour has only one place to go -- and a LIGHT
                                 // (torch) goes to the LEFT. Recording it as right
@@ -2572,7 +2718,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 int hand = 0;
                                 if (it.obj->Is(RE::FormType::Weapon)) hand = 1;
                                 else if (it.obj->Is(RE::FormType::Light)) hand = 2;
-                                NotePendingEquip(it.obj, it.uid, it.sig, hand, it.key);
+                                NotePendingEquip(it.obj, it.uid, it.sig, hand, it.key,
+                                                 Equip::EquipCountFor(it.obj, it.count));
                                 // stackables: name the tile that gives one up
                                 g_drainHint = { FormKey(it.obj), it.key };
                             }
@@ -2857,7 +3004,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid, std::uint16_t a_sig,
-                    int a_hand, bool a_swappedOut)
+                    int a_hand, bool a_swappedOut, int a_count)
     {
         if (!a_obj || g_held) return;
         const GridDef def = g_resolver ? g_resolver(a_obj) : GridDef{};
@@ -2891,7 +3038,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
         }
         g_held = Held{ std::move(carryKey), a_obj, std::move(m),
-                       1, def.bag != 0, def.scale, ox, oy, true };
+                       (std::max)(1, a_count), def.bag != 0, def.scale, ox, oy, true };
         g_held->fromDoll = true;   // still worn until the unequip lands
         g_held->hand = a_hand;
         g_held->uid = a_uid;   // GI25: the doll hands over the WORN sub-stack,
@@ -3277,11 +3424,44 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (!u.srcKey.empty()) inTransit.insert(u.srcKey);
             }
 
-            for (auto& [prefix, members] : pools) {
-                // the pool's remembered slots, ordered by where they ARE
-                std::vector<std::pair<std::string, LayoutEntry>> slots;
+            // Slots the pool ALREADY occupies come first, then the rest by
+            // position. When there are more slots than units -- an inactive
+            // preset holds one back, so its cell stays remembered while no
+            // tile uses it -- plain position order handed the survivors the
+            // TOPMOST cells and everything shifted up the moment the player
+            // emptied a cell in the middle. A tile must only move when its
+            // own unit left, so keep the cells that are in use and hold the
+            // spare ones for the units that are off the board.
+            const auto slotOrder = [](const auto& x, const auto& y) {
+                const bool xLive = g_prevKeys.contains(x.first);
+                const bool yLive = g_prevKeys.contains(y.first);
+                if (xLive != yLive) return xLive;
+                // ★The GI28 rule an older comment here described -- a STARRED
+                // slot sorts last so it is the one left unused when the pool
+                // shrinks -- is GONE, and was gone before that note was touched.
+                // It needed a favourite flag on the slot; GI33 moved favourites
+                // to the engine's own ExtraHotkey ("we only draw the star"),
+                // LayoutEntry lost the field, and the comparison went with it.
+                // Recorded because the behaviour it promised is a reasonable
+                // thing to want back, and the next reader should know it is
+                // absent rather than broken.
+                //
+                // A parked tile has no cell yet -- it must not sort to the
+                // front and take a placed sibling's position (GI30).
+                const bool xP = x.second.col < 0, yP = y.second.col < 0;
+                if (xP != yP) return !xP;
+                if (x.second.bag != y.second.bag) return x.second.bag < y.second.bag;
+                if (x.second.row != y.second.row) return x.second.row < y.second.row;
+                return x.second.col < y.second.col;
+            };
+            // The slots a pool remembers. ★One definition, used by both the
+            // inheritance pass and the placement loop -- they must agree on
+            // which slot is "spare", and two copies of this rule would be two
+            // chances to disagree.
+            const auto collectSlots = [&](const std::string& a_prefix) {
+                std::vector<std::pair<std::string, LayoutEntry>> s;
                 for (const auto& [k, le] : g_layout) {
-                    if (PoolOfKey(k) != prefix) continue;
+                    if (PoolOfKey(k) != a_prefix) continue;
                     // a trash-parked tile is not a board cell: its unit is already
                     // in the off-board list, so counting its slot here would leave
                     // slots > units and hand a survivor somebody else's cell
@@ -3291,37 +3471,109 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // (and restores it on cancel). Same for a queued equip --
                     // both are named by inTransit above.
                     if (inTransit.contains(k)) continue;
-                    slots.push_back({ k, le });
+                    s.push_back({ k, le });
                 }
-                // Slots the pool ALREADY occupies come first, then the rest by
-                // position. When there are more slots than units -- an inactive
-                // preset holds one back, so its cell stays remembered while no
-                // tile uses it -- plain position order handed the survivors the
-                // TOPMOST cells and everything shifted up the moment the player
-                // emptied a cell in the middle. A tile must only move when its
-                // own unit left, so keep the cells that are in use and hold the
-                // spare ones for the units that are off the board.
-                std::sort(slots.begin(), slots.end(), [](const auto& x, const auto& y) {
-                    const bool xLive = g_prevKeys.contains(x.first);
-                    const bool yLive = g_prevKeys.contains(y.first);
-                    if (xLive != yLive) return xLive;
-                    // GI28: a STARRED slot sorts last, so it is the one that goes
-                    // unused when the pool shrinks. The star is the player saying
-                    // "this one" -- when the favourites menu equips a dagger, the
-                    // cell that empties should be the one wearing the star, not
-                    // whichever happened to sort last. Routed removals never reach
-                    // this (they erase or withhold their own key first), so this
-                    // only decides shrinks the engine did behind our back --
-                    // exactly the Q-menu / hotkey case.
-                    // GI30: a parked star has no cell yet -- it must not sort to
-                    // the front and take a placed sibling's position
-                    const bool xP = x.second.col < 0, yP = y.second.col < 0;
-                    if (xP != yP) return !xP;
-                    if (x.second.bag != y.second.bag) return x.second.bag < y.second.bag;
-                    if (x.second.row != y.second.row) return x.second.row < y.second.row;
-                    return x.second.col < y.second.col;
-                });
+                std::sort(s.begin(), s.end(), slotOrder);
+                return s;
+            };
+            // The lowest free ordinal inside a pool.
+            const auto freeKeyIn = [&](const std::string& a_prefix) {
+                std::string k;
+                for (int n = 0;; ++n) {
+                    k = n == 0 ? a_prefix : a_prefix + "#" + std::to_string(n);
+                    if (!g_layout.contains(k) && GoldCoins::PinnedValue(k) < 0 &&
+                        !(g_held && k == g_held->key)) {
+                        return k;
+                    }
+                }
+            };
 
+            // ---- slot inheritance ------------------------------------------
+            //
+            // ★★A unit that changes POOL must not lose its CELL. Identity and
+            // placement are different questions: the signature answers "is this
+            // the same thing" and is allowed to change when the item really
+            // changes -- a blade gets poisoned, an enchantment spends charge,
+            // a stack of three splits when one is poisoned. Every one of those
+            // moves a unit from one pool to another, and without this pass the
+            // arriving pool has no remembered slots, so the tile is reborn
+            // unplaced and lands in the first free cell, while the pool it left
+            // has a slot too many that shifts its siblings by one. That is the
+            // reported bug, and it is unreproducible from inside the inventory
+            // because nothing done in the inventory causes it.
+            //
+            // Both halves happen in the SAME rebuild, so the surplus can simply
+            // be handed over: pools here are all one base (see PoolPrefix
+            // above), so an inherited cell always goes to the same kind of item.
+            //
+            // Not while a unit of this base is in transit -- a cursor carry or a
+            // queued equip still owns its slot and is coming back to it.
+            const bool inFlight = a_entry &&
+                !OffBoardUnitsFor(a_entry->object, a_base).empty();
+            if (a_mutate && a_instanceKeys && !inFlight) {
+                // ★Slots are gathered from the LAYOUT, not from `pools`. A pool
+                // only exists here while it still holds a unit, so the most
+                // ordinary case of all -- poisoning a lone dagger, where the
+                // clean pool empties completely -- leaves its cell in a pool
+                // nobody iterates. Walking the layout finds it; walking the
+                // pools cannot.
+                std::map<std::string,
+                         std::vector<std::pair<std::string, LayoutEntry>>> byPool;
+                for (const auto& [k, le] : g_layout) {
+                    if (BaseKey(k) != a_base) continue;
+                    if (le.bag == kTrashKey) continue;
+                    if (inTransit.contains(k)) continue;
+                    byPool[PoolOfKey(k)].push_back({ k, le });
+                }
+                const auto wantOf = [&](const std::string& a_prefix) -> std::size_t {
+                    const auto it = pools.find(a_prefix);
+                    if (it == pools.end()) return 0;   // pool is gone: all spare
+                    std::size_t w = it->second.size();
+                    if (const int h = hide[a_prefix]; h > 0) {
+                        w -= (std::min)(w, static_cast<std::size_t>(h));
+                    }
+                    return w;
+                };
+                std::vector<std::pair<std::string, LayoutEntry>> spare;
+                std::vector<std::pair<std::string, std::size_t>> shortfall;
+                for (auto& [prefix, s] : byPool) {
+                    std::sort(s.begin(), s.end(), slotOrder);
+                    const std::size_t want = wantOf(prefix);
+                    for (std::size_t j = want; j < s.size(); ++j) spare.push_back(s[j]);
+                }
+                for (auto& [prefix, members] : pools) {
+                    const auto        it = byPool.find(prefix);
+                    const std::size_t have = it == byPool.end() ? 0 : it->second.size();
+                    const std::size_t want = wantOf(prefix);
+                    if (have < want) shortfall.push_back({ prefix, want - have });
+                }
+                if (!spare.empty() && !shortfall.empty()) {
+                    std::sort(spare.begin(), spare.end(), slotOrder);
+                    for (const auto& [prefix, missing] : shortfall) {
+                        for (std::size_t n = 0; n < missing; ++n) {
+                            // Only a PLACED cell is worth inheriting; an unplaced
+                            // one carries no position and would just be churn.
+                            if (spare.empty() || spare.front().second.col < 0) break;
+                            const auto [oldKey, le] = spare.front();
+                            spare.erase(spare.begin());
+                            const std::string nk = freeKeyIn(prefix);
+                            LayoutEntry ne = le;
+                            ne.count = 1;   // one unit per gear slot
+                            g_layout.erase(oldKey);
+                            g_layout[nk] = ne;
+                            if (g_poolTrace) {
+                                SKSE::log::info("[POOL] inherit cell [{},{}] '{}' -> '{}'",
+                                    ne.col, ne.row, oldKey, nk);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (auto& [prefix, members] : pools) {
+                // the pool's remembered slots, ordered by where they ARE
+                std::vector<std::pair<std::string, LayoutEntry>> slots =
+                    collectSlots(prefix);
                 std::size_t want = members.size();
                 if (const int h = hide[prefix]; h > 0) {
                     want -= (std::min)(want, static_cast<std::size_t>(h));
@@ -3356,14 +3608,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (i < slots.size()) {
                         key = slots[i].first;
                     } else {
-                        // fresh unit: lowest free ordinal inside THIS pool
-                        for (int n = 0;; ++n) {
-                            key = n == 0 ? prefix : prefix + "#" + std::to_string(n);
-                            if (!g_layout.contains(key) && GoldCoins::PinnedValue(key) < 0 &&
-                                !(g_held && key == g_held->key)) {
-                                break;
-                            }
-                        }
+                        // fresh unit: lowest free ordinal inside THIS pool.
+                        // ★If a cell was available to inherit, the pass above
+                        // already claimed it and this unit is in `slots` -- so
+                        // reaching here means the unit is genuinely new to the
+                        // board, not one that merely changed pool.
+                        key = freeKeyIn(prefix);
                         if (a_mutate) {
                             g_layout[key] = LayoutEntry{ -1, -1, {}, 1 };
                             // ★Typed bags: THIS is the moment a tile first
@@ -3400,9 +3650,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // off the board (cursor, queued equip) still owns its slot until
                 // the transition completes, and pruning here erased whichever
                 // slot happened to sort last -- an innocent sibling half the time.
-                const bool ours = a_entry &&
-                    !OffBoardUnitsFor(a_entry->object, a_base).empty();
-                if (a_mutate && !ours) {
+                // ★Anything a sibling pool could use was already taken by the
+                // inheritance pass, which shares this loop's slot rule, so what
+                // is still surplus here has no claimant and can go.
+                if (a_mutate && !inFlight) {
                     for (std::size_t j = want; j < slots.size(); ++j) {
                         // GI30: a starred slot is being held for a unit that is
                         // on the body. Pruning it is exactly the deletion this
@@ -3724,15 +3975,51 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (g_held && g_held->obj && !g_held->fromPartner &&
                     FormKey(g_held->obj) == baseKey) {
                     carried = g_held->count;
-                    if (g_held->fromDoll && wornFree > 0 && carried > 0) {
-                        --wornFree;      // the carry IS one of the worn units
-                        --carried;       // ...so it is already out of `units`
+                    // ★★A carry that was DISPLACED BY A SWAP is not backed by
+                    // the worn list any more -- the unit that replaced it is.
+                    // The gear branch has always known this (its `stillWorn`
+                    // test); the stackable branch never got the rule, and for a
+                    // SAME-FORM swap that is fatal: the worn count stays at 100
+                    // because the NEW quiver is wearing it, so the displaced
+                    // hundred was credited as worn while also riding the cursor,
+                    // and the board grew a second hundred at the first free
+                    // cell. Different forms escaped it only because the old
+                    // form's worn count really does drop to zero.
+                    // Measured: stock=200 wornUnits=100 carried=0 place=100
+                    // owned=0 diff=100 -> a tile conjured out of the carry.
+                    const bool stillWorn = g_held->fromDoll && !g_held->swappedOut;
+                    if (stillWorn && carried > 0) {
+                        // ★As many as the carry actually holds, not one: a
+                        // quiver comes off the doll whole, and cancelling a
+                        // single unit against a 100-arrow carry left 99 of them
+                        // counted twice -- once as worn, once as carried.
+                        const int fromWorn = (std::min)(wornFree, carried);
+                        wornFree -= fromWorn;   // the carry IS those worn units
+                        carried  -= fromWorn;   // ...so they are already out of `units`
                     }
                 }
                 for (const auto& u : g_pendingEquip) {
                     if (u.base != baseKey) continue;
-                    if (wornFree > 0) --wornFree;   // the engine already took it
-                    else --units;                   // still in the pack: hide it now
+                    // ★u.units, not 1: an ammo equip takes the whole tile.
+                    const int n = (std::max)(1, u.units);
+                    const int fromWorn = (std::min)(wornFree, n);
+                    wornFree -= fromWorn;           // the engine already took these
+                    units -= (n - fromWorn);        // the rest are still in the pack
+                }
+                // ★A stackable carried off the DOLL is the one case where the
+                // carry and the board share a key namespace, and every quiver
+                // bug lived in these numbers. Kept behind the trace switch so
+                // the next one is a flag flip, not a rebuild of the reasoning.
+                const bool qTrace = g_poolTrace && g_held && g_held->obj &&
+                                    g_held->fromDoll &&
+                                    FormKey(g_held->obj) == baseKey;
+                if (qTrace) {
+                    SKSE::log::info(
+                        "[QUIVER] {} stock={} wornUnits={} units={} carried={} "
+                        "wornFree={} carry={}x'{}' swappedOut={} pend={}",
+                        obj->GetName(), count, wornUnits, units, carried, wornFree,
+                        g_held->count, g_held->key, g_held->swappedOut,
+                        g_pendingEquip.size());
                 }
                 if (units <= 0) continue;        // the single worn copy: doll only
                 const int tiles = (units + cap - 1) / cap;
@@ -4099,6 +4386,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 for (auto& s : slots) owned += (std::max)(0, s.le.count);
 
                 int diff = placeUnits - owned;
+                if (qTrace) {
+                    std::string ks;
+                    for (const auto& s : slots) {
+                        ks += " '" + s.key + "'x" + std::to_string(s.le.count);
+                    }
+                    SKSE::log::info("[QUIVER] place={} owned={} diff={} slots{}",
+                                    placeUnits, owned, diff, ks.empty() ? " (none)" : ks);
+                }
                 if (diff > 0) {
                     // ACQUIRE: fill partial tiles top-left, then spill into new tiles
                     for (auto& s : slots) {
@@ -4950,7 +5245,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     void NotePendingEquip(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
-                          std::uint16_t a_sig, int a_hand, const std::string& a_srcKey)
+                          std::uint16_t a_sig, int a_hand, const std::string& a_srcKey,
+                          int a_units)
     {
         if (!a_obj) return;
         // mayBeWorn = TRUE: this unit is mid-transition. Before the engine
@@ -4965,7 +5261,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // the real cell. That round trip is the "spare dagger blinks" report.
         NoteVacated(a_srcKey, a_obj);   // GI28
         g_pendingEquip.push_back({ FormKey(a_obj), a_uid, a_sig, "equipping",
-                                   true, false, a_hand, a_srcKey, /*arriving=*/true });
+                                   true, false, a_hand, a_srcKey, /*arriving=*/true,
+                                   (std::max)(1, a_units) });
         g_pendingEquipWhen = std::chrono::steady_clock::now();
     }
 
@@ -5048,7 +5345,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // nothing changed on screen.
                 const std::uint16_t tsig = xl ? InstanceSig(xl) : 0;
                 const bool on = PoolHasStar(entry, f.uid, tsig);
-                if (on) {
+                if (on && !xl) {
+                    // ★Turning the PLAIN pool off. Its star is not on a list of
+                    // its own -- there is none -- so naming the pool would match
+                    // nothing and the toggle would jam in the "on" position.
+                    // Every star on the entry comes off instead, which is the
+                    // same coarseness the "on" side already accepted: the plain
+                    // pool and its variant siblings share one mark, so they turn
+                    // off together too. A toggle that cannot be untoggled is the
+                    // one outcome worth avoiding here.
+                    std::vector<std::string> all;
+                    if (entry->extraLists) {
+                        for (auto* x : *entry->extraLists) {
+                            if (x && x->HasType<RE::ExtraHotkey>()) all.push_back(poolOf(x));
+                        }
+                    }
+                    clearPools(all);
+                } else if (on) {
                     clearPools({ PoolPrefix(base, f.uid, tsig) });
                 } else if (xl) {
                     xl->Add(new RE::ExtraHotkey(RE::ExtraHotkey::Hotkey::kUnbound));
@@ -5064,6 +5377,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                     clearPools(lifted);
+                    // ★★SetFavorite's second parameter names the UNIT, and null
+                    // is the only honest value for a plain unit: it has no list
+                    // to point at, which is the whole reason this branch exists.
+                    // The engine then picks for itself, and MEASUREMENT settled
+                    // what it picks -- it mints a fresh list only when the entry
+                    // has none at all; with even one variant present it writes
+                    // into that variant's list instead. Calling again does not
+                    // move it along either (verified: a second call is refused
+                    // outright while any star exists).
+                    //
+                    // So there is no way to aim this call at a plain unit, and
+                    // the star it produces is ACCEPTED where it lands rather
+                    // than reverted. Reverting was tried first and it removed
+                    // the wrong thing -- it left the player unable to favourite
+                    // an ordinary dagger at all, which is worse than the star
+                    // being coarse. PoolHasStar reads any entry star as the
+                    // plain pool's, so the tile the player pointed at does light
+                    // up; its variant sibling lights up with it. Same dagger,
+                    // one mark between them.
                     changes->SetFavorite(entry, nullptr);
                     // Re-walk the CURRENT list and restore by POOL, so a list
                     // the split rebuilt is matched by what it holds, not by an
@@ -5077,6 +5409,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                 }
+                // ★Back behind the trace switch. It was unconditional while the
+                // question was open, and it answered it: the engine mints a list
+                // only for an entry that has none, so "via=engine" on an entry
+                // with variants always lands on a sibling. Nothing left to catch
+                // here every press.
                 if (g_poolTrace) {
                     std::string ls;
                     if (entry->extraLists) {
@@ -5091,9 +5428,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 x2->HasType<RE::ExtraHotkey>() ? " HOT" : "");
                         }
                     }
-                    SKSE::log::info("[FAV] toggle uid {:04X} xl {} was={} via={} | {}",
+                    SKSE::log::info("[FAV] toggle uid {:04X} xl {} was={} via={}"
+                                    " asked='{}' hit='{}' | {}",
                         f.uid, f.xlIdx, on ? "on" : "off",
-                        xl ? "self" : "engine", ls.empty() ? "-" : ls);
+                        xl ? "self" : "engine",
+                        PoolPrefix(base, f.uid, tsig),
+                        xl ? poolOf(xl) : std::string("-"),
+                        ls.empty() ? "-" : ls);
                 }
                 break;
             }
@@ -5788,12 +6129,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return ExtraForPoolImpl(a_entry, a_uid, a_sig);
     }
 
-    RE::ExtraDataList* ExtraForPoolOnPartner(RE::InventoryEntryData* a_entry,
-                                             std::uint16_t a_uid, std::uint16_t a_sig)
-    {
-        return ExtraForPoolImpl(a_entry, a_uid, a_sig, /*allowWorn=*/true);
-    }
-
     UnitChoice PoolChoice(RE::InventoryEntryData* a_entry, std::uint16_t a_uid,
                           std::uint16_t a_sig, bool a_nameWorn, bool a_wornLegal)
     {
@@ -5948,9 +6283,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         const ImVec2 c(a_centre.x + off, a_centre.y + off);
         const ImVec2 sz(a_dw, a_dh);
 
+        // ★★A LIGHT shadow needs the sprite's ALPHA without its colour, which a
+        // tint cannot give: black collapses the RGB and the alpha draws the
+        // shape, white multiplies to the sprite itself and the "shadow" comes
+        // out as offset copies of the item. UIRoot::BeginSilhouette swaps in a
+        // pixel shader that reads the alpha alone, so on a dark board the halo
+        // is finally a halo.
+        // Which skins want it is the skin's own answer — Theme::LightItemShadow.
+        const bool wantLight = Theme::LightItemShadow();
+        const ImU32 ink = wantLight ? IM_COL32(255, 255, 255, 255)
+                                    : IM_COL32(0, 0, 0, 255);
+        const bool sil = wantLight && UIRoot::BeginSilhouette(a_dl);
+        // ★If the shader is missing, fall back to BLACK rather than drawing
+        // white through the ordinary path — that is exactly the smear.
+        const ImU32 base = sil ? ink : IM_COL32(0, 0, 0, 255);
+
         if (blur < 0.05f) {
             const int a = static_cast<int>(opac * 255.0f + 0.5f);
-            if (a > 0) AddImageRot(a_dl, a_srv, c, sz, a_deg, IM_COL32(0, 0, 0, a));
+            if (a > 0) {
+                AddImageRot(a_dl, a_srv, c, sz, a_deg, (base & 0x00FFFFFFu) | (a << 24));
+            }
+            if (sil) UIRoot::EndSilhouette(a_dl);
             return;
         }
 
@@ -5983,8 +6336,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // only some of the stamps reach, falls off on its own.
         const float per = 1.0f - std::pow(1.0f - opac, 1.0f / static_cast<float>(taps));
         const int   pa  = static_cast<int>(per * 255.0f + 0.5f);
-        if (pa <= 0) return;
-        const ImU32 col = IM_COL32(0, 0, 0, pa);
+        if (pa <= 0) {
+            if (sil) UIRoot::EndSilhouette(a_dl);
+            return;
+        }
+        const ImU32 col = (base & 0x00FFFFFFu) | (static_cast<ImU32>(pa) << 24);
 
         AddImageRot(a_dl, a_srv, c, sz, a_deg, col);
         constexpr float kStep = 6.28318531f / static_cast<float>(kSpokes);
@@ -5994,14 +6350,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 ImVec2(c.x + std::cos(t) * blur, c.y + std::sin(t) * blur),
                 sz, a_deg, col);
         }
-        if (!twoRing) return;
-        const float ir = blur * 0.55f;
-        for (int i = 0; i < kSpokes; ++i) {
-            const float t = (static_cast<float>(i) + 0.5f) * kStep;
-            AddImageRot(a_dl, a_srv,
-                ImVec2(c.x + std::cos(t) * ir, c.y + std::sin(t) * ir),
-                sz, a_deg, col);
+        if (twoRing) {
+            const float ir = blur * 0.55f;
+            for (int i = 0; i < kSpokes; ++i) {
+                const float t = (static_cast<float>(i) + 0.5f) * kStep;
+                AddImageRot(a_dl, a_srv,
+                    ImVec2(c.x + std::cos(t) * ir, c.y + std::sin(t) * ir),
+                    sz, a_deg, col);
+            }
         }
+        // ★Every exit from this function has to pass through here — a shader
+        // left bound would repaint the whole rest of the frame as silhouettes.
+        if (sil) UIRoot::EndSilhouette(a_dl);
     }
 
     // ★★See Grid.h. ONE wedge per item, at the footprint's top-right.
@@ -6734,6 +7094,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             } else if (a_obj->Is(RE::FormType::AlchemyItem) ||
                        a_obj->Is(RE::FormType::Ingredient)) {
                 verb = Lang::Str::ActUse;   // drunk / eaten, not worn
+            } else if (!(a_obj->Is(RE::FormType::Weapon) ||
+                         a_obj->Is(RE::FormType::Armor) ||
+                         a_obj->Is(RE::FormType::Ammo) ||
+                         a_obj->Is(RE::FormType::Light) ||
+                         a_obj->Is(RE::FormType::Scroll))) {
+                // ★Misc, keys, soul gems: nothing here is WORN, so the bar
+                // promising "equip" was wrong on every one of them. The click
+                // now reaches the engine (Equip::UseItem), and a mod is free to
+                // make any of these do something — so offer the word vanilla
+                // uses and let the item answer.
+                verb = Lang::Str::ActUse;
             }
 
             // ★GI64: nothing is PRINTED here any more. The verb is still worked
@@ -7210,8 +7581,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     dw = icon->w / ms * target;
                     dh = icon->h / ms * target;
                 }
-                const ImVec2 nudge = heldFallback ? RotatedOffset(hOfs, a_held.rot)
-                                                  : ImVec2(0.0f, 0.0f);
+                // both styles, like the board tile -- a carried item must look
+                // exactly like the tile it was lifted from
+                const ImVec2 nudge = RotatedOffset(hOfs, hdef.fy, a_held.rot);
                 // ★GI62e: the sprite must revolve about THE PIVOT, not about the
                 // middle of its footprint. On a cell-pivot item those are two
                 // different points, and spinning about the middle swings the
@@ -7722,21 +8094,28 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // on a slot equipped an arbitrary copy: pass the carried unit's own
             // identity instead of re-deriving a partial one from its key.
             const bool accepted = Equip::EquipItem(a_held.obj, g_slotTarget, a_held.uid,
-                                                   a_held.xlIdx, a_held.sig, a_held.key);
+                                                   a_held.xlIdx, a_held.sig, a_held.key,
+                                                   a_held.count);   // ammo: the whole carry
             // Same interim gap as the right-click path: the carry ends NOW but
             // the engine equips later, so the tile would flicker back into the
             // cell it just left.
             if (g_poolTrace) {
-                SKSE::log::info("[ACT] drop-on-slot '{}' <- '{}' key '{}' | occupant {} "
-                                "swap={} accepted={}",
-                    g_slotTarget, a_held.obj ? a_held.obj->GetName() : "?", a_held.key,
-                    worn ? worn->GetName() : "(empty)", swapping, accepted);
+                // ★The COUNTS earn their place here: "swap=true accepted=true"
+                // looked healthy through three wrong diagnoses, and it was the
+                // quantities either side of the swap that finally told the story.
+                SKSE::log::info("[SWAP] slot '{}' <- '{}' x{} key '{}' | occupant '{}' x{} "
+                                "wxl={} swap={} accepted={}",
+                    g_slotTarget, a_held.obj ? a_held.obj->GetName() : "?", a_held.count,
+                    a_held.key, worn ? worn->GetName() : "(empty)",
+                    Equip::WornCountAt(g_slotTarget),
+                    wxl ? "yes" : "no", swapping, accepted);
             }
             if (accepted) {
                 // GI54: the INCOMING item's engine hand, not the occupant's --
                 // a shield replacing a left-hand sword is still hand 0.
                 NotePendingEquip(a_held.obj, a_held.uid, a_held.sig,
-                                 engineHand(a_held.obj), a_held.key);
+                                 engineHand(a_held.obj), a_held.key,
+                                 Equip::EquipCountFor(a_held.obj, a_held.count));
                 g_drainHint = { FormKey(a_held.obj), a_held.key };
             }
             g_held.reset();
@@ -7748,7 +8127,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // pickup -- and it must name the HAND, or the worn-unit match can
                 // consume the copy we just put IN and leave the displaced one
                 // counted on the board as well as on the cursor.
-                BeginCarry(worn, wuid, wsig, wornHand, /*swappedOut=*/true);
+                // ★...and the displaced quiver comes back WHOLE, same as any
+                // other unequip. ★Asked of the SLOT, not of wxl: ammo can be
+                // worn with no ExtraDataList at all, and `wxl ? GetCount() : 1`
+                // then answered 1 for a hundred-arrow quiver -- ninety-nine of
+                // them went to the pack instead of onto the cursor.
+                BeginCarry(worn, wuid, wsig, wornHand, /*swappedOut=*/true,
+                           Equip::EquipCountFor(worn,
+                               Equip::WornCountAt(g_slotTarget)));
             }
             g_needRebuild = true;
             return true;

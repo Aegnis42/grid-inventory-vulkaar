@@ -4,16 +4,16 @@
 /*
 
 # --- plugin source ---
+# ★Everything CMakeLists.txt compiles must be here. Fallback.* and api/ were
+# excluded as "dead in build", and both had stopped being that: Fallback is the
+# 2D icon path (main/Editor/Equip/Grid all call it) and api/ carries HostApi.cpp
+# — all four are named in the source list, so a clone could not build. Before
+# adding an exclusion here, check the file against CMakeLists first.
 !/plugin/
 /plugin/*
 !/plugin/src/
 !/plugin/CMakeLists.txt
 !/plugin/vcpkg.json
-# dead-in-build files stay local: Fallback.* (unused 2D icon set, not in
-# CMakeLists) and api/ (unimplemented ABI design draft for the sockets mod)
-/plugin/src/ui/Fallback.cpp
-/plugin/src/ui/Fallback.h
-/plugin/src/api/
 
 # --- docs shipped with the mod ---
 !/README_KO.md

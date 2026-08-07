@@ -18,14 +18,52 @@ namespace FUI::Equip
     // sub-stack -- so equipping the enchanted one of three identical swords was
     // a coin flip. nullptr/0/-1 keeps the old "engine picks" behaviour for
     // callers that genuinely have no instance in hand.
+    // a_tileCount: what the tile being acted on holds. Only AMMO uses it (see
+    // EquipCountFor); every other form is equipped one at a time whatever the
+    // tile holds.
     bool EquipItem(RE::TESBoundObject* a_obj, const std::string& a_slotId,
                    std::uint16_t a_uid = 0, int a_xlIdx = -1, std::uint16_t a_sig = 0,
-                   const std::string& a_srcKey = {});
+                   const std::string& a_srcKey = {}, int a_tileCount = 1);
+
+    // ★★A quiver is not equipped one arrow at a time. Vanilla puts the whole
+    // lot on your back, and here the TILE owns the count (G4) -- so equipping a
+    // tile equips what that tile holds, and 200 arrows across two tiles means
+    // clicking one leaves the other in the pack. Taking a single arrow off a
+    // stack was the old behaviour and it was wrong twice over: it did not match
+    // vanilla, and the leftover split lists are what made repeated clicks eat
+    // the stack.
+    // Everything else stays at one: a tile of ten potions is ten drinks.
+    [[nodiscard]] int EquipCountFor(RE::TESBoundObject* a_obj, int a_tileCount);
+
+    // ★★USING is not WEARING, and only the first has a type gate that makes
+    // sense. EquipItem's whitelist answers "will a doll slot take this?" —
+    // asking it "does clicking this do anything?" made us answer ON BEHALF OF
+    // THE ENGINE, and we are not entitled to: a mod can build a click-me item
+    // out of whatever record type suits it (AddItemMenu's cube), its script
+    // reacts to the equip, and a whitelist can never know about it. The
+    // vanilla inventory does not pre-judge either — it hands the item over and
+    // lets the engine decide. So does this.
+    // Same queue, same tick, no slot: the engine picks what the click means.
+    bool UseItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0, int a_xlIdx = -1,
+                 std::uint16_t a_sig = 0, const std::string& a_srcKey = {},
+                 int a_tileCount = 1);
+
+    // Does using this take the unit OFF the board — worn, drunk, eaten, learnt?
+    // The board bookkeeping (vacate the cell, forget the tile, hint the drain)
+    // must run for those and NOT for a scripted item that is only being poked:
+    // forgetting the cell of something that never left makes it jump to the
+    // first free slot on every click.
+    [[nodiscard]] bool IsWearOrConsume(RE::TESBoundObject* a_obj);
 
     // The object / sub-stack worn in a doll slot ("weapon", "shieldL", "head"...).
     // Needed by anything that must act on the WORN copy rather than the form.
     [[nodiscard]] RE::TESBoundObject* WornObjectAt(const std::string& a_slotId);
     [[nodiscard]] RE::ExtraDataList*  WornExtraAt(const std::string& a_slotId);
+    // ★How many units the slot wears. NOT derivable from WornExtraAt: ammo can
+    // be worn with no ExtraDataList at all, and reading GetCount() off a null
+    // list quietly answered "1" for a hundred-arrow quiver. The slot already
+    // knows the number (CollectEquipment counts it) — ask the slot.
+    [[nodiscard]] int WornCountAt(const std::string& a_slotId);
 
     // Equip/unequip requests queue here and execute in the game-update hook
     // (UIRoot::Tick) — calling ActorEquipManager inside the UI RENDER pass

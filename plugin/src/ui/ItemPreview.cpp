@@ -67,25 +67,19 @@ namespace FUI
         LightProbe g_probe;
 
         // the one MenuLight that is actually attached to the scene (bsLight
-        // non-null) — the survey showed exactly one, on the inventory scheme
-        // ★DIAGNOSTIC: which slot answered. The engine could attach a DIFFERENT
-        // MenuLight when it rebuilds the scheme, in which case we would be
-        // writing to a slot nothing reads any more — indistinguishable from
-        // "the write was ignored" without recording the index.
-        int g_lightSlot = -1;
-
+        // non-null) — the survey showed exactly one, on the inventory scheme.
+        // ★The slot INDEX used to be recorded here, in case the engine ever
+        // attached a different MenuLight on a scheme rebuild. It never did:
+        // the 1.0.5 capture-light investigation ran the comparison to its end
+        // and the answer held every time, so the index and the two loggers
+        // that read it are gone.
         [[nodiscard]] RE::MenuLight* AttachedMenuLight()
         {
             auto* sm = RE::UI3DSceneManager::GetSingleton();
             if (!sm) return nullptr;
-            for (std::uint32_t i = 0; i < sm->menuLights.size(); ++i) {
-                RE::MenuLight* L = sm->menuLights[i];
-                if (L && L->light) {
-                    g_lightSlot = static_cast<int>(i);
-                    return L;
-                }
+            for (RE::MenuLight* L : sm->menuLights) {
+                if (L && L->light) return L;
             }
-            g_lightSlot = -1;
             return nullptr;
         }
 
@@ -135,18 +129,8 @@ namespace FUI
         // tiny compared to the sphere, not larger than it, so the scaling
         // clamped to 1.00 on every single item and changed nothing. Whatever
         // makes armour ignore its angle, it is not the light's reach.
-        // ★DIAGNOSTIC (1.0.5, temporary): what the lamp held immediately BEFORE
-        // we wrote it. Deliberately assumes nothing about WHY a recapture
-        // ignores the setting — it just records the lamp every frame a tuned
-        // item is parked, so the log shows whether the value survives, when it
-        // stops surviving, and in what order items were processed.
-        RE::NiPoint3 g_lightBefore{};
-
         void PlaceLight(float a_azOff, float a_elOff)
         {
-            if (const RE::MenuLight* probe = AttachedMenuLight()) {
-                g_lightBefore = probe->translate;
-            }
             const float az = (kBaseAzDeg + a_azOff) * kDeg2Rad;
             const float el = (kBaseElDeg + a_elOff) * kDeg2Rad;
             const float rh = kLightDist * std::cos(el);
@@ -213,15 +197,6 @@ namespace FUI
     bool ItemPreview::ParkSettled() const
     {
         return m_parkTicks >= 2;
-    }
-
-    void ItemPreview::LogLightNow(const char* a_tag, const char* a_item)
-    {
-        RE::NiPoint3 p{};
-        if (const RE::MenuLight* L = AttachedMenuLight()) p = L->translate;
-        SKSE::log::info("[LIGHT] f{} {} '{}' slot={} lamp=({:.0f},{:.0f},{:.0f})",
-            ImGui::GetFrameCount(), a_tag, a_item ? a_item : "-", g_lightSlot,
-            p.x, p.y, p.z);
     }
 
     ItemPreview* ItemPreview::GetSingleton()
@@ -547,21 +522,6 @@ namespace FUI
         // application, so the pixels it accepts were rendered after this one —
         // not with whatever the previous item left behind.
         if (m_parkTicks < 2) ++m_parkTicks;
-        // ★Log only the frame the lamp actually MOVES on — one line per tuned
-        // item instead of one per frame. The per-frame time series answered its
-        // question (the value holds; the engine never resets it) and would
-        // otherwise bury the log during a precache.
-        if ((std::fabs(m_lightAz) > 0.5f || std::fabs(m_lightEl) > 0.5f)) {
-            RE::NiPoint3 after{};
-            if (const RE::MenuLight* L = AttachedMenuLight()) after = L->translate;
-            if (std::fabs(after.x - g_lightBefore.x) > 0.5f ||
-                std::fabs(after.y - g_lightBefore.y) > 0.5f ||
-                std::fabs(after.z - g_lightBefore.z) > 0.5f) {
-                SKSE::log::info("[LIGHT] '{}' az{:+.0f} el{:+.0f} -> ({:.0f},{:.0f},{:.0f})",
-                    m_current ? m_current->GetName() : "-", m_lightAz, m_lightEl,
-                    after.x, after.y, after.z);
-            }
-        }
 
         if (m_inspectScale > 0.0f) {
             if (m_scaledNode != model) {

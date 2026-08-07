@@ -98,9 +98,12 @@ namespace FUI::Grid
     // a_swappedOut: this unit was DISPLACED by a drop onto an occupied slot, so
     // the engine unequips it as part of that same equip. It stops counting as
     // worn the moment the equip lands, not when an unequip of its own runs.
+    // a_count: how many units ride the cursor. One for anything worn a copy at
+    // a time — but a quiver is unequipped whole, so the carry has to be whole
+    // too, or the rest of it lands in the pack the instant it comes off.
     void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0,
                     std::uint16_t a_sig = 0, int a_hand = 0,
-                    bool a_swappedOut = false);
+                    bool a_swappedOut = false, int a_count = 1);
 
     // Phase 5-B: carry a PARTNER (merchant/container) item on the cursor.
     // Dropping it onto the player grid takes (loot) or buys (barter).
@@ -132,9 +135,11 @@ namespace FUI::Grid
     // resolves on a stock-count drop, which equipping never causes.
     // a_srcKey: the board tile the unit left from ("" if it came off the doll).
     // The pool holds that cell open until the engine applies the equip.
+    // a_units: how many the equip takes. 1 for anything worn a copy at a time;
+    // the whole tile for ammo, which is equipped by the quiverful.
     void NotePendingEquip(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
                           std::uint16_t a_sig, int a_hand = 0,
-                          const std::string& a_srcKey = {});
+                          const std::string& a_srcKey = {}, int a_units = 1);
     // Right-click on a book or note: show it in the game's OWN Book Menu.
     // Queued here, opened on the Tick — the menu must not be raised from
     // inside the render pass. While it is up, UIRoot stands down completely
@@ -501,15 +506,11 @@ namespace FUI::Grid
     // a_xl == nullptr (a plain unit / an aggregate) falls back to the base value.
     [[nodiscard]] int UnitValueWith(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl);
 
-    // Same, for a NON-PLAYER source (container / corpse / mark / merchant). The
-    // player-side resolver refuses worn lists on purpose -- it must never hand a
-    // sell or a trash the item in your hand. The partner board deliberately SHOWS
-    // worn gear, though, so a take there has to be able to name it; otherwise the
-    // resolver answers nullptr, the engine chooses, and looting an equipped sword
-    // can move an unequipped copy instead.
-    [[nodiscard]] RE::ExtraDataList* ExtraForPoolOnPartner(RE::InventoryEntryData* a_entry,
-                                                           std::uint16_t a_uid,
-                                                           std::uint16_t a_sig);
+    // (A NON-PLAYER source needs the same answer with worn lists ALLOWED — the
+    // partner board deliberately shows worn gear, so a take there has to be
+    // able to name it. That is PoolChoice's a_nameWorn, not a resolver of its
+    // own: the standalone ExtraForPoolOnPartner wrapper was left with no
+    // callers once PoolChoice absorbed the case, and went in 1.0.5.)
 
     // Content signature of a sub-stack (0 = none). Stable across container moves.
     [[nodiscard]] std::uint16_t InstanceSigOf(RE::ExtraDataList* a_xl);
@@ -605,14 +606,19 @@ namespace FUI::Grid
     // to turn with it, or a rotated bow drifts along the wrong axis.
     // ★Lives in the header because BOTH boards draw rotated sprites -- the same
     // rule written twice is the same rule until the day one copy is edited.
-    [[nodiscard]] inline ImVec2 RotatedOffset(float a_cells, int a_rot)
+    // ★Two axes now. The one-axis form turned (cells, 0) by the tile's rotation;
+    // this turns (x, y) by the same quarter turns, and reduces to the old
+    // results exactly when y is 0 -- rot 1 sent (c,0) to (0,c), which is what
+    // (-y, x) gives.
+    [[nodiscard]] inline ImVec2 RotatedOffset(float a_x, float a_y, int a_rot)
     {
-        const float px = a_cells * CellPx();
+        const float px = a_x * CellPx();
+        const float py = a_y * CellPx();
         switch (a_rot & 3) {
-        case 1:  return ImVec2(0.0f, px);
-        case 2:  return ImVec2(-px, 0.0f);
-        case 3:  return ImVec2(0.0f, -px);
-        default: return ImVec2(px, 0.0f);
+        case 1:  return ImVec2(-py, px);
+        case 2:  return ImVec2(-px, -py);
+        case 3:  return ImVec2(py, -px);
+        default: return ImVec2(px, py);
         }
     }
 }

@@ -2033,8 +2033,9 @@ namespace FUI::LootBarter
                         p0, ImVec2(p0.x + bw, p0.y + bh), it.rot);
                     const bool cellFallback = cellIcon && !cache->Get(it.obj);
                     const auto cdef = Grid::ResolveDef(it.obj);
-                    const ImVec2 nudge = cellFallback ? Grid::RotatedOffset(cdef.fx, it.rot)
-                                                      : ImVec2(0.0f, 0.0f);
+                    // both styles — the partner board draws the same item the
+                    // player's board does, and one offset rule serves both
+                    const ImVec2 nudge = Grid::RotatedOffset(cdef.fx, cdef.fy, it.rot);
                     const float pdeg = (cellFallback ? cdef.frot : 0.0f) + it.rot * 90.0f;
                     // ★1.0.5: same shadow as the player's board
                     Grid::DrawItemShadow(dl, icon->srv,

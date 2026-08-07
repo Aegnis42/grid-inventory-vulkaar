@@ -17,6 +17,7 @@ namespace FUI::Theme
         ImVec4 inkDim;     // secondary text
         ImVec4 winBg;      // window background (kept fully opaque: parking)
         ImVec4 glyph;      // item/silhouette tint
+        // ★Hand-tuned per skin, and it stays that way — see OccupiedGround().
         ImVec4 shade;      // occupied-cell overlay
         ImVec4 sel;        // selection / highlight
         ImVec4 filled;     // equipped-slot border accent
@@ -29,7 +30,7 @@ namespace FUI::Theme
         // OATHVEIN UNTARNISHED (v10.4) grammar — default false for other skins
         bool  cornerFade = false;      // borders drawn as corner-fade lines (no full border)
         bool  topStrip = false;        // 2px crimson strip across the window top
-        bool  titleGlow = false;       // glowing title + right-fading underline
+        bool  titleGlow = false;       // glowing title (the underline was removed in 1.0.5)
         bool  diamondLabels = false;   // section labels: "◇ LABEL" in sel colour
         // ★The frame is DRAWN now, not sampled — see Theme::TornPanel. Its two
         // texture-era companions (tornGlowB, tornTex) were removed with the
@@ -63,7 +64,11 @@ namespace FUI::Theme
         // why six existing skins need no edits at all.
         ImVec4 cellBg{ 0.0f, 0.0f, 0.0f, 0.0f };        // empty-cell fill
         ImVec4 cellGroove{ 0.0f, 0.0f, 0.0f, 0.0f };    // groove, dark
-        ImVec4 cellGrooveLt{ 0.0f, 0.0f, 0.0f, 0.0f };  // groove, centre line
+        // ★A `cellGrooveLt` (the groove's light centre line) sat here until
+        // 1.0.5. The carved look above is drawn WITHOUT it — kGrooveW says the
+        // panel simply shows through — so seventeen skins were each carrying a
+        // colour nothing sampled. Removing it shifted every following token up
+        // one slot, which is exactly the hazard the note below describes.
         ImVec4 btnFace{ 0.0f, 0.0f, 0.0f, 0.0f };       // button face
         // 규칙 96: the open bag's tile. Was a file-local constant in Grid.cpp;
         // the default IS that constant, so nothing moves for the other skins.
@@ -191,19 +196,21 @@ namespace FUI::Theme
     // the shadow style that briefly borrowed the slot. Nothing READS them any
     // more; they stay so the "!disp<skin>" line keeps its 13 fields and an ini
     // written by any 1.0.x build still parses. Do not add call sites.
-    [[nodiscard]] int  GlowStyle();
-    void SetGlowStyle(int a_style);
+    // ★Only the *Of pair survives, because only it earns the keep: persistence
+    // names the skin and slot explicitly. The active-skin conveniences
+    // (GlowStyle/SetGlowStyle) served the settings UI that is gone, so they
+    // were dead in the ini sense too — removed in 1.0.5.
     [[nodiscard]] int  GlowStyleOf(int a_skin, int a_slot);
     void SetGlowStyleOf(int a_skin, int a_slot, int a_style);
 
     // rarity glow brightness (0.2~2.5). Kept per GLOW style as well, so the
     // full key is [icon style][glow style]. GlowGain()/SetGlowGain() act on the
-    // active pair; *Of names the glow style within the active icon style; *At
-    // names both and is what persistence uses. Scales per-rarity tint alphas.
+    // active pair; *At names both and is what persistence uses. Scales
+    // per-rarity tint alphas.
+    // (The *Of middle pair — glow style within the active icon style — went
+    // with the settings UI that called it; see the legacy note above.)
     [[nodiscard]] float GlowGain();
     void SetGlowGain(float a_gain);
-    [[nodiscard]] float GlowGainOf(int a_style);
-    void SetGlowGainOf(int a_style, float a_gain);
     [[nodiscard]] float GlowGainAt(int a_skin, int a_slot, int a_style);
     void SetGlowGainAt(int a_skin, int a_slot, int a_style, float a_gain);
 
@@ -325,7 +332,8 @@ namespace FUI::Theme
     [[nodiscard]] const ImVec4& TipGood();   // temper, enchantment
     [[nodiscard]] const ImVec4& TipBad();    // "cannot", overload
     [[nodiscard]] const ImVec4& TipSub();    // hints, shop price
-    [[nodiscard]] const ImVec4& TipBody();   // running text
+    // (no TipBody accessor: the body ink is pushed by PushTipStyle below and
+    // was never read anywhere else)
     // push/pop around BeginTooltip: dark ground + pale hairline + body ink
     void PushTipStyle();
     void PopTipStyle();
@@ -384,7 +392,16 @@ namespace FUI::Theme
     // sk.shade with their own alpha (doll 1.0, board the token's own), so one
     // colour said "occupied" loudly on one half of the window and almost
     // nothing on the other.
+    // ★Deriving this from the panel was tried twice and reverted twice — the
+    // reasoning, the measurements and why they were misleading are recorded at
+    // the implementation in Theme.cpp. Read that before trying a third time.
     [[nodiscard]] ImU32 OccupiedGround();
+
+    // ★Does this skin want the item shadow drawn LIGHT instead of black? A
+    // black shadow separates a sprite from a pale board; on a dark one it is
+    // the same colour as the problem. Which skins want which is a per-skin
+    // judgement — see the implementation for why it is not derived.
+    [[nodiscard]] bool LightItemShadow();
 
     // ── type scale ─────────────────────────────────────────────────────────
     // ★Four steps, and the title is the only maximum. They were all 20 —
@@ -415,6 +432,83 @@ namespace FUI::Theme
     [[nodiscard]] ImU32 GaugeTrack();   // the empty part
     [[nodiscard]] ImU32 GaugeFill();
     [[nodiscard]] ImU32 GaugeBorder();
+
+    // ★★The number centred on a gauge, drawn by US so it can carry the black
+    // edge ImGui cannot give it — on a light panel the fill is white and so is
+    // the ink, and a filled track otherwise swallows its own value.
+    // ★It is PUBLIC because two windows draw this control. The settings
+    // sliders go through ChromeSliderInt/Float below; the EDIT panel builds
+    // its rows by hand (its fill fractions are not the widget's own range), so
+    // it needs the value half without the rest. While this was private to
+    // Theme.cpp, every fix that landed on the settings sliders stopped at the
+    // editor's door — which is exactly how nine EDIT rows kept ImGui's
+    // unoutlined text after the settings ones were fixed.
+    // a_isInt picks which type a_fmt is fed.
+    void GaugeValue(ImDrawList* a_dl, const ImVec2& a_p, float a_w, float a_h,
+                    const char* a_fmt, float a_v, bool a_isInt);
+
+    // ---- gauge step buttons ------------------------------------------------
+    //
+    // Two arrows sunk into the ENDS of a gauge track, each nudging the value by
+    // one step. Held down they repeat (ImGui's own key-repeat timing).
+    //
+    // ★Inside the track, not beside it. Flanking buttons would have cost the
+    // track 36 of its 158px — a quarter of the drag range — and the drag is
+    // still how a value is found; the buttons only settle it. The trade is that
+    // the outer 16px of each end no longer starts a drag, which matters least
+    // exactly where the arrows are: at the ends, where a drag is already
+    // finished.
+    //
+    // Call AFTER the widget so the buttons sit on top of it. Returns true on
+    // any nudge, and clamps to [a_lo, a_hi].
+    [[nodiscard]] bool GaugeStep(const ImVec2& a_p, float a_w, float a_h,
+                                 const char* a_id, float& a_val, float a_step,
+                                 float a_lo, float a_hi);
+    [[nodiscard]] bool GaugeStepInt(const ImVec2& a_p, float a_w, float a_h,
+                                    const char* a_id, int& a_val, int a_step,
+                                    int a_lo, int a_hi);
+    // width of one arrow, so a caller can keep its own hit tests clear of them
+    [[nodiscard]] float GaugeStepW();
+
+    // ---- typing a value straight into a gauge --------------------------------
+    //
+    // ★★A gauge draws its own number so the number can carry a black edge,
+    // which means the WIDGET's text is pushed transparent. Double-click to type
+    // and that transparency lands on the characters being typed: the old value
+    // stays put, the new one is invisible, and only the caret shows. So the row
+    // has to know it is being edited BEFORE it submits the widget.
+    //
+    // Ask with the same id string the widget is given.
+    [[nodiscard]] bool GaugeEditing(const char* a_id);
+    // The track wearing its input-field clothes: fill removed, well darkened,
+    // border in the skin's accent. Drawn INSTEAD of GaugeBar while editing, so
+    // a gauge and a text field are never mistaken for each other.
+    void GaugeInputFrame(ImDrawList* a_dl, const ImVec2& a_p, float a_w, float a_h);
+    // ★The gauge centres its number; ImGui's text field does not, so the figure
+    // JUMPED to the left edge the instant it was double-clicked. Push a frame
+    // padding sized to hold the text in the middle, submit the widget, pop.
+    // Pair them, and keep the pair OUTSIDE PushChromeStyle/PopChromeStyle --
+    // style vars are a stack, and PopChromeStyle takes whichever one is on top.
+    void GaugeInputPushAlign(const char* a_id, float a_w);
+    void GaugeInputPopAlign();
+    // What to put in the row's note column while typing.
+    [[nodiscard]] const char* GaugeInputHint();
+
+    // The well, its fill and its border, in one call.
+    // ★The fill stops at the ARROWS rather than at the track edge. Running it
+    // under them made a full gauge look like it had swallowed its own controls
+    // — and worse, hid which end was at its limit. The arrows are chrome that
+    // happens to sit inside the frame; the bar is what the value fills.
+    void GaugeBar(ImDrawList* a_dl, const ImVec2& a_p, float a_w, float a_h,
+                  float a_frac);
+
+    // TextOutlined, but it ADVANCES the cursor like ImGui::Text does, so it
+    // drops into a normal layout. ★Same reason GaugeValue is public: the
+    // settings rows and the EDIT rows are the same kind of label, and while
+    // this lived inside UIRoot the editor's labels stayed unoutlined
+    // TextColored calls after the settings ones were fixed.
+    void TextOutlinedFlow(ImU32 a_col, const char* a_text,
+                          float a_size = 0.0f, float a_spacing = 0.0f);
 
     // v10.4: border drawn as 8 gradient segments — bright at the corners,
     // fading out toward each edge's middle (vertical runs are inset 1px so
@@ -483,10 +577,10 @@ namespace FUI::Theme
              : a_axis == 1 ? kDefShadowBlur
                            : kDefShadowOpac;
     }
-    // ...and the same two for whatever style/slot is live right now, which is
-    // what a reset on the visible slider needs. Keeps the slot arithmetic in
-    // one file instead of at every call site.
-    [[nodiscard]] float DefaultGlowGain();
+    // ...and the same for whatever slot is live right now, which is what a
+    // reset on the visible slider needs. Keeps the slot arithmetic in one file
+    // instead of at every call site. (The glow twin went with the glow style
+    // itself — the reset it served no longer has a slider to sit on.)
     [[nodiscard]] float DefaultIconGain();
 
     // Phase 2: the invisible-widget style for any Drag/Slider drawn OVER

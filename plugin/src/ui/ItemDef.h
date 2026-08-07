@@ -29,12 +29,19 @@ namespace FUI
         // not disturb the other, so it gets its own pair.
         float fscale = 1.0f;   // drawn-icon zoom
         float frot = 0.0f;     // drawn-icon rotation, degrees
-        // Rotating a drawing moves its visual centre of mass — a bow turned
-        // 35 degrees no longer sits in the middle of its tile. This nudges it
-        // back, measured in CELL WIDTHS so one value reads the same on a 1x1
-        // and a 2x4. Horizontal only: tiles are laid out in rows, so sideways
-        // is where a sprite looks off-centre.
-        float fx = 0.0f;       // drawn-icon horizontal offset, in cells
+        // Where the sprite sits inside its footprint, in CELL WIDTHS, so one
+        // value reads the same on a 1x1 and a 2x4.
+        //
+        // ★★Both axes, and both icon styles. It began as a horizontal-only
+        // nudge for DRAWN icons — rotating a drawing moves its visual centre of
+        // mass, and tiles are laid out in rows, so sideways was where that
+        // showed. Free-form footprints made the other half necessary: an
+        // L-shaped print wants its haft down the left column and a T wants the
+        // head across the top, and no automatic centre can reach either. The
+        // auto rule (occupied-box middle) is right for every symmetric shape;
+        // this exists for the ones that are not.
+        float fx = 0.0f;       // icon offset X, in cells
+        float fy = 0.0f;       // icon offset Y, in cells
         // ★★1.0.5: the capture scene has exactly ONE light (measured: a warm
         // point lamp up and to the screen-left of the item), so how bright an
         // item reads depends on which face it happens to turn toward it — the
@@ -120,6 +127,7 @@ namespace FUI
             { "fscale", &ItemDef::fscale, nullptr,        0.2f,     4.0f,     2, DefRule::kIfNotOne },
             { "frot",   &ItemDef::frot,   nullptr,       -180.0f,   180.0f,   0, DefRule::kIfNonZero },
             { "fx",     &ItemDef::fx,     nullptr,        -1.0f,    1.0f,     2, DefRule::kIfNonZero },
+            { "fy",     &ItemDef::fy,     nullptr,        -1.0f,    1.0f,     2, DefRule::kIfNonZero },
             // capture light, as an offset from the default rig. kIfNonZero is
             // exactly right here: 0/0 IS "use the default", so untouched items
             // add nothing to their line.

@@ -18,7 +18,6 @@ namespace FUI::UIRoot
 
     void RegisterMenu();  // RE::UI::Register (call at kDataLoaded)
     bool TryInitD3D();    // idempotent ImGui init from renderer data
-    bool IsInitialized();
 
     void Open();   // queue kShow for GridInventoryMenu
     void Close();  // queue kHide
@@ -68,7 +67,6 @@ namespace FUI::UIRoot
     // device event: the OS cursor's POSITION is useless as a signal here,
     // because the game parks and re-warps it while a pad is driving.
     void NoteMouseInput();
-    [[nodiscard]] bool IsPadActive();
     // Should GridMenu keep asking for the vanilla Cursor Menu? False only when
     // we have taken over the pointer ourselves (see PadCursorMode).
     [[nodiscard]] bool WantsGameCursor();
@@ -120,6 +118,15 @@ namespace FUI::UIRoot
     // console command also filled the item search box.
     [[nodiscard]] bool IsConsoleOpen();
 
+    // ★★Draw the next images as SILHOUETTES: the vertex tint supplies the
+    // colour, the texture supplies only its ALPHA. Needed because an ImGui tint
+    // multiplies — black collapses a sprite to its shape, white leaves the
+    // sprite untouched — so a LIGHT silhouette is not expressible as a tint at
+    // all. Pair the two calls on the same draw list; Begin returns false when
+    // the shader is unavailable, and the caller must then not change its tint.
+    [[nodiscard]] bool BeginSilhouette(ImDrawList* a_dl);
+    void EndSilhouette(ImDrawList* a_dl);
+
     // main.cpp installs these to keep legacy state (attack-input block) in sync
     void SetVisibilityCallbacks(std::function<void()> a_onShow, std::function<void()> a_onHide);
 
@@ -132,7 +139,4 @@ namespace FUI::UIRoot
     // capture bakes its orientation into the pixels.
     void DrawItemIconRot(ImDrawList* a_dl, void* a_srv, const ImVec2& a_centre,
                          const ImVec2& a_size, float a_deg);
-
-    // skin support
-    [[nodiscard]] void*   GlowTexture();    // radial falloff SRV (rarity glow)
 }

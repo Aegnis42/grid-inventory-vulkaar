@@ -47,6 +47,11 @@ namespace FUI::Editor
         bool g_paint[kPaintN][kPaintN] = {};   // footprint painter cells
         bool g_painting = false;       // drag-paint state
         bool g_paintValue = true;      // painting or erasing this drag
+        // ★Which slider block the orientation section shows: 0 = rotation,
+        // 1 = position. A tab rather than two more rows -- the panel was
+        // already at six sliders. Kept across items on purpose: someone lining
+        // up a shelf of weapons stays on the same axis for all of them.
+        int g_footTab = 0;
 
         // load the current def into the painter cells
         void DefToPainter()
@@ -136,21 +141,113 @@ namespace FUI::Editor
         void TrackChrome(ImVec2 a_p, float a_w, float a_h, float a_frac)
         {
             auto* dl = ImGui::GetWindowDrawList();
-            const float r = Theme::S().rounding;
-            const float f = (std::max)(0.0f, (std::min)(1.0f, a_frac));
-            // ★Theme::GaugeTrack(), not a hard-coded dark well: on a light
-            // panel the well has to be LIGHTER than the panel, and this gauge
-            // is the same control as the settings sliders.
-            dl->AddRectFilled(a_p, ImVec2(a_p.x + a_w, a_p.y + a_h), Theme::GaugeTrack(), r);
-            if (f > 0.0f) {
-                dl->AddRectFilled(a_p, ImVec2(a_p.x + a_w * f, a_p.y + a_h),
-                    Theme::GaugeFill(), r);
-            }
-            dl->AddRect(a_p, ImVec2(a_p.x + a_w, a_p.y + a_h), Theme::GaugeBorder(), r);
+            // ★Theme::FrameRounding(), not Skin::rounding. A rounding of 0
+            // means the skin NAMES none, not that it wants square corners —
+            // reading the raw field gave every Simple-family track hard 90°
+            // corners while the settings window, which goes through the
+            // accessor, rounded them.
+            // ★ONE definition, shared with the settings sliders. The fill stops
+            // at the step arrows there, and a second copy of that rule here
+            // would be a second chance to disagree with it.
+            Theme::GaugeBar(dl, a_p, a_w, a_h, a_frac);
         }
 
         constexpr float kLabelW = 46.0f;   // * scale
         constexpr float kTrackW = 158.0f;  // * scale
+
+        // ★The name beside a gauge, drawn the way the settings rows draw
+        // theirs: the skin's own ink, with the black edge that keeps a light
+        // string legible over a translucent panel. These were TextColored in
+        // inkDim, which is the token for SECONDARY text — a field you can edit
+        // is not secondary, and on the derived skins it left the editor's
+        // labels a shade dimmer than every other label in the UI.
+        // The wording is NOT upper-cased here: that is a settings-panel rule
+        // (see UIRoot's SettingLabel), and these labels are already terse.
+        void RowLabel(const char* a_text)
+        {
+            Theme::TextOutlinedFlow(Theme::Chrome(1.0f), a_text);
+        }
+
+        // ★★A gauge row is ONE control: track, widget, and the number on top.
+        // This window used to assemble those three by hand at every row, and
+        // kept ImGui's own text — so when the settings sliders learned to draw
+        // their value themselves (ImGui cannot outline what it draws, and on a
+        // light panel a white fill under white ink erases it), all nine rows
+        // here were left behind. Everything that draws a gauge now runs through
+        // the same two functions: TrackChrome for the well, Theme::GaugeValue
+        // for the figure.
+        // a_widget runs with the widget's own text made INVISIBLE; whatever it
+        // leaves in a_shown is what gets printed, so the number is always the
+        // post-drag one.
+        template <class W>
+        bool GaugeRow(ImVec2 a_p, float a_w, float a_frac, bool a_grab,
+                      const char* a_id, const char* a_fmt, const float& a_shown,
+                      W&& a_widget)
+        {
+            auto*       dl = ImGui::GetWindowDrawList();
+            const float h  = ImGui::GetFrameHeight();
+            // ★Asked BEFORE the widget, because the answer decides whether the
+            // text gets pushed transparent -- and that cannot be undone after
+            // the widget is submitted.
+            const bool typing = Theme::GaugeEditing(a_id);
+            if (typing) Theme::GaugeInputFrame(dl, a_p, a_w, h);
+            else        TrackChrome(a_p, a_w, h, a_frac);
+            ImGui::SetCursorScreenPos(a_p);
+            // ★Outside PushChromeStyle: both push style VARS, and PopChromeStyle
+            // pops whichever is on top of the stack.
+            if (typing) Theme::GaugeInputPushAlign(a_id, a_w);
+            Theme::PushChromeStyle(a_grab);
+            // ★★NOT while typing: the transparency we use to hide the widget's
+            // own number would hide the characters being typed as well.
+            if (!typing) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+            // ★★Without this the step arrows are DEAD. ImGui hands hover to
+            // the item submitted FIRST, and this widget covers the whole track,
+            // so a click on an arrow reached the slider instead — and two quick
+            // clicks put it into text entry, which is what "the cursor blinks
+            // and the slider stops responding" was.
+            ImGui::SetNextItemAllowOverlap();
+            ImGui::SetNextItemWidth(a_w);
+            const bool ch = a_widget();
+            if (!typing) ImGui::PopStyleColor();
+            Theme::PopChromeStyle(a_grab);
+            if (typing) Theme::GaugeInputPopAlign();
+            else        Theme::GaugeValue(dl, a_p, a_w, h, a_fmt, a_shown, false);
+            return ch;
+        }
+
+        // int flavour — same contract, %d formatting
+        template <class W>
+        bool GaugeRowI(ImVec2 a_p, float a_w, float a_frac, bool a_grab,
+                       const char* a_id, const char* a_fmt, const int& a_shown,
+                       W&& a_widget)
+        {
+            auto*       dl = ImGui::GetWindowDrawList();
+            const float h  = ImGui::GetFrameHeight();
+            const bool typing = Theme::GaugeEditing(a_id);   // see the float version
+            if (typing) Theme::GaugeInputFrame(dl, a_p, a_w, h);
+            else        TrackChrome(a_p, a_w, h, a_frac);
+            ImGui::SetCursorScreenPos(a_p);
+            if (typing) Theme::GaugeInputPushAlign(a_id, a_w);   // outside the chrome push
+            Theme::PushChromeStyle(a_grab);
+            if (!typing) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+            // ★★Without this the step arrows are DEAD. ImGui hands hover to
+            // the item submitted FIRST, and this widget covers the whole track,
+            // so a click on an arrow reached the slider instead — and two quick
+            // clicks put it into text entry, which is what "the cursor blinks
+            // and the slider stops responding" was.
+            ImGui::SetNextItemAllowOverlap();
+            ImGui::SetNextItemWidth(a_w);
+            const bool ch = a_widget();
+            if (!typing) ImGui::PopStyleColor();
+            Theme::PopChromeStyle(a_grab);
+            if (typing) {
+                Theme::GaugeInputPopAlign();
+            } else {
+                Theme::GaugeValue(dl, a_p, a_w, h, a_fmt,
+                                  static_cast<float>(a_shown), true);
+            }
+            return ch;
+        }
 
         // ★★Right-click a track to put THAT ONE field back to its default —
         // the same gesture the settings sliders answer to. It restores exactly
@@ -187,23 +284,64 @@ namespace FUI::Editor
             }
         }
 
+        // Where the sprite sits inside its footprint, in CELLS. Same row
+        // grammar as AngleSlider; the range is -1..1 because a nudge bigger
+        // than one cell means the footprint itself is wrong.
+        bool OffsetSlider(const char* a_label, float& a_val, float a_defVal)
+        {
+            const float S = Theme::Scale();
+            RowLabel(a_label);
+            ImGui::SameLine(kLabelW * S);
+            const std::string id = std::string("##") + a_label;
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const float  h = ImGui::GetFrameHeight();
+            const bool typing = Theme::GaugeEditing(id.c_str());
+            bool changed = GaugeRow(at, kTrackW * S,
+                (a_val + 1.0f) * 0.5f, false, id.c_str(), "%.2f", a_val,
+                [&] {
+                    return ImGui::DragFloat(id.c_str(), &a_val, 0.005f,
+                        -1.0f, 1.0f, "%.2f");
+                });
+            // ★Reset FIRST: it reads IsItemHovered, which means the last item
+            // submitted -- and the arrows are items. Stepping before it would
+            // aim the right-click at whichever arrow was drawn last, so a
+            // right-click on the track would quietly stop resetting.
+            changed |= ResetOnRightClick(a_val, a_defVal);
+            if (!typing) {
+                changed |= Theme::GaugeStep(at, kTrackW * S, h, id.c_str(),
+                                            a_val, 0.01f, -1.0f, 1.0f);
+            }
+            ImGui::SameLine();
+            if (typing) ImGui::TextDisabled("%s", Theme::GaugeInputHint());
+            else RowNote(std::fabs(a_val - a_defVal) > 0.005f, "(%s %.2f)", a_defVal);
+            return changed;
+        }
+
         // drag row against the session baseline (H6 ⑤). DragFloat gives
         // pixel-proportional fine control; Ctrl+click types an exact value.
         bool AngleSlider(const char* a_label, float& a_val, float a_defVal)
         {
             const float S = Theme::Scale();
-            ImGui::TextColored(Theme::S().inkDim, "%s", a_label);
+            RowLabel(a_label);
             ImGui::SameLine(kLabelW * S);
-            TrackChrome(ImGui::GetCursorScreenPos(), kTrackW * S,
-                ImGui::GetFrameHeight(), (a_val + 180.0f) / 360.0f);
-            Theme::PushChromeStyle(false);
-            ImGui::SetNextItemWidth(kTrackW * S);
-            bool changed = ImGui::DragFloat((std::string("##") + a_label).c_str(),
-                &a_val, 0.5f, -180.0f, 180.0f, "%.1f\xC2\xB0");
-            Theme::PopChromeStyle(false);
-            changed |= ResetOnRightClick(a_val, a_defVal);
+            const std::string id = std::string("##") + a_label;
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const float  h = ImGui::GetFrameHeight();
+            const bool typing = Theme::GaugeEditing(id.c_str());
+            bool changed = GaugeRow(at, kTrackW * S,
+                (a_val + 180.0f) / 360.0f, false, id.c_str(), "%.1f\xC2\xB0", a_val,
+                [&] {
+                    return ImGui::DragFloat(id.c_str(), &a_val, 0.5f,
+                        -180.0f, 180.0f, "%.1f\xC2\xB0");
+                });
+            changed |= ResetOnRightClick(a_val, a_defVal);   // before the arrows
+            if (!typing) {
+                changed |= Theme::GaugeStep(at, kTrackW * S, h, id.c_str(),
+                                            a_val, 1.0f, -180.0f, 180.0f);
+            }
             ImGui::SameLine();
-            RowNote(std::fabs(a_val - a_defVal) > 0.5f, "(%s %.0f\xC2\xB0)", a_defVal);
+            if (typing) ImGui::TextDisabled("%s", Theme::GaugeInputHint());
+            else RowNote(std::fabs(a_val - a_defVal) > 0.5f, "(%s %.0f\xC2\xB0)", a_defVal);
             return changed;
         }
     }
@@ -386,27 +524,44 @@ namespace FUI::Editor
                 ImGui::Unindent(10.0f * S2);
                 ImGui::Spacing();
             }
-            chOrient |= AngleSlider("ROT", g_cur.frot, g_base.frot);
-            {   // sideways nudge: rotating a drawing shifts where it LOOKS centred
-                const float S1 = Theme::Scale();
-                ImGui::TextColored(Theme::S().inkDim, "Off X");
-                ImGui::SameLine(kLabelW * S1);
-                TrackChrome(ImGui::GetCursorScreenPos(), kTrackW * S1,
-                    ImGui::GetFrameHeight(), (g_cur.fx + 1.0f) * 0.5f);
-                Theme::PushChromeStyle(false);
-                ImGui::SetNextItemWidth(kTrackW * S1);
-                if (ImGui::DragFloat("##OffX", &g_cur.fx, 0.005f, -1.0f, 1.0f, "%.2f")) {
-                    chOrient = true;
+        }
+        // ---- what the slider block below shows -----------------------------
+        //
+        // ★★A TAB, not more rows. The panel already carried six sliders and
+        // adding two would have made eight — which is why the first attempt put
+        // the offset on a drag over the footprint board instead. That was the
+        // wrong trade: a drag cannot land on 0.30, and the sliders it was meant
+        // to spare stayed on screen anyway. Swapping the block keeps the panel
+        // the same height AND keeps every value typeable.
+        {
+            const float ST = Theme::Scale();
+            const Lang::Str kT[2] = { Lang::Str::FootRotate, Lang::Str::FootMove };
+            for (int i = 0; i < 2; ++i) {
+                if (i) ImGui::SameLine(0.0f, 4.0f * ST);
+                const bool on = g_footTab == i;
+                if (on) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, Theme::BtnOn());
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::BtnOn(1.15f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, Theme::BtnOnInkVec());
                 }
-                Theme::PopChromeStyle(false);
-                if (ResetOnRightClick(g_cur.fx, g_base.fx)) chOrient = true;
-                ImGui::SameLine();
-                RowNote(std::fabs(g_cur.fx - g_base.fx) > 0.005f, "(%s %.2f)", g_base.fx);
+                if (Sfx::Button(Lang::T(kT[i]))) g_footTab = i;
+                if (on) ImGui::PopStyleColor(3);
+            }
+        }
+        if (g_footTab == 0) {
+            if (drawnStyle) {
+                chOrient |= AngleSlider("ROT", g_cur.frot, g_base.frot);
+            } else {
+                chOrient |= AngleSlider("RX", g_cur.rx, g_base.rx);
+                chOrient |= AngleSlider("RY", g_cur.ry, g_base.ry);
+                chOrient |= AngleSlider("RZ", g_cur.rz, g_base.rz);
             }
         } else {
-            chOrient |= AngleSlider("RX", g_cur.rx, g_base.rx);
-            chOrient |= AngleSlider("RY", g_cur.ry, g_base.ry);
-            chOrient |= AngleSlider("RZ", g_cur.rz, g_base.rz);
+            // ★Cells, both axes, both styles (ItemDef.h). Free-form footprints
+            // are what made these necessary: an L wants its haft down the left
+            // column and no automatic centre can reach that.
+            chOrient |= OffsetSlider("X", g_cur.fx, g_base.fx);
+            chOrient |= OffsetSlider("Y", g_cur.fy, g_base.fy);
         }
         {
             const float S0 = Theme::Scale();
@@ -414,19 +569,28 @@ namespace FUI::Editor
             const float zdef = drawnStyle ? g_base.fscale : g_base.scale;
             const float zmin = drawnStyle ? 0.2f : 0.05f;
             const float zmax = drawnStyle ? 4.0f : 20.0f;
-            ImGui::TextColored(Theme::S().inkDim, "Scale");
+            RowLabel("Scale");
             ImGui::SameLine(kLabelW * S0);
-            TrackChrome(ImGui::GetCursorScreenPos(), kTrackW * S0,
-                ImGui::GetFrameHeight(), (zoom - zmin) / (drawnStyle ? 3.8f : 1.95f));
-            Theme::PushChromeStyle(false);
-            ImGui::SetNextItemWidth(kTrackW * S0);
-            if (ImGui::DragFloat("##Scale", &zoom, 0.01f, zmin, zmax, "%.2f")) {
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const float  h = ImGui::GetFrameHeight();
+            const bool zTyping = Theme::GaugeEditing("##Scale");
+            if (GaugeRow(at, kTrackW * S0,
+                    (zoom - zmin) / (drawnStyle ? 3.8f : 1.95f), false,
+                    "##Scale", "%.2f", zoom,
+                    [&] {
+                        return ImGui::DragFloat("##Scale", &zoom, 0.01f,
+                            zmin, zmax, "%.2f");
+                    })) {
                 chOrient = true;
             }
-            Theme::PopChromeStyle(false);
-            if (ResetOnRightClick(zoom, zdef)) chOrient = true;
+            if (ResetOnRightClick(zoom, zdef)) chOrient = true;   // before arrows
+            if (!zTyping && Theme::GaugeStep(at, kTrackW * S0, h, "##Scale",
+                                             zoom, 0.01f, zmin, zmax)) {
+                chOrient = true;
+            }
             ImGui::SameLine();
-            RowNote(std::fabs(zoom - zdef) > 0.005f, "(%s %.2f)", zdef);
+            if (zTyping) ImGui::TextDisabled("%s", Theme::GaugeInputHint());
+            else RowNote(std::fabs(zoom - zdef) > 0.005f, "(%s %.2f)", zdef);
         }
         // ---- capture light -------------------------------------------------
         // ★The scene has ONE lamp, so an item's brightness is decided by which
@@ -442,18 +606,27 @@ namespace FUI::Editor
             const float S3 = Theme::Scale();
             auto lightRow = [&](const char* a_label, float& a_val, float a_base,
                                 float a_lo, float a_hi) {
-                ImGui::TextColored(Theme::S().inkDim, "%s", a_label);
+                RowLabel(a_label);
                 ImGui::SameLine(kLabelW * S3);
-                TrackChrome(ImGui::GetCursorScreenPos(), kTrackW * S3,
-                    ImGui::GetFrameHeight(), (a_val - a_lo) / (a_hi - a_lo));
-                Theme::PushChromeStyle(false);
-                ImGui::SetNextItemWidth(kTrackW * S3);
-                bool ch = ImGui::DragFloat((std::string("##") + a_label).c_str(),
-                    &a_val, 0.5f, a_lo, a_hi, "%.0f\xC2\xB0");
-                Theme::PopChromeStyle(false);
-                ch |= ResetOnRightClick(a_val, a_base);
+                const std::string id = std::string("##") + a_label;
+                const ImVec2 at = ImGui::GetCursorScreenPos();
+                const float  hh = ImGui::GetFrameHeight();
+                const bool typing = Theme::GaugeEditing(id.c_str());
+                bool ch = GaugeRow(at, kTrackW * S3,
+                    (a_val - a_lo) / (a_hi - a_lo), false, id.c_str(),
+                    "%.0f\xC2\xB0", a_val,
+                    [&] {
+                        return ImGui::DragFloat(id.c_str(), &a_val, 0.5f,
+                            a_lo, a_hi, "%.0f\xC2\xB0");
+                    });
+                ch |= ResetOnRightClick(a_val, a_base);   // before the arrows
+                if (!typing) {
+                    ch |= Theme::GaugeStep(at, kTrackW * S3, hh, id.c_str(),
+                                           a_val, 1.0f, a_lo, a_hi);
+                }
                 ImGui::SameLine();
-                RowNote(std::fabs(a_val - a_base) > 0.5f, "(%s %.0f\xC2\xB0)", a_base);
+                if (typing) ImGui::TextDisabled("%s", Theme::GaugeInputHint());
+                else RowNote(std::fabs(a_val - a_base) > 0.5f, "(%s %.0f\xC2\xB0)", a_base);
                 return ch;
             };
             if (lightRow("Lgt X", g_cur.lightAz, g_base.lightAz, -180.0f, 180.0f)) {
@@ -485,6 +658,11 @@ namespace FUI::Editor
             const bool inCell = hovered && hc >= 0 && hc < kPaintN &&
                                 hr >= 0 && hr < kPaintN;
 
+            // ★Drag-paint, as it always was. An earlier pass put sprite
+            // aiming on this board as a drag and demoted painting to a click;
+            // that was the wrong trade (a drag cannot land on 0.30, and the
+            // sliders it was meant to spare stayed anyway). Aiming is a tabbed
+            // slider block now, and the board is only a board again.
             if (inCell && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 g_painting = true;
                 g_paintValue = !g_paint[hr][hc];   // first cell decides paint vs erase
@@ -499,25 +677,90 @@ namespace FUI::Editor
             // mockup painter: ivory border + skin-specific fill (OATHVEIN
             // paints with the sel colour, the rest with the accent)
             const auto& skp = Theme::S();
-            // ★the painted footprint and the open-bag tile mean the same
-            // thing — "this is the one" — so they are the same colour
-            const ImU32 onCol = skp.lightPanel    ? Theme::Col(skp.bagOpen, 0.85f)
+            // ★★It used to borrow bagOpen, on the reasoning that a painted
+            // footprint and an open bag both mean "this is the one". That held
+            // while bagOpen was a tint OF the theme. It stopped holding when
+            // the derived skins made bagOpen the theme's COMPLEMENT — the open
+            // bag is one tile among many and has to shout, but the painter is
+            // a whole block of them, and a block of the opposite hue turned
+            // the only cyan thing on a copper window into what reads as a bug.
+            // BtnOn is what this actually is: a cell toggled on, in the
+            // theme's own ON colour, which every other toggle in the UI uses.
+            const ImU32 onCol = skp.lightPanel    ? Theme::BtnOn(0.85f)
                               : skp.diamondLabels ? Theme::Col(skp.sel, 0.60f)
                                                   : Theme::Acc(0.55f);
             for (int r = 0; r < kPaintN; ++r) {
                 for (int c = 0; c < kPaintN; ++c) {
                     const ImVec2 p0(base.x + c * cell, base.y + r * cell);
                     const ImVec2 p1(p0.x + cell - 2, p0.y + cell - 2);
+                    // ★FrameRounding(), not the raw field — see TrackChrome.
+                    const float pr = Theme::FrameRounding();
                     dl->AddRectFilled(p0, p1,
-                        g_paint[r][c] ? onCol : IM_COL32(0, 0, 0, 90), skp.rounding);
-                    dl->AddRect(p0, p1, Theme::Acc(0.30f), skp.rounding);
+                        g_paint[r][c] ? onCol : IM_COL32(0, 0, 0, 90), pr);
+                    dl->AddRect(p0, p1, Theme::Acc(0.30f), pr);
+                }
+            }
+
+            // ---- the sprite, ON the board ----------------------------------
+            //
+            // ★★This is the whole point of the change. The footprint and the
+            // icon are two things that must line up, and until now they were
+            // never on screen together: the board showed the shape, the icon
+            // lived out on the grid, and the offset was a number in between.
+            // Aiming it meant editing a value, closing the panel, looking, and
+            // coming back. Now the thing being aimed is under the cursor that
+            // aims it.
+            //
+            // Laid out by the same rules the game uses (Grid's FitOf): centred
+            // on the occupied box, sized by the shape's reach per axis. If the
+            // two ever disagree, this preview is worthless -- so it is written
+            // from the same three numbers rather than from a second guess.
+            {
+                int minC = kPaintN, maxC = -1, minR = kPaintN, maxR = -1;
+                int maxRow = 0;
+                int colN[kPaintN] = {};
+                for (int r = 0; r < kPaintN; ++r) {
+                    int rowN = 0;
+                    for (int c = 0; c < kPaintN; ++c) {
+                        if (!g_paint[r][c]) continue;
+                        ++rowN; ++colN[c];
+                        minC = (std::min)(minC, c); maxC = (std::max)(maxC, c);
+                        minR = (std::min)(minR, r); maxR = (std::max)(maxR, r);
+                    }
+                    maxRow = (std::max)(maxRow, rowN);
+                }
+                if (maxC >= 0) {
+                    int maxCol = 0;
+                    for (const int v : colN) maxCol = (std::max)(maxCol, v);
+                    const float bw = static_cast<float>(maxC - minC + 1);
+                    const float bh = static_cast<float>(maxR - minR + 1);
+                    const float fill = (std::min)(maxRow / bw, maxCol / bh);
+                    if (const auto* ic = IconCache::GetSingleton()->Get(g_sel)) {
+                        const float target = (std::max)(bw, bh) * cell * 0.95f *
+                                             g_cur.scale * fill;
+                        const float ms =
+                            static_cast<float>((std::max)(ic->w, ic->h));
+                        const float dw = ic->w / ms * target;
+                        const float dh = ic->h / ms * target;
+                        const ImVec2 ctr(
+                            base.x + (minC + maxC + 1) * 0.5f * cell + g_cur.fx * cell,
+                            base.y + (minR + maxR + 1) * 0.5f * cell + g_cur.fy * cell);
+                        UIRoot::DrawItemIconRot(dl, ic->srv, ctr, ImVec2(dw, dh),
+                            drawnStyle ? g_cur.frot : 0.0f);
+                    }
                 }
             }
 
             // caption BELOW the painter (mockup .pnote)
             ImGui::SetCursorScreenPos(ImVec2(base.x, base.y + kPaintBlock + 6.0f));
-            ImGui::TextDisabled("%s · %dx%d%s", Lang::T(Lang::Str::FootprintHint),
-                g_cur.w, g_cur.h, g_cur.shape.empty() ? "" : " (shape)");
+            if (std::fabs(g_cur.fx) > 0.005f || std::fabs(g_cur.fy) > 0.005f) {
+                ImGui::TextDisabled("%dx%d%s · %+.2f, %+.2f",
+                    g_cur.w, g_cur.h, g_cur.shape.empty() ? "" : " (shape)",
+                    g_cur.fx, g_cur.fy);
+            } else {
+                ImGui::TextDisabled("%s · %dx%d%s", Lang::T(Lang::Str::FootprintHint),
+                    g_cur.w, g_cur.h, g_cur.shape.empty() ? "" : " (shape)");
+            }
             const float leftBottom = ImGui::GetCursorScreenPos().y;
 
             // ---- right column: Bag / W / H ----
@@ -573,22 +816,24 @@ namespace FUI::Editor
 
             auto rightTrack = [&](const char* lbl, int& v, float y) {
                 ImGui::SetCursorScreenPos(ImVec2(colX, y + 3.0f * S));
-                ImGui::TextColored(Theme::S().inkDim, "%s", lbl);
+                RowLabel(lbl);
                 // ★1..16, matching the def clamp (ui/ItemDef.h). At 1..10 this
                 // slider was a QUIET editor: opening EDIT on a 10x14 bag pulled
                 // it down to 10 and saved that, so simply looking at the bag
                 // shrank it.
                 constexpr int kBagMax = 16;
                 const ImVec2 tp(colX + lblW, y);
-                TrackChrome(tp, trackW, ImGui::GetFrameHeight(),
-                    static_cast<float>(v - 1) / static_cast<float>(kBagMax - 1));
-                ImGui::SetCursorScreenPos(tp);
-                Theme::PushChromeStyle(true);
-                ImGui::SetNextItemWidth(trackW);
-                const bool ch2 = ImGui::SliderInt((std::string("##bag") + lbl).c_str(),
-                                                  &v, 1, kBagMax);
-                Theme::PopChromeStyle(true);
-                return ch2;
+                const std::string id = std::string("##bag") + lbl;
+                const bool typing = Theme::GaugeEditing(id.c_str());
+                bool ch3 = GaugeRowI(tp, trackW,
+                    static_cast<float>(v - 1) / static_cast<float>(kBagMax - 1),
+                    true, id.c_str(), "%d", v,
+                    [&] { return ImGui::SliderInt(id.c_str(), &v, 1, kBagMax); });
+                if (!typing) {
+                    ch3 |= Theme::GaugeStepInt(tp, trackW, ImGui::GetFrameHeight(),
+                                               id.c_str(), v, 1, 1, kBagMax);
+                }
+                return ch3;
             };
             chLayout |= rightTrack("W", g_cur.bw, base.y + rowH);
             chLayout |= rightTrack("H", g_cur.bh, base.y + rowH * 2.0f);
@@ -609,18 +854,31 @@ namespace FUI::Editor
             }
             ImGui::BeginDisabled(!stackable);
             const float S0 = Theme::Scale();
-            ImGui::TextColored(Theme::S().inkDim, "Stack");
+            RowLabel("Stack");
             ImGui::SameLine(kLabelW * S0);
-            TrackChrome(ImGui::GetCursorScreenPos(), kTrackW * S0,
-                ImGui::GetFrameHeight(),
-                g_cur.stack > 0 ? g_cur.stack / 100.0f : 0.0f);
-            Theme::PushChromeStyle(false);
-            ImGui::SetNextItemWidth(kTrackW * S0);
-            if (ImGui::DragInt("##StackCap", &g_cur.stack, 0.25f, 0, 999,
-                    g_cur.stack > 0 ? "%d" : "auto")) {
+            // ★The only row whose FORMAT depends on the value ("auto" at 0,
+            // "%d" above it). Arguments are evaluated before the widget runs,
+            // so the frame that crosses 0 prints the old wording once — and
+            // since "auto" takes no argument, printing it with a number is
+            // harmless. One frame mid-drag is not visible; a wrong number
+            // would have been.
+            const char* stackFmt = g_cur.stack > 0 ? "%d" : "auto";
+            const ImVec2 stAt = ImGui::GetCursorScreenPos();
+            const float  stH = ImGui::GetFrameHeight();
+            const bool sTyping = Theme::GaugeEditing("##StackCap");
+            if (GaugeRowI(stAt, kTrackW * S0,
+                    g_cur.stack > 0 ? g_cur.stack / 100.0f : 0.0f, false,
+                    "##StackCap", stackFmt, g_cur.stack,
+                    [&] {
+                        return ImGui::DragInt("##StackCap", &g_cur.stack, 0.25f,
+                            0, 999, stackFmt);
+                    })) {
                 chLayout = true;
             }
-            Theme::PopChromeStyle(false);
+            if (!sTyping && Theme::GaugeStepInt(stAt, kTrackW * S0, stH,
+                                                "##StackCap", g_cur.stack, 1, 0, 999)) {
+                chLayout = true;
+            }
             ImGui::SameLine();
             if (g_cur.stack > 0) {
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(Theme::Chrome(0.85f)), "(override)");

@@ -113,9 +113,12 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
 - Containers auto-open after a successful lockpick (yields to QuickLoot-style widgets).
 
 ### Settings (SETTINGS in the title bar)
-- UI scale, 6 skins, languages (live switch), glow style/brightness, icon
-  brightness/style, icon cache reset, precache all,
-  trade options (unlimited merchant gold / merchant buys anything).
+- UI scale, 19 skins, languages (live switch), glow style/brightness, icon
+  brightness/style, item shadow (distance/blur/opacity), capture light, icon
+  cache reset, precache all, trade options (unlimited merchant gold / merchant
+  buys anything).
+- Sliders take a drag, the ± buttons at either end (held for continuous), a
+  double-click to type an exact value, and a right-click to restore the default.
 
 ### Adding a translation
 Every language is a text file in `SKSE/Plugins/GridInventory_lang/`. One you write
@@ -187,8 +190,9 @@ The same notes are in that folder's `_README.txt`.
   Reload.
 
 ### Editing (EDIT in the title bar)
-- Click an item → rotation / scale / footprint (6×6 painter) / bag / stack size,
-  plus "save as category default". Share the results via presets.
+- Click an item → rotation and position (two tabs) / scale / footprint (8×8
+  painter, free-form shapes) / capture light / bag / stack size, plus "save as
+  category default". Share the results via presets.
 
 ---
 

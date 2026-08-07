@@ -1,0 +1,191 @@
+#include "PCH.h"
+
+#include "api/HostApi.h"
+#include "ui/Grid.h"
+#include "ui/LootBarter.h"
+#include "ui/UIRoot.h"
+
+namespace FUI::HostApi
+{
+    namespace
+    {
+        // ---- host -> provider services -----------------------------------
+        //
+        // Plain C functions: the table crosses a DLL boundary, so nothing here
+        // may capture, allocate, or hand back an STL type.
+
+        void Svc_RequestRebuild()
+        {
+            Grid::RequestRebuild();   // sets a flag; the next frame re-collects
+        }
+
+        bool Svc_IsMenuOpen()
+        {
+            auto* ui = RE::UI::GetSingleton();
+            return ui && ui->IsMenuOpen("GridInventoryMenu"sv);
+        }
+
+        // Grant-time tile snapshot. Counts only the TRUE cells of a polyomino
+        // mask, under the definition resolved right now (per-form override >
+        // model-shared > category preset), so it follows the user's live EDIT
+        // changes. A provider that rolls persistent state from this must call
+        // it AT the roll and freeze the answer -- see PLAN 2-B-1.
+        std::uint32_t Svc_CellSpanOf(std::uint32_t a_base)
+        {
+            auto* form = RE::TESForm::LookupByID(a_base);
+            if (!form) return 0;
+            auto* obj = form->As<RE::TESBoundObject>();
+            if (!obj) return 0;
+            return static_cast<std::uint32_t>(Grid::CellSpanOf(obj));
+        }
+
+        // The host owns the container and barter windows, so it is the only
+        // thing that knows whether the transfer in flight is loot or a purchase.
+        std::uint32_t Svc_PartnerKind()
+        {
+            using M = LootBarter::Mode;
+            switch (LootBarter::CurrentMode()) {
+            case M::kLoot:
+            case M::kSteal:       return GridInvAPI::kPartnerContainer;
+            case M::kBarter:      return GridInvAPI::kPartnerMerchant;
+            case M::kPickpocket:  return GridInvAPI::kPartnerPickpocket;
+            default:              return GridInvAPI::kPartnerNone;
+            }
+        }
+
+        std::uint32_t Svc_PartnerRef()
+        {
+            auto* p = LootBarter::Partner();
+            return p ? p->GetFormID() : 0u;
+        }
+
+        constinit GridInvAPI::HostServices g_services{
+            sizeof(GridInvAPI::HostServices),
+            GridInvAPI::kABIVersion,
+            &Svc_RequestRebuild,
+            &Svc_IsMenuOpen,
+            &Svc_CellSpanOf,
+            &Svc_PartnerKind,
+            &Svc_PartnerRef,
+        };
+
+        // ---- registered providers ----------------------------------------
+        //
+        // One slot today. A copy is kept (not the caller's pointer) because the
+        // ABI says pointer arguments are borrowed for the duration of the call.
+        GridInvAPI::Provider g_provider{};
+        bool                 g_haveProvider = false;
+
+        void Notify(const char* a_text)
+        {
+            RE::DebugNotification(a_text);
+        }
+
+        void OnRegisterProvider(SKSE::MessagingInterface::Message* a_msg)
+        {
+            if (!a_msg->data || a_msg->dataLen < sizeof(std::uint32_t) * 2) {
+                logger::error("[API] provider registration with no payload");
+                return;
+            }
+            const auto* p = static_cast<const GridInvAPI::Provider*>(a_msg->data);
+            const char* who = a_msg->sender ? a_msg->sender : "<unknown>";
+
+            // Two independent checks: a version bump catches an intentional
+            // break, the size catches a struct edited without the bump.
+            // Refusal is a log line plus one notification -- never a CTD.
+            if (p->abiVersion != GridInvAPI::kABIVersion ||
+                p->structSize != sizeof(GridInvAPI::Provider)) {
+                logger::error("[API] REFUSED '{}': abiVersion {} (need {}), structSize {} (need {})",
+                              who, p->abiVersion, GridInvAPI::kABIVersion,
+                              p->structSize, sizeof(GridInvAPI::Provider));
+                Notify("Grid Inventory: extension version mismatch - not loaded");
+                return;
+            }
+            if (!p->GetOverlay || !p->GetTooltipLines || !p->OfferDrop) {
+                logger::error("[API] REFUSED '{}': null function pointer", who);
+                Notify("Grid Inventory: extension is incomplete - not loaded");
+                return;
+            }
+            if (g_haveProvider) {
+                logger::warn("[API] '{}' ignored: a provider is already registered ('{}')",
+                             who, g_provider.name ? g_provider.name : "?");
+                return;
+            }
+
+            g_provider     = *p;   // copy; the caller's pointer is borrowed only
+            g_haveProvider = true;
+            logger::info("[API] provider registered: '{}' (from '{}') abi={}",
+                         p->name ? p->name : "<unnamed>", who, p->abiVersion);
+        }
+
+        // This listener sees EVERY sender, so it must only ever act on our own
+        // 4CC message types -- never on a lifecycle number.
+        void OnApiMessage(SKSE::MessagingInterface::Message* a_msg)
+        {
+            if (!a_msg) return;
+            if (a_msg->type == GridInvAPI::kMsgRegisterProvider) {
+                OnRegisterProvider(a_msg);
+            }
+        }
+    }
+
+    void Install()
+    {
+        static_assert(sizeof(GridInvAPI::HostServices) == 48, "ABI drift");
+        // sender == nullptr: no filter, so a provider's message actually lands.
+        // Registered under a DIFFERENT sender key than the lifecycle listener,
+        // which is what lets both coexist.
+        const bool ok = SKSE::GetMessagingInterface()->RegisterListener(nullptr, OnApiMessage);
+        logger::info("[API] ABI listener registered: {}", ok ? "ok" : "FAILED");
+    }
+
+    void Broadcast()
+    {
+        // Both sides register in SKSEPluginLoad, so ordering does not matter:
+        // we announce, they answer (or answered already).
+        static GridInvAPI::HostReady ready{
+            sizeof(GridInvAPI::HostReady),
+            GridInvAPI::kABIVersion,
+            &g_services,
+        };
+        SKSE::GetMessagingInterface()->Dispatch(
+            GridInvAPI::kMsgHostReady, &ready, sizeof(ready), nullptr);
+        logger::info("[API] host ready broadcast (abi {})", GridInvAPI::kABIVersion);
+    }
+
+    std::uint32_t ProviderCount()
+    {
+        return g_haveProvider ? 1u : 0u;
+    }
+
+    const GridInvAPI::Overlay* Overlay(const GridInvAPI::ItemKey& a_key)
+    {
+        if (!g_haveProvider) return nullptr;
+        static GridInvAPI::Overlay s_out{};
+        s_out = {};
+        if (!g_provider.GetOverlay(g_provider.self, &a_key, &s_out)) return nullptr;
+        if (s_out.count == 0) return nullptr;
+        if (s_out.count > GridInvAPI::kMaxBadges) {
+            // A misbehaving provider must not walk us off the array.
+            s_out.count = static_cast<std::uint8_t>(GridInvAPI::kMaxBadges);
+        }
+        return &s_out;
+    }
+
+    std::uint32_t TooltipLines(const GridInvAPI::ItemKey& a_key,
+                               GridInvAPI::TooltipLine* a_out, std::uint32_t a_capacity)
+    {
+        if (!g_haveProvider || !a_out || a_capacity == 0) return 0;
+        const auto n = g_provider.GetTooltipLines(g_provider.self, &a_key, a_out, a_capacity);
+        return (std::min)(n, a_capacity);
+    }
+
+    GridInvAPI::DropVerdict OfferDrop(const GridInvAPI::DropQuery& a_query)
+    {
+        if (!g_haveProvider) return GridInvAPI::kDropReject;
+        const auto v = g_provider.OfferDrop(g_provider.self, &a_query);
+        return (v <= GridInvAPI::kDropBlocked)
+                   ? static_cast<GridInvAPI::DropVerdict>(v)
+                   : GridInvAPI::kDropReject;
+    }
+}

@@ -40,6 +40,14 @@ namespace FUI::Lang
         X(LoadHint, "Load replaces your current setup (items + category defaults)")                         \
         X(Bag, "Bag")                                                                                       \
         X(FootprintHint, "Footprint - drag to paint")                                                       \
+        /* EDIT: which slider block the orientation section shows */                                        \
+        X(FootMove, "Move")                                                                                 \
+        X(FootRotate, "Rotate")                                                                             \
+        /* shown in a slider's note column while its value is being typed.       */                         \
+        /* ★One word: the note column is narrow and sits under the next row's    */                         \
+        /* label, so the long form ran into the item art beside it. Esc is the   */                         \
+        /* universal cancel and does not need saying.                            */                         \
+        X(GaugeTyping, "Enter")                                                                             \
         X(Caching, "caching icons...")                                                                      \
         X(SelectHint, "click an item to edit")                                                              \
         X(Damage, "Damage")   /* tooltip stats (I1) */                                                      \

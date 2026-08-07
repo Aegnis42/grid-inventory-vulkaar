@@ -166,7 +166,6 @@ namespace FUI
         void SetStyle(Style a_style);
         [[nodiscard]] Style GetStyle() const { return m_style; }
         [[nodiscard]] bool  FlatStyle() const { return m_style == Style::kFlat; }
-        [[nodiscard]] bool  PixelStyle() const { return m_style == Style::kPixel; }
 
         // Pixel derivation runs on a frame budget (see kPixelPerFrame): until
         // an item's dot version exists the grid keeps drawing the realistic
@@ -190,7 +189,6 @@ namespace FUI
         void SetInspect(RE::TESBoundObject* a_obj, float a_rx, float a_ry, float a_rz);
         void SetInspectRot(float a_rx, float a_ry, float a_rz);
         void ClearInspect();
-        [[nodiscard]] bool IsInspecting() const { return m_inspect != nullptr; }
         [[nodiscard]] const Icon* InspectIcon() const
         {
             return m_inspectValid ? &m_inspectIcon : nullptr;

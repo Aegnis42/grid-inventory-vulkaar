@@ -1,11 +1,13 @@
 #include "ui/Theme.h"
 
 #include "ui/IconCache.h"   // IconStyleSlot(): which style's values are live
+#include "ui/Lang.h"        // GaugeInputHint(): the typing note is translated
 
 #include <imgui_internal.h>   // ImTextCharFromUtf8 (TextInkCentered)
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace FUI::Theme
 {
@@ -104,7 +106,7 @@ namespace FUI::Theme
                 true,                                   // ★lightPanel
                 false,                                  // hairline grid, not carved
                 Rgba(120, 95, 60, 0.13f),               // cellBg — a seat for the item
-                {}, {}, {},                             // groove/grooveLt/btnFace
+                {}, {},                                 // groove/btnFace
                 // ★bagOpen has to be OUT of family to work — it is the one
                 // mark that says "this tile is the bag you have open", and a
                 // warm brown on warm paper says nothing (it also collides
@@ -178,7 +180,7 @@ namespace FUI::Theme
                 true, false,                 // translucent (no bevel chrome)
                 false,                       // lightPanel
                 false,                       // engravedCells
-                {}, {}, {}, {},              // cellBg / groove / grooveLt / btnFace
+                {}, {}, {},                  // cellBg / groove / btnFace
                 // ★★The default sage was tuned when an occupied tile was DARK.
                 // Turning that ground silver moved the floor out from under it:
                 // sage and the new tile meet in the middle, and on snow the
@@ -210,7 +212,7 @@ namespace FUI::Theme
                 true, false,                 // translucent (no bevel chrome)
                 false,                       // lightPanel
                 false,                       // engravedCells
-                {}, {}, {}, {},              // cellBg / groove / grooveLt / btnFace
+                {}, {}, {},                  // cellBg / groove / btnFace
                 // ★★The default sage was tuned when an occupied tile was DARK.
                 // Turning that ground silver moved the floor out from under it:
                 // sage and the new tile meet in the middle, and on snow the
@@ -222,6 +224,331 @@ namespace FUI::Theme
                 // silver", which is what separates "this bag is open" from
                 // "this cell is occupied".
                 Rgba(170, 225, 232, 0.35f),  // bagOpen
+            },
+            {   // Simple Charcoal — 숯 · 진짜 중성 차콜 (신규)
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Charcoal",
+                Rgba(17, 17, 20),                      // borders/ink
+                Rgba(63, 65, 66),                      // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(202, 203, 204, 0.8f),             // inkDim
+                // ★1.0.5 (6-4): the panel came DOWN, from #4A4C4E. Charcoal's
+                // panel used to sit ABOVE its cells, which fenced the occupied
+                // colour in from both sides — below it lay the empty cell,
+                // above it the panel, and every candidate in between landed on
+                // one of them. Nothing worked until the fence moved.
+                Rgba(74, 76, 78, 0.68f),               // winBg (translucent board)
+                Rgba(44, 46, 47),                      // glyph
+                Rgba(13, 15, 15),                      // shade (occupied cell)
+                Rgba(81, 83, 85),                      // sel
+                Rgba(81, 83, 85),                      // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(27, 29, 29, 0.9775f),             // cellBg
+                Rgba(20, 21, 22, 0.85f),               // cellGroove
+                Rgba(30, 32, 33),                      // btnFace
+                Rgba(161, 123, 99, 0.5f),              // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(41, 43, 44),                      // lpBtn
+                Rgba(58, 60, 61),                      // lpBtnHov
+                Rgba(29, 30, 31),                      // lpBtnAct
+                Rgba(24, 25, 27),                      // lpBorder
+                Rgba(150, 153, 154),                   // lpBtnOnFace — the ON state
+                Rgba(8, 10, 10),                       // lpBtnOnInk
+                Rgba(3, 4, 5),                         // lpRule
+            },
+            {   // Simple Graphite — 먹빛 · 청회색
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Graphite",
+                Rgba(33, 30, 47),                      // borders/ink
+                Rgba(83, 96, 107),                     // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(213, 218, 222, 0.8f),             // inkDim
+                Rgba(95, 107, 121, 0.68f),             // winBg (translucent board)
+                Rgba(61, 74, 81),                      // glyph
+                Rgba(23, 30, 33),                      // shade (occupied cell)
+                Rgba(100, 116, 127),                   // sel
+                Rgba(100, 116, 127),                   // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(41, 51, 57, 0.9775f),             // cellBg
+                Rgba(31, 39, 44, 0.85f),               // cellGroove
+                Rgba(46, 54, 65),                      // btnFace
+                Rgba(177, 143, 114, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(60, 69, 79),                      // lpBtn
+                Rgba(79, 90, 100),                     // lpBtnHov
+                Rgba(45, 52, 61),                      // lpBtnAct
+                Rgba(38, 45, 54),                      // lpBorder
+                Rgba(161, 180, 187),                   // lpBtnOnFace — the ON state
+                Rgba(16, 24, 27),                      // lpBtnOnInk
+                Rgba(10, 14, 20),                      // lpRule
+            },
+            {   // Simple Silver — 은 · 거의 무채색
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Silver",
+                Rgba(70, 70, 77),                      // borders/ink
+                Rgba(137, 143, 147),                   // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(231, 233, 234, 0.8f),             // inkDim
+                Rgba(148, 153, 158, 0.68f),            // winBg (translucent board)
+                Rgba(116, 121, 124),                   // glyph
+                Rgba(62, 65, 66),                      // shade (occupied cell)
+                Rgba(153, 160, 164),                   // sel
+                Rgba(153, 160, 164),                   // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(91, 95, 97, 0.9775f),             // cellBg
+                Rgba(76, 79, 82, 0.85f),               // cellGroove
+                Rgba(96, 100, 104),                    // btnFace
+                Rgba(203, 163, 137, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(113, 117, 121),                   // lpBtn
+                Rgba(133, 138, 142),                   // lpBtnHov
+                Rgba(94, 98, 101),                     // lpBtnAct
+                Rgba(85, 88, 92),                      // lpBorder
+                Rgba(200, 208, 210),                   // lpBtnOnFace — the ON state
+                Rgba(51, 54, 55),                      // lpBtnOnInk
+                Rgba(37, 38, 40),                      // lpRule
+            },
+            {   // Simple Pine — 소나무 · 짙은 침엽 (신규)
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Pine",
+                Rgba(1, 41, 41),                       // borders/ink
+                Rgba(70, 108, 83),                     // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(209, 223, 213, 0.8f),             // inkDim
+                Rgba(71, 122, 97, 0.68f),              // winBg (translucent board)
+                Rgba(64, 83, 57),                      // glyph
+                Rgba(24, 35, 22),                      // shade (occupied cell)
+                Rgba(93, 128, 97),                     // sel
+                Rgba(93, 128, 97),                     // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(40, 58, 40, 0.9775f),             // cellBg
+                Rgba(27, 46, 31, 0.85f),               // cellGroove
+                Rgba(20, 66, 50),                      // btnFace
+                Rgba(174, 142, 175, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(48, 81, 62),                      // lpBtn
+                Rgba(67, 102, 80),                     // lpBtnHov
+                Rgba(32, 62, 47),                      // lpBtnAct
+                Rgba(16, 55, 42),                      // lpBorder
+                Rgba(170, 186, 151),                   // lpBtnOnFace — the ON state
+                Rgba(17, 28, 12),                      // lpBtnOnInk
+                Rgba(0, 19, 14),                       // lpRule
+            },
+            {   // Simple Forest — 상록
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Forest",
+                Rgba(0, 67, 62),                       // borders/ink
+                Rgba(104, 139, 104),                   // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(220, 233, 220, 0.8f),             // inkDim
+                Rgba(105, 152, 117, 0.68f),            // winBg (translucent board)
+                Rgba(99, 113, 81),                     // glyph
+                Rgba(48, 57, 40),                      // shade (occupied cell)
+                Rgba(126, 157, 116),                   // sel
+                Rgba(126, 157, 116),                   // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(71, 87, 62, 0.9775f),             // cellBg
+                Rgba(55, 72, 51, 0.85f),               // cellGroove
+                Rgba(53, 96, 72),                      // btnFace
+                Rgba(182, 158, 194, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(81, 112, 85),                     // lpBtn
+                Rgba(101, 133, 103),                   // lpBtnHov
+                Rgba(63, 92, 69),                      // lpBtnAct
+                Rgba(47, 83, 63),                      // lpBorder
+                Rgba(196, 204, 162),                   // lpBtnOnFace — the ON state
+                Rgba(38, 46, 29),                      // lpBtnOnInk
+                Rgba(13, 34, 25),                      // lpRule
+            },
+            {   // Simple Petrol — 페트롤 · 짙은 청록 (신규)
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Petrol",
+                Rgba(0, 38, 50),                       // borders/ink
+                Rgba(35, 107, 105),                    // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(201, 223, 221, 0.8f),             // inkDim
+                Rgba(29, 121, 123, 0.68f),             // winBg (translucent board)
+                Rgba(36, 83, 72),                      // glyph
+                Rgba(9, 34, 29),                       // shade (occupied cell)
+                Rgba(57, 128, 121),                    // sel
+                Rgba(57, 128, 121),                    // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(16, 58, 52, 0.9775f),             // cellBg
+                Rgba(5, 45, 42, 0.85f),                // cellGroove
+                Rgba(0, 63, 67),                       // btnFace
+                Rgba(190, 137, 148, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(18, 79, 79),                      // lpBtn
+                Rgba(38, 101, 100),                    // lpBtnHov
+                Rgba(1, 61, 62),                       // lpBtnAct
+                Rgba(1, 53, 57),                       // lpBorder
+                Rgba(140, 190, 169),                   // lpBtnOnFace — the ON state
+                Rgba(0, 28, 23),                       // lpBtnOnInk
+                Rgba(0, 18, 19),                       // lpRule
+            },
+            {   // Simple Steel — 강철 · 짙은 청회 (신규)
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Steel",
+                Rgba(19, 36, 73),                      // borders/ink
+                Rgba(66, 107, 129),                    // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(209, 222, 230, 0.8f),             // inkDim
+                Rgba(76, 119, 146, 0.68f),             // winBg (translucent board)
+                Rgba(46, 85, 96),                      // glyph
+                Rgba(16, 36, 42),                      // shade (occupied cell)
+                Rgba(80, 128, 149),                    // sel
+                Rgba(80, 128, 149),                    // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(30, 60, 71, 0.9775f),             // cellBg
+                Rgba(21, 47, 57, 0.85f),               // cellGroove
+                Rgba(32, 63, 85),                      // btnFace
+                Rgba(186, 145, 122, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(49, 80, 98),                      // lpBtn
+                Rgba(66, 102, 121),                    // lpBtnHov
+                Rgba(34, 62, 78),                      // lpBtnAct
+                Rgba(27, 53, 72),                      // lpBorder
+                Rgba(143, 191, 200),                   // lpBtnOnFace — the ON state
+                Rgba(6, 29, 35),                       // lpBtnOnInk
+                Rgba(4, 18, 29),                       // lpRule
+            },
+            {   // Simple Sky — 하늘 · 시안 도는 파랑 (신규)
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Sky",
+                Rgba(7, 62, 98),                       // borders/ink
+                Rgba(64, 140, 157),                    // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(211, 233, 239, 0.8f),             // inkDim
+                Rgba(66, 152, 176, 0.68f),             // winBg (translucent board)
+                Rgba(57, 117, 121),                    // glyph
+                Rgba(27, 59, 61),                      // shade (occupied cell)
+                Rgba(77, 160, 173),                    // sel
+                Rgba(77, 160, 173),                    // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(40, 89, 95, 0.9775f),             // cellBg
+                Rgba(30, 73, 81, 0.85f),               // cellGroove
+                Rgba(22, 95, 116),                     // btnFace
+                Rgba(206, 154, 145, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(53, 112, 127),                    // lpBtn
+                Rgba(69, 134, 150),                    // lpBtnHov
+                Rgba(39, 92, 106),                     // lpBtnAct
+                Rgba(23, 82, 101),                     // lpBorder
+                Rgba(145, 212, 210),                   // lpBtnOnFace — the ON state
+                Rgba(13, 49, 51),                      // lpBtnOnInk
+                Rgba(5, 33, 44),                       // lpRule
             },
             {   // 6 Simple — a plain blue windowed panel. Two things carry it
                 // and neither is a colour: the border is TWO lines (dark outer
@@ -264,211 +591,214 @@ namespace FUI::Theme
                 // IS the panel), so without this every cell would lighten.
                 Rgba(43, 88, 102, 0.9775f),             // cellBg
                 Rgba(34, 72, 86, 0.85f),                // cellGroove (inner shadow only)
-                Rgba(62, 118, 146, 0.85f),              // cellGrooveLt (unused)
                 Rgba(42, 92, 122),                      // btnFace
                 Rgba(190, 158, 166, 0.50f),             // bagOpen: pale, half strength
                 Rgba(238, 206, 118),                    // goldNum — money, not "a value"
                 24.0f,                                  // titleSize (34px bar leaves 5px above and below)
             },
-            {   // Simple Silver — 무채색에 가까운 은빛 — XP Luna Silver 계열
-                // ★Derived from Simple's own tokens: hue moved, saturation and
-                // the lightness STEPS between chrome / cell / groove preserved.
-                // Same grammar (bevelChrome + engravedCells + translucent).
-                "Simple Silver",
-                Rgba(67, 71, 79),                       // borders/ink
-                Rgba(119, 127, 131),                    // inner rim
-                Rgba(255, 255, 255),                    // ink
-                Rgba(232, 233, 235, 0.8f),              // inkDim
-                Rgba(132, 139, 145, 0.68f),             // winBg (translucent board)
-                Rgba(94, 101, 104),                     // glyph
-                Rgba(49, 53, 55),                       // shade (occupied cell)
-                Rgba(133, 141, 145),                    // sel
-                Rgba(133, 141, 145),                    // filled
-                0.0f, 0.0f,                             // rounding / titleSpacing
-                false, false, false, false,             // no cornerFade/strip/glow/◇
-                false,                                  // no torn frame
-                true, true,                             // translucent + bevelChrome
-                true,                                   // lightPanel
-                true,                                   // engravedCells
-                Rgba(73, 79, 82, 0.9775f),              // cellBg
-                Rgba(61, 66, 69, 0.85f),                // cellGroove
-                Rgba(103, 110, 115, 0.85f),             // cellGrooveLt (unused)
-                Rgba(82, 88, 93),                       // btnFace
-                Rgba(194, 171, 159, 0.5f),              // bagOpen (complement, so it never reads as the panel)
-                Rgba(238, 206, 118),                    // goldNum — money is money on every theme
-                24.0f,                                  // titleSize
-                // ★★light-panel palette. Simple leaves these at alpha 0 and
-                // inherits the fallbacks in Theme.cpp — which are ITS blues.
-                // A theme that stays silent gets a blue preset "+" and a blue
-                // toggled-ON chip on an otherwise silver window, so every
-                // one of them is named here.
-                Rgba(98, 104, 108),                     // lpBtn
-                Rgba(118, 124, 129),                    // lpBtnHov
-                Rgba(81, 86, 90),                       // lpBtnAct
-                Rgba(73, 78, 82),                       // lpBorder
-                Rgba(183, 190, 192),                    // lpBtnOnFace — the ON state
-                Rgba(37, 42, 43),                       // lpBtnOnInk
-                Rgba(32, 35, 37),                       // lpRule
+            {   // Simple Plum — 자두 · 어두운 보라 (신규)
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Plum",
+                Rgba(62, 2, 31),                       // borders/ink
+                Rgba(99, 81, 112),                     // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(219, 212, 224, 0.8f),             // inkDim
+                Rgba(117, 90, 124, 0.68f),             // winBg (translucent board)
+                Rgba(65, 63, 89),                      // glyph
+                Rgba(25, 24, 37),                      // shade (occupied cell)
+                Rgba(114, 101, 137),                   // sel
+                Rgba(114, 101, 137),                   // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(46, 41, 61, 0.9775f),             // cellBg
+                Rgba(38, 30, 48, 0.85f),               // cellGroove
+                Rgba(64, 40, 64),                      // btnFace
+                Rgba(135, 151, 113, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(73, 56, 81),                      // lpBtn
+                Rgba(94, 76, 104),                     // lpBtnHov
+                Rgba(57, 41, 62),                      // lpBtnAct
+                Rgba(53, 32, 53),                      // lpBorder
+                Rgba(165, 170, 205),                   // lpBtnOnFace — the ON state
+                Rgba(20, 18, 32),                      // lpBtnOnInk
+                Rgba(23, 4, 20),                       // lpRule
             },
-            {   // Simple Graphite — 먹빛 중성. 이 가족에서 가장 어둡다
-                // ★Derived from Simple's own tokens: hue moved, saturation and
-                // the lightness STEPS between chrome / cell / groove preserved.
-                // Same grammar (bevelChrome + engravedCells + translucent).
-                "Simple Graphite",
-                Rgba(47, 51, 63),                       // borders/ink
-                Rgba(98, 108, 116),                     // inner rim
-                Rgba(255, 255, 255),                    // ink
-                Rgba(211, 215, 220, 0.8f),              // inkDim
-                Rgba(109, 120, 132, 0.68f),             // winBg (translucent board)
-                Rgba(74, 83, 88),                       // glyph
-                Rgba(31, 35, 37),                       // shade (occupied cell)
-                Rgba(110, 123, 132),                    // sel
-                Rgba(110, 123, 132),                    // filled
-                0.0f, 0.0f,                             // rounding / titleSpacing
-                false, false, false, false,             // no cornerFade/strip/glow/◇
-                false,                                  // no torn frame
-                true, true,                             // translucent + bevelChrome
-                true,                                   // lightPanel
-                true,                                   // engravedCells
-                Rgba(54, 61, 65, 0.9775f),              // cellBg
-                Rgba(43, 48, 52, 0.85f),                // cellGroove
-                Rgba(83, 91, 99, 0.85f),                // cellGrooveLt (unused)
-                Rgba(62, 69, 77),                       // btnFace
-                Rgba(187, 164, 148, 0.5f),              // bagOpen (complement, so it never reads as the panel)
-                Rgba(238, 206, 118),                    // goldNum — money is money on every theme
-                24.0f,                                  // titleSize
-                // ★★light-panel palette. Simple leaves these at alpha 0 and
-                // inherits the fallbacks in Theme.cpp — which are ITS blues.
-                // A theme that stays silent gets a blue preset "+" and a blue
-                // toggled-ON chip on an otherwise graphite window, so every
-                // one of them is named here.
-                Rgba(78, 85, 92),                       // lpBtn
-                Rgba(97, 105, 113),                     // lpBtnHov
-                Rgba(61, 67, 73),                       // lpBtnAct
-                Rgba(54, 59, 66),                       // lpBorder
-                Rgba(160, 174, 180),                    // lpBtnOnFace — the ON state
-                Rgba(19, 23, 25),                       // lpBtnOnInk
-                Rgba(15, 16, 19),                       // lpRule
+            {   // Simple Violet — 제비꽃 · 보라
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Violet",
+                Rgba(102, 33, 72),                     // borders/ink
+                Rgba(136, 124, 166),                   // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(232, 227, 242, 0.8f),             // inkDim
+                Rgba(155, 132, 178, 0.68f),            // winBg (translucent board)
+                Rgba(100, 107, 140),                   // glyph
+                Rgba(50, 53, 71),                      // shade (occupied cell)
+                Rgba(148, 144, 189),                   // sel
+                Rgba(148, 144, 189),                   // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(79, 80, 107, 0.9775f),            // cellBg
+                Rgba(68, 65, 88, 0.85f),               // cellGroove
+                Rgba(102, 79, 113),                    // btnFace
+                Rgba(163, 170, 130, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(112, 99, 131),                    // lpBtn
+                Rgba(132, 119, 156),                   // lpBtnHov
+                Rgba(93, 80, 108),                     // lpBtnAct
+                Rgba(89, 69, 98),                      // lpBorder
+                Rgba(182, 200, 241),                   // lpBtnOnFace — the ON state
+                Rgba(39, 43, 61),                      // lpBtnOnInk
+                Rgba(38, 26, 40),                      // lpRule
             },
-            {   // Simple Copper — 구리·적갈. 따뜻한 금속
-                // ★Derived from Simple's own tokens: hue moved, saturation and
-                // the lightness STEPS between chrome / cell / groove preserved.
-                // Same grammar (bevelChrome + engravedCells + translucent).
-                "Simple Copper",
-                Rgba(97, 62, 28),                       // borders/ink
-                Rgba(152, 90, 77),                      // inner rim
-                Rgba(255, 255, 255),                    // ink
-                Rgba(237, 215, 209, 0.8f),              // inkDim
-                Rgba(174, 103, 83, 0.68f),              // winBg (translucent board)
-                Rgba(118, 63, 60),                      // glyph
-                Rgba(56, 30, 28),                       // shade (occupied cell)
-                Rgba(173, 96, 85),                      // sel
-                Rgba(173, 96, 85),                      // filled
-                0.0f, 0.0f,                             // rounding / titleSpacing
-                false, false, false, false,             // no cornerFade/strip/glow/◇
-                false,                                  // no torn frame
-                true, true,                             // translucent + bevelChrome
-                true,                                   // lightPanel
-                true,                                   // engravedCells
-                Rgba(91, 49, 44, 0.9775f),              // cellBg
-                Rgba(75, 40, 35, 0.85f),                // cellGroove
-                Rgba(133, 79, 65, 0.85f),               // cellGrooveLt (unused)
-                Rgba(109, 60, 45),                      // btnFace
-                Rgba(153, 186, 190, 0.5f),              // bagOpen (complement, so it never reads as the panel)
-                Rgba(238, 206, 118),                    // goldNum — money is money on every theme
-                24.0f,                                  // titleSize
-                // ★★light-panel palette. Simple leaves these at alpha 0 and
-                // inherits the fallbacks in Theme.cpp — which are ITS blues.
-                // A theme that stays silent gets a blue preset "+" and a blue
-                // toggled-ON chip on an otherwise copper window, so every
-                // one of them is named here.
-                Rgba(122, 75, 64),                      // lpBtn
-                Rgba(145, 93, 80),                      // lpBtnHov
-                Rgba(100, 60, 49),                      // lpBtnAct
-                Rgba(94, 54, 41),                       // lpBorder
-                Rgba(213, 142, 141),                    // lpBtnOnFace — the ON state
-                Rgba(45, 16, 15),                       // lpBtnOnInk
-                Rgba(36, 20, 13),                       // lpRule
+            {   // Simple Indigo — 남색 · 짙은 청보라
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
+                "Simple Indigo",
+                Rgba(85, 42, 93),                      // borders/ink
+                Rgba(111, 130, 172),                   // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(224, 229, 244, 0.8f),             // inkDim
+                Rgba(128, 140, 188, 0.68f),            // winBg (translucent board)
+                Rgba(80, 111, 141),                    // glyph
+                Rgba(40, 55, 71),                      // shade (occupied cell)
+                Rgba(120, 150, 194),                   // sel
+                Rgba(120, 150, 194),                   // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(63, 84, 109, 0.9775f),            // cellBg
+                Rgba(54, 68, 91, 0.85f),               // cellGroove
+                Rgba(81, 84, 121),                     // btnFace
+                Rgba(181, 165, 127, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(92, 104, 137),                    // lpBtn
+                Rgba(110, 125, 162),                   // lpBtnHov
+                Rgba(76, 84, 114),                     // lpBtnAct
+                Rgba(72, 73, 105),                     // lpBorder
+                Rgba(160, 206, 239),                   // lpBtnOnFace — the ON state
+                Rgba(28, 45, 62),                      // lpBtnOnInk
+                Rgba(30, 28, 45),                      // lpRule
             },
             {   // Simple Wine — 적포도주
-                // ★Derived from Simple's own tokens: hue moved, saturation and
-                // the lightness STEPS between chrome / cell / groove preserved.
-                // Same grammar (bevelChrome + engravedCells + translucent).
+            // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
+            // are HELD, so every skin in this family carries the same perceptual
+            // weight and only the colour differs. Rotating in HSL does not — the
+            // same saturation number is quiet in brown and loud in magenta — which
+            // is how Wine once ended up competing with the item icons.
                 "Simple Wine",
-                Rgba(92, 34, 39),                       // borders/ink
-                Rgba(147, 83, 108),                     // inner rim
-                Rgba(255, 255, 255),                    // ink
-                Rgba(235, 211, 219, 0.8f),              // inkDim
-                Rgba(167, 90, 117, 0.68f),              // winBg (translucent board)
-                Rgba(113, 64, 89),                      // glyph
-                Rgba(54, 30, 42),                       // shade (occupied cell)
-                Rgba(166, 91, 124),                     // sel
-                Rgba(166, 91, 124),                     // filled
-                0.0f, 0.0f,                             // rounding / titleSpacing
-                false, false, false, false,             // no cornerFade/strip/glow/◇
-                false,                                  // no torn frame
-                true, true,                             // translucent + bevelChrome
-                true,                                   // lightPanel
-                true,                                   // engravedCells
-                Rgba(87, 48, 66, 0.9775f),              // cellBg
-                Rgba(72, 38, 53, 0.85f),                // cellGroove
-                Rgba(128, 70, 91, 0.85f),               // cellGrooveLt (unused)
-                Rgba(104, 50, 67),                      // btnFace
-                Rgba(153, 190, 173, 0.5f),              // bagOpen (complement, so it never reads as the panel)
-                Rgba(238, 206, 118),                    // goldNum — money is money on every theme
-                24.0f,                                  // titleSize
-                // ★★light-panel palette. Simple leaves these at alpha 0 and
-                // inherits the fallbacks in Theme.cpp — which are ITS blues.
-                // A theme that stays silent gets a blue preset "+" and a blue
-                // toggled-ON chip on an otherwise wine window, so every
-                // one of them is named here.
-                Rgba(117, 68, 86),                      // lpBtn
-                Rgba(140, 85, 106),                     // lpBtnHov
-                Rgba(96, 53, 69),                       // lpBtnAct
-                Rgba(90, 45, 59),                       // lpBorder
-                Rgba(208, 147, 181),                    // lpBtnOnFace — the ON state
-                Rgba(43, 17, 30),                       // lpBtnOnInk
-                Rgba(34, 15, 20),                       // lpRule
+                Rgba(103, 38, 33),                     // borders/ink
+                Rgba(165, 116, 139),                   // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(242, 225, 232, 0.8f),             // inkDim
+                Rgba(183, 125, 146, 0.68f),            // winBg (translucent board)
+                Rgba(129, 99, 124),                    // glyph
+                Rgba(65, 49, 62),                      // shade (occupied cell)
+                Rgba(183, 134, 163),                   // sel
+                Rgba(183, 134, 163),                   // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(101, 74, 92, 0.9775f),            // cellBg
+                Rgba(85, 60, 74, 0.85f),               // cellGroove
+                Rgba(120, 74, 87),                     // btnFace
+                Rgba(130, 176, 152, 0.5f),             // bagOpen (complement, so it never reads as the panel)
+                Rgba(238, 206, 118),                   // goldNum — money is money on every theme
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(133, 93, 109),                    // lpBtn
+                Rgba(157, 113, 132),                   // lpBtnHov
+                Rgba(111, 75, 89),                     // lpBtnAct
+                Rgba(105, 64, 76),                     // lpBorder
+                Rgba(220, 190, 225),                   // lpBtnOnFace — the ON state
+                Rgba(55, 39, 52),                      // lpBtnOnInk
+                Rgba(45, 24, 29),                      // lpRule
             },
-            {   // Simple Forest — 짙은 상록
-                // ★Derived from Simple's own tokens: hue moved, saturation and
-                // the lightness STEPS between chrome / cell / groove preserved.
-                // Same grammar (bevelChrome + engravedCells + translucent).
-                "Simple Forest",
-                Rgba(34, 91, 69),                       // borders/ink
-                Rgba(84, 146, 103),                     // inner rim
-                Rgba(255, 255, 255),                    // ink
-                Rgba(211, 235, 220, 0.8f),              // inkDim
-                Rgba(91, 166, 117, 0.68f),              // winBg (translucent board)
-                Rgba(65, 113, 74),                      // glyph
-                Rgba(30, 54, 35),                       // shade (occupied cell)
-                Rgba(92, 165, 111),                     // sel
-                Rgba(92, 165, 111),                     // filled
-                0.0f, 0.0f,                             // rounding / titleSpacing
-                false, false, false, false,             // no cornerFade/strip/glow/◇
-                false,                                  // no torn frame
-                true, true,                             // translucent + bevelChrome
-                true,                                   // lightPanel
-                true,                                   // engravedCells
-                Rgba(48, 87, 57, 0.9775f),              // cellBg
-                Rgba(38, 72, 47, 0.85f),                // cellGroove
-                Rgba(71, 127, 90, 0.85f),               // cellGrooveLt (unused)
-                Rgba(51, 103, 70),                      // btnFace
-                Rgba(190, 153, 181, 0.5f),              // bagOpen (complement, so it never reads as the panel)
-                Rgba(238, 206, 118),                    // goldNum — money is money on every theme
-                24.0f,                                  // titleSize
-                // ★★light-panel palette. Simple leaves these at alpha 0 and
-                // inherits the fallbacks in Theme.cpp — which are ITS blues.
-                // A theme that stays silent gets a blue preset "+" and a blue
-                // toggled-ON chip on an otherwise forest window, so every
-                // one of them is named here.
-                Rgba(69, 117, 85),                      // lpBtn
-                Rgba(86, 140, 104),                     // lpBtnHov
-                Rgba(54, 96, 68),                       // lpBtnAct
-                Rgba(46, 89, 63),                       // lpBorder
-                Rgba(148, 207, 156),                    // lpBtnOnFace — the ON state
-                Rgba(17, 42, 22),                       // lpBtnOnInk
-                Rgba(15, 34, 23),                       // lpRule
+            {   // Simple Strawberry Milk — 딸기우유 · 연분홍 + 크림
+            // ★★A CONCEPT skin, not a hue rotation. The fruit names three colours
+            // in fixed roles, so the rotation builds only the body and the rest are
+            // placed by hand: the cap on every toggled-ON control (and so on the
+            // EDIT painter — green is the theme here, not the mistake it would be
+            // on Copper), the leaf on the open-bag tile, the seeds on the money.
+            // ★Louder than the wheel skins on purpose. At their lightness the sRGB
+            // gamut gives red barely a third of this chroma, and what came out was
+            // a dusty rose indistinguishable from Ruby — the very thing a concept
+            // skin exists to avoid.
+                "Simple Strawberry Milk",
+                Rgba(124, 62, 41),                     // borders/ink
+                Rgba(192, 135, 150),                   // inner rim
+                Rgba(255, 255, 255),                   // ink
+                Rgba(250, 230, 235, 0.8f),             // inkDim
+                Rgba(209, 143, 155, 0.68f),            // winBg (translucent board)
+                Rgba(158, 118, 140),                   // glyph
+                Rgba(89, 67, 78),                      // shade (occupied cell)
+                Rgba(209, 150, 172),                   // sel
+                Rgba(209, 150, 172),                   // filled
+                0.0f, 0.0f,                            // rounding / titleSpacing
+                false, false, false, false,            // no cornerFade/strip/glow/◇
+                false,                                 // no torn frame
+                true, true,                            // translucent + bevelChrome
+                true,                                  // lightPanel
+                true,                                  // engravedCells
+                Rgba(129, 94, 109, 0.9775f),           // cellBg
+                Rgba(111, 80, 91, 0.85f),              // cellGroove
+                Rgba(147, 95, 101),                    // btnFace
+                Rgba(240, 223, 168, 0.5f),             // bagOpen (the leaf)
+                Rgba(255, 233, 176),                   // goldNum (the seeds)
+                24.0f,                                 // titleSize
+                // light-panel palette. Naming every one is not optional: a
+                // skin that stays silent inherits the built-in fallbacks,
+                // which are SIMPLE's blues — a blue preset "+" and a blue
+                // toggled-ON chip on an otherwise unrelated window.
+                Rgba(160, 113, 124),                   // lpBtn
+                Rgba(184, 132, 145),                   // lpBtnHov
+                Rgba(138, 96, 104),                    // lpBtnAct
+                Rgba(130, 86, 90),                     // lpBorder
+                Rgba(245, 194, 206),                   // lpBtnOnFace — the ON state
+                Rgba(92, 30, 44),                      // lpBtnOnInk
+                Rgba(62, 39, 40),                      // lpRule
             },
         };
 
@@ -605,8 +935,6 @@ namespace FUI::Theme
         g_shadow[CSkin(a_skin)][C01(a_slot)][ax] = ClampShadow(ax, a_v);
     }
 
-    int  GlowStyle() { return g_glowStyle[SkinSlot()][IconStyleSlot()]; }
-    void SetGlowStyle(int a_style) { SetGlowStyleOf(g_skin, IconStyleSlot(), a_style); }
     int  GlowStyleOf(int a_skin, int a_slot)
     {
         return g_glowStyle[CSkin(a_skin)][C01(a_slot)];
@@ -623,23 +951,12 @@ namespace FUI::Theme
         return g_glowGain[sk][slot][g_glowStyle[sk][slot]];
     }
 
-    float DefaultGlowGain() { return DefGlowGain(g_glowStyle[SkinSlot()][IconStyleSlot()]); }
     float DefaultIconGain() { return DefIconGain(IconStyleSlot()); }
 
     void SetGlowGain(float a_gain)
     {
         const int sk = SkinSlot(), slot = IconStyleSlot();
         SetGlowGainAt(g_skin, slot, g_glowStyle[sk][slot], a_gain);
-    }
-
-    float GlowGainOf(int a_style)
-    {
-        return GlowGainAt(g_skin, IconStyleSlot(), a_style);
-    }
-
-    void SetGlowGainOf(int a_style, float a_gain)
-    {
-        SetGlowGainAt(g_skin, IconStyleSlot(), a_style, a_gain);
     }
 
     float GlowGainAt(int a_skin, int a_slot, int a_style)
@@ -779,8 +1096,74 @@ namespace FUI::Theme
         // ★ONE answer for the board, the doll and the partner window. They used
         // to each reach for sk.shade with their own alpha, so the same colour
         // said "occupied" loudly on one half of the window and almost nothing
-        // on the other. The token carries its own alpha; nobody overrides it.
+        // on the other.
+        //
+        // ★★DERIVING THIS WAS TRIED AND REVERTED — twice, and the second try
+        // was measured. Do not reach for it again without reading this.
+        //
+        // The complaint that started it is real: on the darkest skins the
+        // occupied cell lands near #101010 and a black-edged iron sprite has
+        // nothing to sit against. And the numbers looked damning — sixteen of
+        // the eighteen dark skins make the occupied cell DARKER than the empty
+        // one, and the value nobody chose (an absolute rgba(0,0,0,0.5) wash
+        // over whatever happens to be underneath).
+        //
+        // Two derivations were built anyway:
+        //   1. empty cell + N% toward the ink.  On SIMPLE the panel is a light
+        //      frame with cells carved into it, so one step up from the cell
+        //      landed ON the panel: the grid dissolved into a flat sheet.
+        //   2. panel ± N%, direction chosen by relative luminance, both numbers
+        //      swept for the best worst-case contrast (1.37-1.93:1 against the
+        //      panel AND the empty cell on all nineteen). It measured better
+        //      than the originals on every axis and still looked WORSE.
+        //
+        // ★★Why: these skins are not flat colour, they are a MATERIAL. Cells
+        // are recessed wells (SIMPLE even has groove machinery for it), and an
+        // occupied cell is a deeper well — the ground under a thing. Both
+        // derivations turned it into a raised, lighter plate on most skins,
+        // which is a different material language, and the contrast numbers
+        // cannot see that. The hand-tuned values are carrying something the
+        // one-number rule does not encode.
+        //
+        // ★So the ground is the wrong lever. Legibility of a dark sprite on a
+        // dark ground belongs to the SPRITE: 1.0.5 already ships a shadow
+        // (distance/blur/opacity) for the mirror case, a pale item on a pale
+        // panel. The same machinery with a light backing is the untried
+        // candidate, and it leaves every skin's material alone.
+        // (An earlier mock "rejected" that idea, but it drew a crude circular
+        // glow rather than the real shadow renderer, so it rejected a straw man.)
         return Col(S().shade);
+    }
+
+    bool LightItemShadow()
+    {
+        // ★★Named, not computed, and not indexed either.
+        // Not COMPUTED because the ground's luminance gets it wrong twice: the
+        // GLASS pair shows the game world through the cell, so what the halo
+        // has to read against is not a colour this table knows; and Silver's
+        // board is pale enough that a white halo fogs it rather than lifting
+        // the sprite. Those are looked-at judgements, not measurements.
+        // Not INDEXED because a skin inserted or reordered would silently hand
+        // the light halo to its neighbour. A name survives both.
+        static const char* const kLight[] = {
+            "Fable Crimson", "Parchment Crimson",
+            "Simple Charcoal", "Simple Graphite", "Simple Pine",
+            "Simple Forest", "Simple Petrol", "Simple Steel", "Simple Sky",
+            "Simple", "Simple Plum", "Simple Violet", "Simple Indigo",
+            "Simple Wine", "Simple Strawberry Milk",
+        };
+        // asked per sprite, so answer it once per skin change
+        static int  s_for = -1;
+        static bool s_val = false;
+        if (s_for != g_skin) {
+            s_for = g_skin;
+            s_val = false;
+            const char* nm = S().name;
+            for (const char* n : kLight) {
+                if (nm && std::strcmp(n, nm) == 0) { s_val = true; break; }
+            }
+        }
+        return s_val;
     }
 
     // ---- metrics -------------------------------------------------------------
@@ -869,7 +1252,6 @@ namespace FUI::Theme
     const ImVec4& TipGood() { return kTipGood; }
     const ImVec4& TipBad()  { return kTipBad; }
     const ImVec4& TipSub()  { return kTipSub; }
-    const ImVec4& TipBody() { return kTipBody; }
 
     void PushTipStyle()
     {
@@ -1029,6 +1411,169 @@ namespace FUI::Theme
         put(a_pos, a_col);
     }
 
+    float GaugeStepW() { return 16.0f * g_scale; }
+
+    bool GaugeEditing(const char* a_id)
+    {
+        // ★GetID resolves against the CURRENT id stack, which is the same stack
+        // the widget will be submitted on -- so this is the widget's own id,
+        // asked one line early.
+        return a_id && ImGui::TempInputIsActive(ImGui::GetID(a_id));
+    }
+
+    void GaugeInputFrame(ImDrawList* a_dl, const ImVec2& a_p, float a_w, float a_h)
+    {
+        if (!a_dl) return;
+        const Skin& sk = S();
+        const ImVec2 p1(a_p.x + a_w, a_p.y + a_h);
+        const float  r = FrameRounding();
+        // ★Darker than the well, on either kind of panel. A text field is a
+        // hole you put something into; the gauge's own well is a track with a
+        // level in it, and at a glance the two must not swap meanings.
+        a_dl->AddRectFilled(a_p, p1,
+            sk.lightPanel ? IM_COL32(0, 0, 0, 92) : IM_COL32(0, 0, 0, 130), r);
+        // accent border, doubled -- this is the one row on the panel that is
+        // currently listening to the keyboard, and it should look like it
+        a_dl->AddRect(a_p, p1, BtnOn(1.0f), r, 0, 2.0f * g_scale);
+    }
+
+    void GaugeInputPushAlign(const char* a_id, float a_w)
+    {
+        const ImGuiStyle& st = ImGui::GetStyle();
+        float tw = 0.0f;
+        // ★The text being typed lives in ImGui's own edit buffer, not in the
+        // variable behind the slider -- the variable only catches up when the
+        // entry is accepted. Measure what is actually on screen.
+        if (a_id) {
+            if (auto* s = ImGui::GetInputTextState(ImGui::GetID(a_id))) {
+                const char* t = s->GetText();
+                tw = ImGui::CalcTextSize(t, t + s->TextLen).x;
+            }
+        }
+        // ★Never narrower than the normal padding: once the text is long enough
+        // to fill the box this has to degrade back into an ordinary left-aligned
+        // field, or ImGui's scroll-follow would fight the centring for the caret.
+        const float pad = (std::max)(st.FramePadding.x, (a_w - tw) * 0.5f);
+        // y untouched -- the row measured its height with the old padding, and
+        // GetFrameHeight() is built from FramePadding.y.
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(pad, st.FramePadding.y));
+    }
+
+    void GaugeInputPopAlign() { ImGui::PopStyleVar(); }
+
+    const char* GaugeInputHint() { return Lang::T(Lang::Str::GaugeTyping); }
+
+    void GaugeBar(ImDrawList* a_dl, const ImVec2& a_p, float a_w, float a_h,
+                  float a_frac)
+    {
+        if (!a_dl) return;
+        const float r = FrameRounding();
+        const ImVec2 p1(a_p.x + a_w, a_p.y + a_h);
+        a_dl->AddRectFilled(a_p, p1, GaugeTrack(), r);
+        const float sw = GaugeStepW();
+        const float inner = (std::max)(0.0f, a_w - sw * 2.0f);
+        const float f = (std::max)(0.0f, (std::min)(1.0f, a_frac));
+        if (f > 0.0f && inner > 0.0f) {
+            // ★Square, and inset on BOTH sides: the fill no longer touches the
+            // frame, so rounding it would leave a sliver of well showing along
+            // a corner it never reaches.
+            a_dl->AddRectFilled(ImVec2(a_p.x + sw, a_p.y),
+                                ImVec2(a_p.x + sw + inner * f, p1.y),
+                                GaugeFill(), 0.0f);
+        }
+        a_dl->AddRect(a_p, p1, GaugeBorder(), r);
+    }
+
+    namespace
+    {
+        // One arrow. Draws itself and reports whether it fired this frame.
+        // ★The glyph is DRAWN, not typed: a "<" from the atlas is a text
+        // glyph whose weight and baseline follow the body font, and next to a
+        // 10px number it read as punctuation rather than a control. Two
+        // triangles are the same at every scale and every skin.
+        bool StepArrow(ImDrawList* a_dl, const ImVec2& a_p, float a_h,
+                       const char* a_id, bool a_right, bool a_atEnd)
+        {
+            const float w = GaugeStepW();
+            ImGui::SetCursorScreenPos(a_p);
+            ImGui::PushID(a_id);
+            const bool hit = ImGui::InvisibleButton(a_right ? "##r" : "##l",
+                                                    ImVec2(w, a_h));
+            const bool hov = ImGui::IsItemHovered();
+            const bool act = ImGui::IsItemActive();
+            ImGui::PopID();
+
+            const ImVec2 p1(a_p.x + w, a_p.y + a_h);
+            // A face only under the cursor: an always-on plate would read as
+            // two more chrome elements per row, and there are six rows.
+            if (hov || act) {
+                a_dl->AddRectFilled(a_p, p1,
+                    act ? BtnOn(1.0f) : Col(S().lightPanel ? S().ink : S().hi, 0.22f),
+                    FrameRounding());
+            }
+            // ★Greyed at the end of travel rather than hidden -- a control that
+            // vanishes at the limit makes the row twitch as the value crosses
+            // it, and the player is usually holding the button when it happens.
+            const float a = a_atEnd ? 0.28f : (hov || act ? 1.0f : 0.62f);
+            const ImU32 ink = act && !a_atEnd ? BtnOnInk() : Col(S().ink, a);
+            const float cx = a_p.x + w * 0.5f, cy = a_p.y + a_h * 0.5f;
+            const float s = 3.2f * g_scale;
+            if (a_right) {
+                a_dl->AddTriangleFilled(ImVec2(cx - s * 0.6f, cy - s),
+                                        ImVec2(cx - s * 0.6f, cy + s),
+                                        ImVec2(cx + s * 0.8f, cy), ink);
+            } else {
+                a_dl->AddTriangleFilled(ImVec2(cx + s * 0.6f, cy - s),
+                                        ImVec2(cx + s * 0.6f, cy + s),
+                                        ImVec2(cx - s * 0.8f, cy), ink);
+            }
+            return hit;
+        }
+    }
+
+    bool GaugeStep(const ImVec2& a_p, float a_w, float a_h, const char* a_id,
+                   float& a_val, float a_step, float a_lo, float a_hi)
+    {
+        auto* dl = ImGui::GetWindowDrawList();
+        bool changed = false;
+        // ★Repeat is ImGui's own (KeyRepeatDelay / KeyRepeatRate), so holding
+        // an arrow behaves like holding a key anywhere else in the game.
+        ImGui::PushButtonRepeat(true);
+        if (StepArrow(dl, a_p, a_h, a_id, false, a_val <= a_lo + 1e-4f)) {
+            a_val = (std::max)(a_lo, a_val - a_step);
+            changed = true;
+        }
+        if (StepArrow(dl, ImVec2(a_p.x + a_w - GaugeStepW(), a_p.y), a_h, a_id,
+                      true, a_val >= a_hi - 1e-4f)) {
+            a_val = (std::min)(a_hi, a_val + a_step);
+            changed = true;
+        }
+        ImGui::PopButtonRepeat();
+        return changed;
+    }
+
+    bool GaugeStepInt(const ImVec2& a_p, float a_w, float a_h, const char* a_id,
+                      int& a_val, int a_step, int a_lo, int a_hi)
+    {
+        float v = static_cast<float>(a_val);
+        const bool ch = GaugeStep(a_p, a_w, a_h, a_id, v,
+                                  static_cast<float>(a_step),
+                                  static_cast<float>(a_lo),
+                                  static_cast<float>(a_hi));
+        if (ch) a_val = static_cast<int>(std::lround(v));
+        return ch;
+    }
+
+    void TextOutlinedFlow(ImU32 a_col, const char* a_text, float a_size,
+                          float a_spacing)
+    {
+        const ImVec2 p  = ImGui::GetCursorScreenPos();
+        const ImVec2 ts = TrackedSize(a_text, a_size, a_spacing);
+        TextOutlined(ImGui::GetWindowDrawList(), p, a_col, a_text,
+                     a_size, a_spacing);
+        ImGui::Dummy(ts);
+    }
+
     void TextInkCentered(ImDrawList* a_dl, const ImVec2& a_p0, const ImVec2& a_p1,
                          ImU32 a_col, const char* a_text, float a_size)
     {
@@ -1071,92 +1616,114 @@ namespace FUI::Theme
     }
 
     // ---- chrome widgets ------------------------------------------------------
-    namespace
+    // ★★The slider's number, drawn by US so it can carry the black edge
+    // ImGui cannot give it. On a light panel the fill is white and the ink
+    // is white: at full fill the value vanished, and at HALF fill it was
+    // sliced down the middle with one half legible — worse than gone,
+    // because a half-read string keeps pulling the eye back.
+    // Centred on the whole track, which is where ImGui put it.
+    // ★No longer file-local: the EDIT panel draws its own tracks and needs
+    // this half on its own. See the note in Theme.h.
+    void GaugeValue(ImDrawList* a_dl, const ImVec2& a_p, float a_w, float a_h,
+                    const char* a_fmt, float a_v, bool a_isInt)
     {
-        // ★★The slider's number, drawn by US so it can carry the black edge
-        // ImGui cannot give it. On a light panel the fill is white and the ink
-        // is white: at full fill the value vanished, and at HALF fill it was
-        // sliced down the middle with one half legible — worse than gone,
-        // because a half-read string keeps pulling the eye back.
-        // Centred on the whole track, which is where ImGui put it.
-        void GaugeValue(ImDrawList* a_dl, const ImVec2& a_p, float a_w, float a_h,
-                        const char* a_fmt, float a_v, bool a_isInt)
-        {
-            if (!a_dl || !a_fmt) return;
-            char buf[64];
-            if (a_isInt) {
-                std::snprintf(buf, sizeof(buf), a_fmt, static_cast<int>(a_v));
-            } else {
-                std::snprintf(buf, sizeof(buf), a_fmt, a_v);
-            }
-            const ImVec2 ts = ImGui::CalcTextSize(buf);
-            TextOutlined(a_dl,
-                ImVec2(a_p.x + (a_w - ts.x) * 0.5f, a_p.y + (a_h - ts.y) * 0.5f),
-                Val(), buf);
+        if (!a_dl || !a_fmt) return;
+        char buf[64];
+        if (a_isInt) {
+            std::snprintf(buf, sizeof(buf), a_fmt, static_cast<int>(a_v));
+        } else {
+            std::snprintf(buf, sizeof(buf), a_fmt, a_v);
         }
+        const ImVec2 ts = ImGui::CalcTextSize(buf);
+        TextOutlined(a_dl,
+            ImVec2(a_p.x + (a_w - ts.x) * 0.5f, a_p.y + (a_h - ts.y) * 0.5f),
+            Val(), buf);
     }
 
     bool ChromeSliderInt(const char* a_id, int* a_v, int a_min, int a_max,
                          float a_w, const char* a_fmt)
     {
-        const auto& sk = S();
         auto* dl = ImGui::GetWindowDrawList();
         const ImVec2 p = ImGui::GetCursorScreenPos();
         const float h = ImGui::GetFrameHeight();
         const float frac = a_max > a_min
             ? static_cast<float>(*a_v - a_min) / static_cast<float>(a_max - a_min)
             : 0.0f;
-        dl->AddRectFilled(p, ImVec2(p.x + a_w, p.y + h), GaugeTrack(), sk.rounding);
-        if (frac > 0.0f) {
-            dl->AddRectFilled(p, ImVec2(p.x + a_w * frac, p.y + h),
-                GaugeFill(), sk.rounding);
-        }
-        dl->AddRect(p, ImVec2(p.x + a_w, p.y + h), GaugeBorder(), sk.rounding);
+        // ★Asked BEFORE the widget: the answer decides whether the text is
+        // pushed transparent, and that cannot be undone after submission.
+        const bool typing = GaugeEditing(a_id);
+        if (typing) GaugeInputFrame(dl, p, a_w, h);
+        else        GaugeBar(dl, p, a_w, h, frac);
+        if (typing) GaugeInputPushAlign(a_id, a_w);   // keep the figure centred
         PushChromeStyle(true);
         // ★ImGui draws the value itself and cannot outline it, so it draws
         // NOTHING (transparent ink) and we put the number back below. See the
         // float version for why the outline matters.
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+        // ★★...but NOT while typing, or the characters go invisible too.
+        if (!typing) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+        // ★★Without this the arrows are DEAD. ImGui gives hover to the item
+        // submitted FIRST, and the slider covers the whole track — so a click
+        // on an arrow reached the slider instead, and two quick clicks put it
+        // into text-entry mode, which is what "the cursor started blinking and
+        // the slider stopped working" was.
+        ImGui::SetNextItemAllowOverlap();
         ImGui::SetNextItemWidth(a_w);
         const bool ch = ImGui::SliderInt(a_id, a_v, a_min, a_max, a_fmt,
             ImGuiSliderFlags_AlwaysClamp);
-        ImGui::PopStyleColor();
+        if (!typing) ImGui::PopStyleColor();
         PopChromeStyle(true);
+        if (typing) {
+            GaugeInputPopAlign();
+            return ch;           // no painted value, no arrows over a text field
+        }
         GaugeValue(dl, p, a_w, h, a_fmt, static_cast<float>(*a_v), true);
-        return ch;
+        // arrows last, so they sit above the widget that owns the whole track
+        return GaugeStepInt(p, a_w, h, a_id, *a_v, 1, a_min, a_max) || ch;
     }
 
     bool ChromeSliderFloat(const char* a_id, float* a_v, float a_min, float a_max,
                            float a_w, const char* a_fmt, float a_resetTo)
     {
-        const auto& sk = S();
         auto* dl = ImGui::GetWindowDrawList();
         const ImVec2 p = ImGui::GetCursorScreenPos();
         const float h = ImGui::GetFrameHeight();
         const float frac = a_max > a_min
             ? (std::max)(0.0f, (std::min)(1.0f, (*a_v - a_min) / (a_max - a_min)))
             : 0.0f;
-        dl->AddRectFilled(p, ImVec2(p.x + a_w, p.y + h), GaugeTrack(), sk.rounding);
-        if (frac > 0.0f) {
-            dl->AddRectFilled(p, ImVec2(p.x + a_w * frac, p.y + h),
-                GaugeFill(), sk.rounding);
-        }
-        dl->AddRect(p, ImVec2(p.x + a_w, p.y + h), GaugeBorder(), sk.rounding);
+        const bool typing = GaugeEditing(a_id);   // before the widget — see the int version
+        if (typing) GaugeInputFrame(dl, p, a_w, h);
+        else        GaugeBar(dl, p, a_w, h, frac);
+        if (typing) GaugeInputPushAlign(a_id, a_w);   // keep the figure centred
         PushChromeStyle(true);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+        if (!typing) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+        ImGui::SetNextItemAllowOverlap();   // or the arrows are dead — see above
         ImGui::SetNextItemWidth(a_w);
         bool ch = ImGui::SliderFloat(a_id, a_v, a_min, a_max, a_fmt,
             ImGuiSliderFlags_AlwaysClamp);
-        ImGui::PopStyleColor();
+        if (!typing) ImGui::PopStyleColor();
         PopChromeStyle(true);
+        if (typing) {
+            GaugeInputPopAlign();
+            return ch;
+        }
         GaugeValue(dl, p, a_w, h, a_fmt, *a_v, false);
         // ★Right-click restores the default. One gesture, defined here so every
         // settings slider has it without each row remembering to add it.
+        // ★★BEFORE the arrows: IsItemHovered reads the LAST item, and the
+        // arrows are items too. Adding them above this line would have pointed
+        // the reset at whichever arrow was drawn last, so right-clicking a
+        // track silently stopped working at both ends of it.
         if (a_resetTo > -1.0e8f && ImGui::IsItemHovered() &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             *a_v = a_resetTo;
             ch = true;
         }
+        // One step is a hundredth of a fine range, a tenth of a medium one, and
+        // a whole unit once the range is wide enough that hundredths would take
+        // all day (angles run -180..180).
+        const float span = a_max - a_min;
+        const float step = span >= 100.0f ? 1.0f : span >= 10.0f ? 0.1f : 0.01f;
+        if (GaugeStep(p, a_w, h, a_id, *a_v, step, a_min, a_max)) ch = true;
         return ch;
     }
 

@@ -125,12 +125,6 @@ namespace FUI
         // makes moving the global slider re-photograph rather than re-use.
         void SetLightOffset(float a_azDeg, float a_elDeg);
 
-        // ★DIAGNOSTIC (temporary): where the capture lamp is RIGHT NOW, tagged
-        // by the caller. The park-time log alone cannot say whether the value
-        // still held at the moment a capture was accepted — this is the other
-        // half of that comparison.
-        static void LogLightNow(const char* a_tag, const char* a_item);
-
         // ★★Has THIS request's model been parked at least one full frame?
         // RotationApplied() was doing this job by proxy and got it wrong: it
         // asks "does the node carry the requested rotation", which a DIFFERENT
@@ -141,10 +135,6 @@ namespace FUI
         // orientation and light were applied. Weapons and bags have distinct
         // angles, which is the only reason they never showed it.
         [[nodiscard]] bool ParkSettled() const;
-
-        // B4: the boost in effect right now — a soft-skip requeue stashes it
-        // so the retry doesn't restart the 1.6x ladder from zero
-        float CaptureBoost() const { return m_captureBoost; }
 
     private:
         ItemPreview() = default;

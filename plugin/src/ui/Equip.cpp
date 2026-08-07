@@ -86,6 +86,10 @@ namespace FUI::Equip
             // so right-clicking the right slot could strip the LEFT copy when
             // both hands wore identical units.
             int           hand = 0;
+            // How many units this action moves. 1 for everything worn a copy at
+            // a time; a whole tile for ammo. (Appended last so the aggregate
+            // initialisers elsewhere stay valid.)
+            int           count = 1;
         };
         std::vector<PendingAction> g_pending;
         int                        g_rebuildLag = 0;   // rebuild AFTER the queued task applied
@@ -241,16 +245,37 @@ namespace FUI::Equip
             }
 
             if (auto* ammo = player->GetCurrentAmmo()) {
-                int n = 1;
+                // ★★The count on this slot is what is ON THE BACK, not how many
+                // of that arrow the player owns. data.first is the whole stock —
+                // the quiver plus every tile still in the pack — so the doll
+                // claimed 200 while the grid showed the other 100 as its own
+                // tile, and the two together counted 300 arrows that did not
+                // exist. Harmless while the number was only printed; the moment
+                // the unequip and the carry started USING it, clicking a
+                // hundred-arrow quiver lifted two hundred.
+                // Worn units are the lists the engine marked, exactly as the
+                // rebuild counts them (Grid.cpp: wornUnits).
+                int          worn = 0;
+                int          stock = 0;
                 std::uint8_t g = Grid::GlowBits(ammo, nullptr, nullptr);
                 auto inv = player->GetInventory(
                     [&](RE::TESBoundObject& o) { return &o == ammo; });
                 for (auto& [obj, data] : inv) {
-                    n = data.first;
-                    g = Grid::GlowBits(obj, data.second.get(),
-                                       Grid::WornExtraOf(data.second.get()));
+                    stock = data.first;
+                    auto* entry = data.second.get();
+                    if (entry && entry->extraLists) {
+                        for (auto* xl : *entry->extraLists) {
+                            if (xl && (xl->HasType<RE::ExtraWorn>() ||
+                                       xl->HasType<RE::ExtraWornLeft>())) {
+                                worn += (std::max)(1, xl->GetCount());
+                            }
+                        }
+                    }
+                    g = Grid::GlowBits(obj, entry, Grid::WornExtraOf(entry));
                 }
-                add("ammo", ammo, n, g);
+                // worn but unlisted: the engine is wearing the lot
+                if (worn <= 0) worn = (std::max)(1, stock);
+                add("ammo", ammo, worn, g);
             }
 
             auto inv = player->GetInventory(
@@ -351,7 +376,10 @@ namespace FUI::Equip
                 // so the two halves of one window spoke different languages.
                 // Occupancy is said by the ground, exactly as on the board.
                 dl->AddRectFilled(p0, p1, Theme::Col(sk.cellBg), sk.rounding);
-                if (eq) dl->AddRectFilled(p0, p1, Theme::Col(sk.shade), sk.rounding);
+                // ★Theme::OccupiedGround(), not sk.shade — the doll was the one
+                // place still reading the raw token, so it would have kept the
+                // old near-black ground after the board moved off it.
+                if (eq) dl->AddRectFilled(p0, p1, Theme::OccupiedGround(), sk.rounding);
                 const ImU32 inner = Theme::Col(sk.cellGroove, sk.cellGroove.w * 0.85f);
                 dl->AddLine(ImVec2(p0.x, p0.y + 0.5f), ImVec2(p1.x, p0.y + 0.5f), inner);
                 dl->AddLine(ImVec2(p0.x + 0.5f, p0.y), ImVec2(p0.x + 0.5f, p1.y), inner);
@@ -519,7 +547,8 @@ namespace FUI::Equip
                     SKSE::log::info("[ACT] rclick-unequip '{}' slot '{}' hand={}",
                                     eq->obj->GetName(), a_slot.id, eq->hand);
                     g_pending.push_back({ eq->obj->GetFormID(), "", true,
-                                          eq->uid, -1, eq->sig, {}, eq->hand });
+                                          eq->uid, -1, eq->sig, {}, eq->hand,
+                                          EquipCountFor(eq->obj, eq->count) });
                 }
                 if (eq && ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
                     // v9.2: left-click PICKS the equipped item up — unequip
@@ -529,8 +558,15 @@ namespace FUI::Equip
                     // this form", which answered the other hand's item whenever
                     // the same form was worn twice.
                     g_pending.push_back({ eq->obj->GetFormID(), "", true,
-                                          eq->uid, -1, eq->sig, {}, eq->hand });
-                    Grid::BeginCarry(eq->obj, eq->uid, eq->sig, eq->hand);
+                                          eq->uid, -1, eq->sig, {}, eq->hand,
+                                          EquipCountFor(eq->obj, eq->count) });
+                    // ★The carry must match what the unequip above actually
+                    // takes off. Queuing the whole quiver but lifting ONE arrow
+                    // sent the other ninety-nine straight to the pack the
+                    // instant the click landed.
+                    Grid::BeginCarry(eq->obj, eq->uid, eq->sig, eq->hand,
+                                     /*swappedOut=*/false,
+                                     EquipCountFor(eq->obj, eq->count));
                 }
             } else if (ImGui::IsItemHovered()) {
                 // C6: carried item over a slot — highlight; click = equip try
@@ -540,27 +576,65 @@ namespace FUI::Equip
         }
     }
 
+    bool IsWearOrConsume(RE::TESBoundObject* a_obj)
+    {
+        if (!a_obj) return false;
+        // Spell tomes count: right-click LEARNS them and the tome is consumed
+        // (handled in ProcessPending). A plain book is read, not consumed, and
+        // takes the RequestBookRead branch instead.
+        const auto* book = a_obj->As<RE::TESObjectBOOK>();
+        return a_obj->Is(RE::FormType::Weapon) || a_obj->Is(RE::FormType::Armor) ||
+               a_obj->Is(RE::FormType::Ammo) || a_obj->Is(RE::FormType::Light) ||
+               a_obj->Is(RE::FormType::AlchemyItem) || a_obj->Is(RE::FormType::Scroll) ||
+               // ★Vanilla EATS an ingredient on click (that is how effects are
+               // discovered). The tooltip already promised "use" on these and
+               // the gate refused it — the bar said one thing, the click did
+               // another.
+               a_obj->Is(RE::FormType::Ingredient) ||
+               (book && book->TeachesSpell());
+    }
+
+    int EquipCountFor(RE::TESBoundObject* a_obj, int a_tileCount)
+    {
+        return (a_obj && a_obj->Is(RE::FormType::Ammo))
+                   ? (std::max)(1, a_tileCount)
+                   : 1;
+    }
+
+    bool UseItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid, int a_xlIdx,
+                 std::uint16_t a_sig, const std::string& a_srcKey, int a_tileCount)
+    {
+        if (!a_obj) return false;
+        // No slot, no type test. ProcessPending hands it to the engine exactly
+        // as a vanilla inventory click would; a form the engine cannot use
+        // simply does nothing, which is also what vanilla does.
+        // ★The type is LOGGED: when a mod's click-me item still does nothing,
+        // this line is what says which record type to go look at next.
+        SKSE::log::info("[USE] '{}' formType={}", a_obj->GetName(),
+                        static_cast<int>(a_obj->GetFormType()));
+        g_pending.push_back({ a_obj->GetFormID(), "", false, a_uid, a_xlIdx,
+                              a_sig, a_srcKey, 0,
+                              EquipCountFor(a_obj, a_tileCount) });
+        return true;
+    }
+
     bool EquipItem(RE::TESBoundObject* a_obj, const std::string& a_slotId,
                    std::uint16_t a_uid, int a_xlIdx, std::uint16_t a_sig,
-                   const std::string& a_srcKey)
+                   const std::string& a_srcKey, int a_tileCount)
     {
         if (!a_obj) return false;
 
         // D3 type gate (sync — callers key refresh off the verdict).
-        // Spell tomes pass too: right-click = learn (handled in ProcessPending).
-        const auto* book = a_obj->As<RE::TESObjectBOOK>();
-        const bool spellTome = book && book->TeachesSpell();
-        if (!(a_obj->Is(RE::FormType::Weapon) || a_obj->Is(RE::FormType::Armor) ||
-              a_obj->Is(RE::FormType::Ammo) || a_obj->Is(RE::FormType::Light) ||
-              a_obj->Is(RE::FormType::AlchemyItem) || a_obj->Is(RE::FormType::Scroll) ||
-              spellTome)) {
-            return false;
-        }
+        // ★This gate is about the DOLL: what a slot will accept. The
+        // right-click "use" goes through UseItem and is deliberately ungated —
+        // see the header.
+        if (!IsWearOrConsume(a_obj)) return false;
 
         if (!SlotAccepts(a_obj, a_slotId)) return false;   // wrong slot: reject the drop
 
         g_pending.push_back({ a_obj->GetFormID(), a_slotId, false, a_uid, a_xlIdx,
-                              a_sig, a_srcKey });
+                              a_sig, a_srcKey, 0,
+                              EquipCountFor(a_obj, a_tileCount) });
         return true;
     }
 
@@ -574,6 +648,14 @@ namespace FUI::Equip
         CollectEquipment(eq);
         const auto it = eq.find(a_slotId);
         return it == eq.end() ? nullptr : it->second.obj;
+    }
+
+    int WornCountAt(const std::string& a_slotId)
+    {
+        std::unordered_map<std::string, EquipEntry> eq;
+        CollectEquipment(eq);
+        const auto it = eq.find(a_slotId);
+        return it == eq.end() ? 0 : (std::max)(1, it->second.count);
     }
 
     RE::ExtraDataList* WornExtraAt(const std::string& a_slotId)
@@ -630,9 +712,12 @@ namespace FUI::Equip
                 const RE::BGSEquipSlot* unSlot = act.hand == 2
                     ? RE::TESForm::LookupByID<RE::BGSEquipSlot>(0x13F43)
                     : nullptr;
-                em->UnequipObject(player, obj, wornList, 1, unSlot,
+                // ★The same quantity rule as equipping: a quiver comes off
+                // whole. Taking one arrow back per click would leave the rest
+                // worn with no tile to click.
+                em->UnequipObject(player, obj, wornList, act.count, unSlot,
                     false, false, true, true);
-                SKSE::log::info("[EQUIP] unequip {}", obj->GetName());
+                SKSE::log::info("[EQUIP] unequip {} x{}", obj->GetName(), act.count);
                 continue;
             }
 
@@ -691,6 +776,35 @@ namespace FUI::Equip
                 }
             }
 
+            // ★★AMMO DOES NOT DISPLACE ITSELF. Equip a second tile of the SAME
+            // arrow and the engine just marks that list worn as well — both
+            // tiles are then on the back, and a worn unit is off the board, so
+            // the quiver reads as VANISHED. (At the old count of 1 it went one
+            // arrow per click: "반복하면 계속 사라진다" was this, one at a time.)
+            // Nothing was ever lost — it was all equipped.
+            // So take the worn quiver off FIRST: one tileful on the back at a
+            // time, like every other slot. Done by hand for the same reason the
+            // armour block above is: while paused, the engine's own conflict
+            // pass is unreliable.
+            // ★Before srcList is resolved, never after — unequipping rewrites
+            // the entry's lists, and a pointer taken across that is a pointer
+            // to something else.
+            if (obj->Is(RE::FormType::Ammo)) {
+                std::vector<RE::ExtraDataList*> wornNow;
+                if (auto* entry = Grid::LiveEntryOf(player, obj);
+                    entry && entry->extraLists) {
+                    for (auto* xl : *entry->extraLists) {
+                        if (xl && xl->HasType<RE::ExtraWorn>()) wornNow.push_back(xl);
+                    }
+                }
+                for (auto* xl : wornNow) {
+                    em->UnequipObject(player, obj, xl, (std::max)(1, xl->GetCount()),
+                                      nullptr, false, false, false, true);
+                    SKSE::log::info("[EQUIP] quiver swap: unequip {} x{}",
+                                    obj->GetName(), (std::max)(1, xl->GetCount()));
+                }
+            }
+
             // D4: a one-hander (or staff) dropped on the shield slot = left hand
             const RE::BGSEquipSlot* slot = nullptr;
             if (act.slotId == "shieldL") {
@@ -728,7 +842,8 @@ namespace FUI::Equip
                 srcList = Grid::ExtraForInstance(Grid::LiveEntryOf(player, obj),
                                                  act.uid, act.xlIdx);
             }
-            em->EquipObject(player, obj, srcList, 1, slot, false, false, true, true);
+            em->EquipObject(player, obj, srcList, act.count, slot,
+                            false, false, true, true);
 
             // Rule 13: equipping forgets the cell, exactly like selling or
             // storing. A stack that stays visible keeps its tile -- only the
@@ -743,13 +858,24 @@ namespace FUI::Equip
             // STACKABLE item (torch, scroll, arrows) also empties its tile when
             // it was the only one -- the old cap-only test let those keep their
             // cell and they walked straight back to it on unequip.
+            // ★...but ONLY for something that actually left. A scripted item
+            // poked through UseItem is still sitting in the pack, and forgetting
+            // its cell would move it to the first free slot on every single
+            // click.
             int cnt = 0;
             {
                 auto inv = player->GetInventory(
                     [&](RE::TESBoundObject& o) { return &o == obj; });
                 for (auto& [o2, d2] : inv) cnt = d2.first;
             }
-            if (Grid::StackCap(obj) <= 1 || cnt <= 1) Grid::ForgetTile(act.srcKey);
+            // ★Ammo always empties its tile: the whole tileful went on the back,
+            // so that cell is free whatever the rest of the quiver still holds.
+            // The count test below cannot see this — it asks about the FORM.
+            const bool emptied = obj->Is(RE::FormType::Ammo) ||
+                                 Grid::StackCap(obj) <= 1 || cnt <= 1;
+            if (IsWearOrConsume(obj) && emptied) {
+                Grid::ForgetTile(act.srcKey);
+            }
             SKSE::log::info("[EQUIP] {}{}", obj->GetName(), slot ? " (left hand)" : "");
         }
         g_pending.clear();

@@ -88,6 +88,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     spdlog::spdlog
     imgui::imgui
     d3d11
+    d3dcompiler     # the silhouette pixel shader (Windows SDK, same as d3d11)
     windowscodecs   # WIC: PNG decoding for the drawn icon set (Windows SDK)
 )
 

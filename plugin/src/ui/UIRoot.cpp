@@ -21,6 +21,7 @@
 
 #include <bit>            // countr_zero (pad button bookkeeping)
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <filesystem>
 
 // imgui_impl_win32.h leaves this for the app to declare (per its docs)
@@ -44,7 +45,6 @@ namespace FUI::UIRoot
         constexpr float kScrollSmoothing  = 10.0f;
 
         ImFont* g_fontMain = nullptr;
-        ID3D11ShaderResourceView* g_glowSRV = nullptr;   // radial falloff (rarity glow)
 
         // icon-brightness UP pass. GI57: the >1 gain used to be ADDITIVE
         // (dst + t*src) — bright pixels received the most, dark ones almost
@@ -112,6 +112,71 @@ namespace FUI::UIRoot
             a_device->CreateSamplerState(&sd, &g_mipSampler);
         }
 
+        // ★★SILHOUETTE PASS. The item shadow re-stamps the sprite with a tint,
+        // and a tint MULTIPLIES: black collapses the RGB and leaves the alpha
+        // to draw the shape, which is why the shadow has always been black.
+        // White multiplies to the sprite itself, so "a white shadow" came out
+        // as eight offset copies of the item — a smear, not a halo (shipped
+        // once, reported once). The alpha has to be read WITHOUT the colour,
+        // and no blend state can do that. One tiny pixel shader can.
+        //
+        // Signature matches the ImGui DX11 backend's vertex output exactly, and
+        // the return is NON-premultiplied because that is what the backend's
+        // blend state (SRC_ALPHA / INV_SRC_ALPHA) expects.
+        ID3D11PixelShader* g_silPS = nullptr;
+        ID3D11PixelShader* g_prevPS = nullptr;   // the backend's, held over the pass
+
+        void CreateSilhouettePS(ID3D11Device* a_device)
+        {
+            if (g_silPS) return;
+            static const char kSrc[] =
+                "struct PS_IN { float4 pos : SV_POSITION; float4 col : COLOR0;"
+                "               float2 uv : TEXCOORD0; };\n"
+                "sampler sampler0;\n"
+                "Texture2D texture0;\n"
+                "float4 main(PS_IN i) : SV_Target\n"
+                "{\n"
+                "    float a = texture0.Sample(sampler0, i.uv).a * i.col.a;\n"
+                "    return float4(i.col.rgb, a);\n"
+                "}\n";
+            ID3DBlob* blob = nullptr;
+            ID3DBlob* err = nullptr;
+            if (SUCCEEDED(D3DCompile(kSrc, sizeof(kSrc) - 1, nullptr, nullptr,
+                                     nullptr, "main", "ps_4_0", 0, 0, &blob, &err))
+                && blob) {
+                a_device->CreatePixelShader(blob->GetBufferPointer(),
+                                            blob->GetBufferSize(), nullptr, &g_silPS);
+            } else {
+                logger::warn("[UI] silhouette PS failed to compile: {}",
+                    err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+            }
+            if (blob) blob->Release();
+            if (err) err->Release();
+        }
+
+        void SilhouetteOnCB(const ImDrawList*, const ImDrawCmd*)
+        {
+            auto* data = RE::BSGraphics::Renderer::GetRendererData();
+            auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
+            if (!ctx || !g_silPS) return;
+            // ★Hand the backend's own shader back afterwards rather than
+            // assuming what it was: ImGui may rebuild its device objects at any
+            // point, and a cached pointer from startup would outlive them.
+            ctx->PSGetShader(&g_prevPS, nullptr, nullptr);
+            ctx->PSSetShader(g_silPS, nullptr, 0);
+        }
+
+        void SilhouetteOffCB(const ImDrawList*, const ImDrawCmd*)
+        {
+            auto* data = RE::BSGraphics::Renderer::GetRendererData();
+            auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
+            if (ctx) ctx->PSSetShader(g_prevPS, nullptr, 0);
+            if (g_prevPS) {   // PSGetShader AddRef'd it
+                g_prevPS->Release();
+                g_prevPS = nullptr;
+            }
+        }
+
         void CreateFillLightBlend(ID3D11Device* a_device)
         {
             if (g_fillBlend) return;
@@ -171,8 +236,21 @@ namespace FUI::UIRoot
             case WM_KEYUP:
             case WM_SYSKEYDOWN:
             case WM_SYSKEYUP:
+                // ★★KEYS REACH US BY TWO ROADS, and only one of them was
+                // watched. GridMenu::ProcessScaleformEvent drops key events
+                // while the console is up — but this thunk is a SEPARATE,
+                // earlier road straight off the game window, and it kept
+                // handing every keystroke to ImGui. So typing into the console
+                // still ran our hotkeys: R over a tile dropped the item, F
+                // starred it. Blocking one road and calling it done is the
+                // whole bug; the guard has to sit on every road.
+                // (The mouse is deliberately NOT blocked — the console does not
+                // use it, and freezing a window the player can still see is
+                // worse than letting them point at it.)
                 if (auto* ui = RE::UI::GetSingleton();
-                    ui && ui->IsMenuOpen("GridInventoryMenu"sv) && ImGui::GetCurrentContext()) {
+                    ui && ui->IsMenuOpen("GridInventoryMenu"sv) &&
+                    !ui->IsMenuOpen(RE::Console::MENU_NAME) &&
+                    ImGui::GetCurrentContext()) {
                     ImGui_ImplWin32_WndProcHandler(h, m, w, l);
                 }
                 break;
@@ -683,39 +761,11 @@ namespace FUI::UIRoot
             io.MouseWheelH = -now.x;
         }
 
-        // Smooth radial gradient (white, alpha falloff) — the rarity glow
-        // stretches this over the item's footprint. A real per-pixel falloff:
-        // no banding, and elongated items get an elliptical halo for free.
-        void CreateGlowTexture(ID3D11Device* a_device)
-        {
-            constexpr int N = 128;
-            std::vector<std::uint8_t> px(N * N * 4);
-            for (int y = 0; y < N; ++y) {
-                for (int x = 0; x < N; ++x) {
-                    const float dx = (x + 0.5f) / N - 0.5f;
-                    const float dy = (y + 0.5f) / N - 0.5f;
-                    const float d = (std::min)(1.0f, std::sqrt(dx * dx + dy * dy) * 2.0f);
-                    const float a = std::pow(1.0f - d, 1.6f);   // soft shoulder
-                    const size_t i = (static_cast<size_t>(y) * N + x) * 4;
-                    px[i + 0] = 255;
-                    px[i + 1] = 255;
-                    px[i + 2] = 255;
-                    px[i + 3] = static_cast<std::uint8_t>(a * 255.0f + 0.5f);
-                }
-            }
-            D3D11_TEXTURE2D_DESC td = {};
-            td.Width = N; td.Height = N; td.MipLevels = 1; td.ArraySize = 1;
-            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            td.SampleDesc.Count = 1;
-            td.Usage = D3D11_USAGE_DEFAULT;
-            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            D3D11_SUBRESOURCE_DATA init = { px.data(), N * 4, 0 };
-            ID3D11Texture2D* tex = nullptr;
-            if (SUCCEEDED(a_device->CreateTexture2D(&td, &init, &tex))) {
-                a_device->CreateShaderResourceView(tex, nullptr, &g_glowSRV);
-                tex->Release();
-            }
-        }
+        // ★The radial-falloff texture that used to live here is GONE (1.0.5).
+        // It fed the rarity halo, and rarity has been a corner wedge for
+        // several versions — so every start-up was building a 128x128 RGBA
+        // gradient on the CPU, uploading it, and handing the view to nobody.
+        // Its accessor (UIRoot::GlowTexture) went with it.
 
         // ---- SETTINGS window (⚙): scale + skin swatches + language ----
         // ---- Phase 3: settings rows as a table ----
@@ -734,14 +784,12 @@ namespace FUI::UIRoot
         // outline is drawn by US at the cursor and then given the same space
         // back with a Dummy. Layout is unchanged — SameLine and wrapping still
         // see an item of exactly the text's size.
+        // ★Moved to Theme::TextOutlinedFlow so the EDIT panel can use the same
+        // label. Kept as a name-local alias — this file calls it many times.
         void OutlinedText(ImU32 a_col, const char* a_txt,
                           float a_size = 0.0f, float a_spacing = 0.0f)
         {
-            const ImVec2 p = ImGui::GetCursorScreenPos();
-            const ImVec2 ts = Theme::TrackedSize(a_txt, a_size, a_spacing);
-            Theme::TextOutlined(ImGui::GetWindowDrawList(), p, a_col, a_txt,
-                                a_size, a_spacing);
-            ImGui::Dummy(ts);
+            Theme::TextOutlinedFlow(a_col, a_txt, a_size, a_spacing);
         }
 
         // ★Values are RIGHT-aligned in the settings panel, the way the stats
@@ -873,24 +921,30 @@ namespace FUI::UIRoot
                 ImU32 wedge;
                 int   alpha;   // panel alpha, 0-255, only when base == 0
             };
-            constexpr ImU32 kBlue  = IM_COL32(0x53, 0x97, 0xB9, 255);
-            constexpr ImU32 kNavy  = IM_COL32(0x1C, 0x44, 0x84, 255);
-            // ★★The SIMPLE chips carry each theme's OWN panel and chrome —
-            // that pair is what the whole skin is, and a hand-picked swatch
-            // would be a second copy of a colour that already exists in
-            // Theme.cpp. Keep in step with the skin table there.
-            static constexpr Sw kSw[11] = {
+            // ★Only the first five need listing. Their chip is deliberately
+            // NOT their panel — the glass pair is a hatch showing its own
+            // transparency, the parchment ones invert — so no rule derives it.
+            static constexpr Sw kSw[5] = {
                 { kBlack, kRed,   0 },    // 1 Fable Crimson
                 { kGold,  kBrown, 0 },    // 2 Parchment Amber
                 { kBlack, kWhite, 0 },    // 3 Parchment Crimson
                 { 0,      kRed,   148 },  // 4 Glass Dark    (0.58)
                 { 0,      kRed,   97 },   // 5 Glass Clear   (0.38)
-                { kBlue,  kNavy,  0 },    // 6 Simple (0.86 — near solid)
-                { IM_COL32(0x84, 0x8B, 0x91, 255), IM_COL32(0x43, 0x47, 0x4F, 255), 0 },  // 7 Silver
-                { IM_COL32(0x6D, 0x78, 0x84, 255), IM_COL32(0x2F, 0x33, 0x3F, 255), 0 },  // 8 Graphite
-                { IM_COL32(0xAE, 0x67, 0x53, 255), IM_COL32(0x61, 0x3E, 0x1C, 255), 0 },  // 9 Copper
-                { IM_COL32(0xA7, 0x5A, 0x75, 255), IM_COL32(0x5C, 0x22, 0x27, 255), 0 },  // 10 Wine
-                { IM_COL32(0x5B, 0xA6, 0x75, 255), IM_COL32(0x22, 0x5B, 0x45, 255), 0 },  // 11 Forest
+            };
+            // ★★From SIMPLE on, the chip IS the panel, so it is READ from the
+            // skin rather than copied here. The old table proved the point by
+            // holding #848B91 / #43474F for Silver — winBg and acc, transcribed
+            // by hand. That is survivable for five entries and not for twenty:
+            // a table nobody remembers to extend paints a new skin with the
+            // previous one's colours, and the chip is the only place a player
+            // sees the difference before clicking.
+            const auto swatchOf = [](int a_idx) -> Sw {
+                if (a_idx <= static_cast<int>(std::size(kSw))) {
+                    return kSw[a_idx - 1];
+                }
+                const Theme::Skin& sk2 = Theme::SkinAt(a_idx);
+                return { Theme::Col(sk2.winBg, 1.0f),
+                         Theme::Col(sk2.acc, 1.0f), 0 };
             };
             // ★★A family is now a RANGE, not a pair. It was {a, b} with 0
             // meaning "no second member", which capped every family at two and
@@ -901,14 +955,18 @@ namespace FUI::UIRoot
             struct Fam { const char* name; int first, count; };
             // ★Fable lost its amber half (it was Parchment Amber's twin in
             // everything but the frame), so that family is down to one chip.
-            static constexpr Fam kFam[4] = {
+            const Fam kFam[4] = {
                 { "FABLE", 1, 1 }, { "PARCHMENT", 2, 2 }, { "GLASS", 4, 2 },
-                { "SIMPLE", 6, 6 }
+                // ★The count comes from the TABLE. SIMPLE absorbs every skin
+                // added after it — nineteen in all as of 1.0.5, and that number
+                // moved twice during the cull, which is the point — a literal here is
+                // one more place to forget, with the same failure as the
+                // swatch table above: chips that stop at the old count simply
+                // never show the new skins.
+                { "SIMPLE", 6, Theme::SkinCount() - 5 }
             };
-            // ★Families wrap. Eleven chips in one row would push the settings
-            // window ~160px wider than every other control needs, so a family
-            // that does not fit starts a new line — and a family is never split
-            // across lines, because the caption belongs to its chips.
+            // ★Families wrap: a row of every chip would push the settings
+            // window far wider than any other control needs.
             const float kRowMax = 232.0f * a_c.S;
 
             const float side  = 24.0f * a_c.S;
@@ -934,7 +992,10 @@ namespace FUI::UIRoot
             // hit-tested a slot to the left of where it was painted. Wrapping
             // would have been a second chance to make the same mistake.
             struct Chip { ImVec2 p0; int idx; };
-            Chip chips[11] = {};
+            // ★Sized well past the table rather than at it: this array is
+            // written to inside the draw loop, and the one thing it must never
+            // do is run short of the skins the loop is walking.
+            Chip chips[64] = {};
             int  nChips = 0;
             for (const auto& f : kFam) {
                 const float famW = f.count * (side + 8.0f * a_c.S) + famGap;
@@ -946,10 +1007,23 @@ namespace FUI::UIRoot
                 dl->AddText(font, capPx, ImVec2(x, y),
                     Theme::Col(sk.inkDim, 0.85f), f.name);
                 for (int i = 0; i < f.count; ++i) {
+                    // ★★A family wraps INTERNALLY now. The old rule — never
+                    // split a family across lines, because the caption belongs
+                    // to its chips — quietly assumed every family fits on one
+                    // line. SIMPLE at twenty members wants ~640px against a
+                    // 232px limit, so holding the rule would have drawn most of
+                    // this family off the edge of the window. The caption stays
+                    // on the family's FIRST line: it names the whole run, and a
+                    // run that wraps is still one run.
+                    if (x > origin.x && (x - origin.x) + side > kRowMax) {
+                        rowW = (std::max)(rowW, x - origin.x);
+                        x = origin.x;
+                        y += rowH;
+                    }
                     const int idx = f.first + i;
                     const ImVec2 p0(x, y + capH);
                     const ImVec2 p1(p0.x + side, p0.y + side);
-                    const auto&  s = kSw[idx - 1];
+                    const Sw     s = swatchOf(idx);
                     if (s.base) {
                         dl->AddRectFilled(p0, p1, s.base, 4.0f);
                     } else {
@@ -974,9 +1048,19 @@ namespace FUI::UIRoot
                         dl->PopClipRect();
                         dl->AddRectFilled(p0, p1, IM_COL32(0x0C, 0x0C, 0x0E, s.alpha), 4.0f);
                     }
-                    const float wg = side * 0.57f;
+                    // ★The accent wedge has to round its OUTER corner the same
+                    // 4px the base does. A square corner at p1 pokes out past
+                    // the rounded base on every chip — a hard little point at
+                    // the bottom right that reads as a rendering fault, and no
+                    // clip can fix it (PushClipRect is a rectangle and ignores
+                    // corner rounding). Draw the corner as an arc instead.
+                    constexpr float kChipR = 4.0f;   // == the base's rounding
+                    const float     wg     = side * 0.57f;
                     dl->PathLineTo(ImVec2(p1.x, p1.y - wg));
-                    dl->PathLineTo(ImVec2(p1.x, p1.y));
+                    // 0 -> PI/2 runs (p1.x, p1.y-r) round to (p1.x-r, p1.y):
+                    // down the right edge, round the corner, onto the bottom
+                    dl->PathArcTo(ImVec2(p1.x - kChipR, p1.y - kChipR), kChipR,
+                                  0.0f, IM_PI * 0.5f);
                     dl->PathLineTo(ImVec2(p1.x - wg, p1.y));
                     dl->PathFillConvex(s.wedge);
                     dl->AddRect(p0, p1, Theme::Acc(0.4f), 4.0f);
@@ -984,7 +1068,9 @@ namespace FUI::UIRoot
                         dl->AddRect(ImVec2(p0.x - 2, p0.y - 2), ImVec2(p1.x + 2, p1.y + 2),
                             Theme::Val(), 5.0f, 0, 2.0f);
                     }
-                    if (nChips < 11) chips[nChips++] = { p0, idx };
+                    if (nChips < static_cast<int>(std::size(chips))) {
+                        chips[nChips++] = { p0, idx };
+                    }
                     x += side + 8.0f * a_c.S;
                 }
                 x += famGap;
@@ -2686,11 +2772,6 @@ namespace FUI::UIRoot
         DrawItemIconQuad(a_dl, a_srv, p);
     }
 
-    void* GlowTexture()
-    {
-        return g_glowSRV;
-    }
-
     void RegisterMenu()
     {
         GridInventoryMenu::RegisterMenu();
@@ -2761,9 +2842,9 @@ namespace FUI::UIRoot
 
         ImGui::StyleColorsDark();
         Theme::Apply();
-        CreateGlowTexture(device);
         CreateFillLightBlend(device);
         CreateMipSampler(device);
+        CreateSilhouettePS(device);
 
         // ★The four frame_torn_*.fic sheets that used to load here are gone:
         // the torn frame is drawn (Theme::TornPanel), so there is no texture to
@@ -2772,11 +2853,6 @@ namespace FUI::UIRoot
         g_initialized.store(true);
         SKSE::log::info("[UI] ImGui initialized (hwnd={:#x})", reinterpret_cast<uintptr_t>(hwnd));
         return true;
-    }
-
-    bool IsInitialized()
-    {
-        return g_initialized.load();
     }
 
     void Open()
@@ -3149,8 +3225,6 @@ namespace FUI::UIRoot
         return false;
     }
 
-    bool IsPadActive() { return g_padActive.load(); }
-
     const char* KeyLabel(Act a_act)
     {
         // Mouse/keyboard side is ours to choose (these are hardcoded above in
@@ -3286,6 +3360,19 @@ namespace FUI::UIRoot
         return ui && ui->IsMenuOpen(RE::BookMenu::MENU_NAME);
     }
 
+    bool BeginSilhouette(ImDrawList* a_dl)
+    {
+        if (!a_dl || !g_silPS) return false;
+        a_dl->AddCallback(&SilhouetteOnCB, nullptr);
+        return true;
+    }
+
+    void EndSilhouette(ImDrawList* a_dl)
+    {
+        if (!a_dl || !g_silPS) return;
+        a_dl->AddCallback(&SilhouetteOffCB, nullptr);
+    }
+
     bool IsConsoleOpen()
     {
         auto* ui = RE::UI::GetSingleton();
@@ -3322,7 +3409,12 @@ namespace FUI::UIRoot
         {
             static bool s_consoleWas = false;
             const bool consoleNow = IsConsoleOpen();
-            if (consoleNow && !s_consoleWas) {
+            // ★Both edges. Opening is the case above; CLOSING matters too now
+            // that the thunk blocks key-downs outright — the release of
+            // whatever was held as the console shut is the one event that DOES
+            // get through, and ImGui would take it for a key it never saw
+            // pressed.
+            if (consoleNow != s_consoleWas) {
                 ImGui::GetIO().ClearInputKeys();
                 ImGui::ClearActiveID();
                 g_textInputOn = false;

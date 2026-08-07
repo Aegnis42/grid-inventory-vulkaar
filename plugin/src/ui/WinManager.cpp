@@ -898,18 +898,17 @@ namespace FUI
         float tx = a_centerTitle ? wp.x + (w.size.x - textW) * 0.5f
                                  : wp.x + 12.0f * S + insX;
         if (sk.titleGlow) {
-            // poor-man's bloom: 4 offset passes under the main text, then a
-            // 1px underline fading out to the right (v10 title treatment)
+            // poor-man's bloom: 4 offset passes under the main text.
+            // ★1.0.5: the right-fading 1px UNDERLINE that used to follow is
+            // gone, on every window and both skins that carry this flag
+            // (Fable Crimson and Parchment Crimson — nothing else sets it).
+            // The glow stays; only the rule under the name went.
             const ImU32 glow = Theme::Col(sk.hi, 0.12f);
             const float o = 1.0f;
             DrawTrackedText(dl, font, fontSize, ImVec2(tx - o, ty), glow, a_label, spacing);
             DrawTrackedText(dl, font, fontSize, ImVec2(tx + o, ty), glow, a_label, spacing);
             DrawTrackedText(dl, font, fontSize, ImVec2(tx, ty - o), glow, a_label, spacing);
             DrawTrackedText(dl, font, fontSize, ImVec2(tx, ty + o), glow, a_label, spacing);
-            const float uy = ty + fontSize + 3.0f * S;
-            dl->AddRectFilledMultiColor(ImVec2(tx, uy), ImVec2(tx + textW, uy + 1.0f),
-                Theme::Col(sk.hi, 0.75f), Theme::Col(sk.hi, 0.0f),
-                Theme::Col(sk.hi, 0.0f), Theme::Col(sk.hi, 0.75f));
         }
         // ★The title draws its OWN outline instead of leaving it to the
         // draw-data pass. That pass has to recognise a glyph from finished
