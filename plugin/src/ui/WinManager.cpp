@@ -427,7 +427,9 @@ namespace FUI
         }
         out << "; GridInventory preset -- ONE file: UI style + item grid definitions.\n";
         out << "; 프리셋 파일입니다 -- 이 파일 하나로 UI 스타일과 아이템 배치 정의까지 공유됩니다.\n";
-        out << "; (창 위치·개인 설정은 담기지 않습니다 / window layout & cheats never travel)\n";
+        out << "; (창 위치와 언어는 담기지 않습니다 / window layout & language never travel)\n";
+        out << "; 상인 옵션(무한 골드·전 품목 매입)은 함께 저장됩니다.\n";
+        out << "; Merchant options (unlimited gold / buys anything) DO travel.\n";
         out << "!uiscale = " << Theme::Scale() << "\n";
         out << "!cellscale = " << Theme::CellScale() << "\n";
         out << "!skin2 = " << Theme::SkinIndex() << "\n";
@@ -442,6 +444,14 @@ namespace FUI
         // one: the point of sharing a preset is that the recipient can switch
         // skins and still see what the author tuned.
         EachSkin([&](int s) { WriteDispLine(out, s); });
+        // ★The merchant toggles travel too (author's call). They were held back
+        // as "cheats" while window layout and language were, but those two are
+        // properties of the READER's setup — a screen size and a language — and
+        // these are a property of the SETUP BEING SHARED: a preset built around
+        // "the merchant always has gold" plays differently without it. The file
+        // says so in its header, and importing is always a deliberate act.
+        out << "!merchgoldinf = " << (LootBarter::MerchantGoldInfinite() ? 1 : 0) << "\n";
+        out << "!merchbuyall = " << (LootBarter::MerchantBuysAll() ? 1 : 0) << "\n";
         // GI47: the item/category defs ride along -- one file, whole look
         if (g_presetDefsWrite) g_presetDefsWrite(out);
         out.close();
@@ -485,8 +495,11 @@ namespace FUI
             const std::string key = trim(line.substr(0, eq));
             const std::string rest = trim(line.substr(eq + 1));
             if (key.empty()) continue;
-            // STYLE keys -- language, layout and trade toggles are the
-            // reader's own even if a hand-edited file tries to smuggle them.
+            // STYLE keys. Language and window layout stay the READER's own even
+            // if a hand-edited file tries to smuggle them — they describe the
+            // reader's screen and the language they read. The merchant toggles
+            // DO come across: they describe the setup being shared. See
+            // ExportPreset.
             if (key[0] == '!') {
                 try {
                     if (key == "!uiscale")        Theme::SetScale(std::stof(rest));
@@ -522,6 +535,38 @@ namespace FUI
                             }
                             sawDisp = true;
                         }
+                    }
+                    // ★★1.0.5 shadow, and it MUST travel. ExportPreset has
+                    // written !shadN since the feature landed (WriteDispLine
+                    // emits it next to !dispN), but this reader had no case for
+                    // it, so the key fell through the chain and was dropped: a
+                    // shared preset arrived with the author's skin, icon gain
+                    // and capture light, and the reader's own shadow. On the
+                    // dark skins that is not a detail — the light silhouette is
+                    // what keeps a dark item legible on a dark cell, and its
+                    // distance/blur/opacity are exactly these three numbers.
+                    // Same field order and same tolerance as Load.
+                    else if (key.rfind("!shad", 0) == 0) {
+                        const int skin = std::stoi(key.substr(5));
+                        std::vector<float> v;
+                        std::istringstream vs(rest);
+                        for (std::string tok; std::getline(vs, tok, ','); ) {
+                            try { v.push_back(std::stof(trim(tok))); } catch (...) { v.push_back(0.0f); }
+                        }
+                        if (v.size() >= 9) {
+                            for (int t = 0; t < 3; ++t) {
+                                for (int a = 0; a < 3; ++a) {
+                                    Theme::SetShadowAt(skin, t, a, v[t * 3 + a]);
+                                }
+                            }
+                        }
+                    }
+                    // Merchant options: same keys and same tolerance as Load.
+                    else if (key == "!merchgoldinf") {
+                        LootBarter::SetMerchantGoldInfinite(std::stoi(rest) != 0);
+                    }
+                    else if (key == "!merchbuyall") {
+                        LootBarter::SetMerchantBuysAll(std::stoi(rest) != 0);
                     }
                     // ---- legacy: one value for the whole UI -> every skin
                     else if (key == "!glowstyle") EachSkin([&](int s) { Theme::SetGlowStyleOf(s, 0, std::stoi(rest)); });

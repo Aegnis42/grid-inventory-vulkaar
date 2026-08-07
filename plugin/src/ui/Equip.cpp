@@ -488,12 +488,18 @@ namespace FUI::Equip
                                      Grid::IsPoolStolen(eq->obj, eq->uid, eq->sig),
                                      (eq->glow & 0x4) != 0);     // poison
                 if (eq->count > 1) {   // eqqty (ammo stack)
+                    // ★★The SAME badge the grid draws, not a second one that
+                    // happens to say the same number. This slot used to place
+                    // it top-RIGHT in sk.hi with a single drop shadow, while a
+                    // quiver one window over sat top-LEFT in Val() with a full
+                    // ring — so equipping arrows moved the count across the
+                    // tile and changed its colour. A stack is a stack wherever
+                    // it is shown, and one function owning that is what keeps
+                    // the two from drifting again (the marker tray below is
+                    // shared for exactly this reason).
                     char buf[16];
                     std::snprintf(buf, sizeof(buf), "%d", eq->count);
-                    const ImVec2 ts = ImGui::CalcTextSize(buf);
-                    const ImVec2 tp(p1.x - ts.x - 4.0f, p0.y + 2.0f);
-                    dl->AddText(ImVec2(tp.x + 1, tp.y + 1), IM_COL32(0, 0, 0, 230), buf);
-                    dl->AddText(tp, Theme::Col(sk.hi, 1.0f), buf);
+                    Grid::DrawCountBadge(dl, p0, buf);
                 }
             } else if (const auto* sil = Silhouette(a_slot.icon)) {
                 // white silhouette tinted by the skin accent (46% of the SLOT
