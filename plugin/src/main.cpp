@@ -1520,7 +1520,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 0, 5, 0 },
+    .Version              = { 1, 0, 6, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)

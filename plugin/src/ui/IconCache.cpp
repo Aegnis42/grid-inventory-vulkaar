@@ -1822,6 +1822,44 @@ namespace FUI
     void IconCache::GiveUpPending(const char* a_why)
     {
         SKSE::log::warn("[ICONS] '{}' skipped ({})", m_pending.obj->GetName(), a_why);
+
+        // ★★SAY IT ONCE WHEN THE PATTERN IS REAL. A capture borrows the render
+        // surface: paint a rect, have the engine draw the model into it, read
+        // those pixels back. If the surface being read is not the one being
+        // drawn into, every icon times out and NOTHING anywhere says why —
+        // which is exactly how a swap-chain mismatch cost an entire
+        // investigation (see the bound-target note in ItemPreview::Render;
+        // that specific case is fixed).
+        //
+        // A long run of timeouts is close enough to proof of a systemic fault:
+        // a genuinely missing mesh never gets a slot, and a slow item recovers
+        // within a few. So leave a marker for whatever the NEXT such fault
+        // turns out to be, without naming a cause we no longer believe.
+        if (!m_pendingInspect && std::strstr(a_why, "timeout") != nullptr) {
+            if (++m_timeoutStreak == 8 && !m_emptyCaptureWarned) {
+                m_emptyCaptureWarned = true;
+                SKSE::log::warn(
+                    "[ICONS] ================================================");
+                SKSE::log::warn(
+                    "[ICONS] 8 icons in a row captured an EMPTY frame.");
+                SKSE::log::warn(
+                    "[ICONS] The model loads and is drawn, but the pixels read");
+                SKSE::log::warn(
+                    "[ICONS] back are blank -- so the surface being read is");
+                SKSE::log::warn(
+                    "[ICONS] probably not the one being drawn into.");
+                SKSE::log::warn(
+                    "[ICONS] This is a rendering-pipeline conflict, not a mod");
+                SKSE::log::warn(
+                    "[ICONS] list problem. Please report it WITH THIS LOG and");
+                SKSE::log::warn(
+                    "[ICONS] your post-process setup (ENB / Community Shaders,");
+                SKSE::log::warn(
+                    "[ICONS] upscaling, frame generation).");
+                SKSE::log::warn(
+                    "[ICONS] ================================================");
+            }
+        }
         ItemPreview::GetSingleton()->UnloadCurrent();
         m_pendingBusy = false;
         // an inspect frame carries no cache key (0): its failures must never
@@ -1842,7 +1880,34 @@ namespace FUI
         // How long one capture may hold the slot before it is judged. Every
         // capture is one per frame on a single engine scene, so a window is
         // paid by EVERY item still in the queue, not just this one.
-        constexpr int kSoftFrames     = 20;    // ~0.33s: 3x the normal latency
+        //
+        // ★★These were 20 / 45, picked as "3x the normal latency" — and that
+        // multiplier was measured on ONE machine. The latency is not a property
+        // of the item or of the load order; it is how long the engine's async
+        // loader takes to come back, and that varies per setup by more than 3x.
+        // Measured across three:
+        //     93 plugins    2-3 frames   (78 icons in 3s, no timeouts)
+        //   3826 plugins    2-4 frames   (1342 icons, 1 timeout in 1343)
+        //      a user's PC   22 frames   (every single item, 100% failure)
+        // The last one is not a slow disk — RTX 5070 / i5-14600K, and the frame
+        // count is identical for a ring and a full cuirass, so nothing about
+        // the file explains it. It is a fixed round-trip that happens to sit
+        // just past 20.
+        // ★So the window is a SAFETY NET, not a schedule. A fast setup never
+        // reaches it (that is what 1342-of-1343 shows), which means widening it
+        // costs those setups exactly nothing; it only buys the ones sitting on
+        // the wrong side of the line. Sixty frames is ~1s at 60fps and roughly
+        // 3x the worst latency actually observed rather than 3x the best.
+        // ★★60/90 was tried and REVERTED. The theory was that the loader simply
+        // needed longer, and the numbers refuted it outright: the wait tracked
+        // the deadline instead of the load.
+        //     deadline 20  ->  21 frames used
+        //     deadline 20  ->  22 frames (one grace frame added)
+        //     deadline 60  ->  62 frames
+        // A file read cannot know what the deadline is. Whatever blocks the
+        // gates blocks them until the deadline arrives, so widening it buys
+        // nothing and makes every genuine failure three times as slow.
+        constexpr int kSoftFrames     = 20;    // ~0.33s
         constexpr int kPrecacheFrames = 45;    // ~0.75s: a mass pass, still cheap
         constexpr int kRetryFrames    = 600;   // ~10s, but only in the retry pass
         auto* pv = ItemPreview::GetSingleton();
@@ -1871,6 +1936,29 @@ namespace FUI
             return GateResult::kReady;
         }
 
+        // ★★A capture that lands on the very frame the window closes has done
+        // everything asked of it, and the deadline used to be judged without
+        // ever looking — the work was thrown away and the verdict PERSISTED.
+        // So the expiry branches below take ONE last look before giving up
+        // (see kDeadlineGrace).
+        //
+        // ★★★It has to be ONE. Putting this check ABOVE the expiry branches
+        // instead — "ready beats expired" — hung the whole queue: a pending
+        // whose gates read open but whose harvest does not complete answers
+        // kReady every frame, never reaches a verdict, and the cache stops
+        // dead on that item. A user's log showed 75 seconds on a single
+        // nameless item with no 'cached' and no 'skipped' line. The deadline
+        // is the one thing that must ALWAYS be reachable; a grace frame is a
+        // last chance, not a way around it.
+        const auto expired = [this](int a_limit) {
+            return m_frames > a_limit;
+        };
+        // exactly one frame of grace, so the sequence is bounded no matter
+        // what the gates say
+        const auto graceFrame = [this](int a_limit) {
+            return m_frames == a_limit + 1 && CaptureAccepted();
+        };
+
         // Precache entries WAIT IN PLACE instead of requeueing: a requeue is
         // Unload+reLoad, which throws away the in-flight async model load and
         // restarts it — the main "stall cluster" during a mass precache. One
@@ -1887,17 +1975,21 @@ namespace FUI
         // FindCurrentModel() returning null does not mean "no model exists";
         // only LoadPending() can tell a slow load from an absent one.
         if (m_pending.evict &&
-            m_frames > (m_retryPass ? kRetryFrames
-                                    : kPrecacheFrames)) {
+            expired(m_retryPass ? kRetryFrames : kPrecacheFrames)) {
+            if (graceFrame(m_retryPass ? kRetryFrames : kPrecacheFrames)) {
+                return GateResult::kReady;
+            }
             const bool loading = pv->LoadPending();
             // DIAGNOSTIC: which gate starved? (stamp = captures ran at all,
             // model/rot = scene state, content probe logs separately below)
             auto* dmdl = pv->FindCurrentModel();
             SKSE::log::warn(
-                "[ICONS] precache gates '{}': {} (model={} radius={:.1f} rot={} mesh='{}')",
+                "[ICONS] precache gates '{}': {} (model={} radius={:.1f} rot={} "
+                "park={} stamp={}->{} mesh='{}')",
                 m_pending.obj->GetName(), loading ? "deferred" : "no model",
                 dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
-                pv->RotationApplied(), ModelPathOf(m_pending.obj));
+                pv->RotationApplied(), pv->ParkTicks(),
+                m_stampBefore, pv->GetCaptureStamp(), ModelPathOf(m_pending.obj));
             if (loading && !m_retryPass) {
                 if (m_deferred.insert(m_pending.key).second) {
                     m_deferredObj[m_pending.key] = m_pending.obj;
@@ -1934,8 +2026,10 @@ namespace FUI
         // breaks the loop below as well: fewer requeues means fewer ResetScene
         // calls, and a reset is what makes the NEXT load land empty.
         if (!m_pending.evict &&
-            m_frames > (m_retryPass ? kRetryFrames
-                                    : kSoftFrames)) {
+            expired(m_retryPass ? kRetryFrames : kSoftFrames)) {
+            if (graceFrame(m_retryPass ? kRetryFrames : kSoftFrames)) {
+                return GateResult::kReady;
+            }
             // ★GI68: NO requeue. It used to try four times, and each try began
             // with Unload+reLoad -- throwing away the in-flight async load and
             // starting over. An item that simply loads slower than 0.33s could
@@ -1952,11 +2046,18 @@ namespace FUI
             //               nothing (HDT/physics meshes, phantom weapons).
             const bool loading = pv->LoadPending();
             auto* dmdl = pv->FindCurrentModel();
+            // ★park/stamp are the two gates that used to be invisible here.
+            // stamp A->B equal means NO capture ran at all (the pixel path
+            // returned early); park < 2 means the rig had not settled. Without
+            // them a timeout line said only "not ready" and every cause looked
+            // identical.
             SKSE::log::info(
-                "[ICONS] '{}' {} (model={} radius={:.1f} rot={} loading={})",
+                "[ICONS] '{}' {} (model={} radius={:.1f} rot={} park={} "
+                "stamp={}->{} loading={})",
                 m_pending.obj->GetName(), loading ? "deferred" : "no model",
                 dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
-                pv->RotationApplied(), loading);
+                pv->RotationApplied(), pv->ParkTicks(),
+                m_stampBefore, pv->GetCaptureStamp(), loading);
 
             if (loading && !m_retryPass) {
                 if (m_deferred.insert(m_pending.key).second) {
@@ -1974,25 +2075,55 @@ namespace FUI
             return GateResult::kAbandoned;
         }
 
-        // A capture must have completed THIS frame.
-        if (pv->GetCaptureStamp() == m_stampBefore) return GateResult::kNotReady;
+        return CaptureAccepted() ? GateResult::kReady : GateResult::kNotReady;
+    }
+
+    // Are all four acceptance gates open RIGHT NOW?
+    //
+    // ★★Split out of CheckPendingGates so it can be asked BEFORE the timeout
+    // verdicts rather than after them. It used to sit at the bottom, and that
+    // ordering threw away work that was finished: on the frame the window
+    // expires the code judged first and never looked, so an item whose capture
+    // landed on frame 20 of 20 went to the fail list with its pixels ready.
+    // A user's log showed exactly that -- every line read
+    //     model=true radius=12.8 rot=true park=2 stamp=314->315
+    // i.e. all four gates open, "skipped (timeout)" on the next line. On a fast
+    // machine the capture lands around frame 2 and nothing ever notices; the
+    // slower the disk, the closer it creeps to the deadline, which is why this
+    // reproduced for one user and never here.
+    bool IconCache::CaptureAccepted() const
+    {
+        return CaptureRejectReason() == nullptr;
+    }
+
+    // ★★DIAGNOSTIC SPLIT: which gate said no, as a word.
+    //
+    // Three fixes were aimed at this by inference and all three missed, because
+    // the only log we had was written AFTER the verdict and showed every gate
+    // open. The deciding measurement is the one frame BEFORE — and the two
+    // differ. Returning the reason (instead of a bool) lets the per-frame trace
+    // print exactly which line rejected, on every frame, so the frame the state
+    // flips is visible rather than guessed.
+    const char* IconCache::CaptureRejectReason() const
+    {
+        auto* pv = ItemPreview::GetSingleton();
+
+        // A capture must have completed since this item was armed.
+        if (pv->GetCaptureStamp() == m_stampBefore) return "stamp";
 
         // Accept only when OUR item's model is render-ready (the recentre in
         // ItemPreview::Render also keys off the matching entry, so the crop is
         // centred correctly even while stale async loads are still landing).
         auto* pvModel = pv->FindCurrentModel();
-        if (!pvModel || pvModel->worldBound.radius <= 0.0f) {
-            // not landed yet — the soft-skip above (frames > 20) requeues
-            // before any deeper recovery could ever trigger here
-            return GateResult::kNotReady;
-        }
+        if (!pvModel) return "model:null";
+        if (pvModel->worldBound.radius <= 0.0f) return "model:radius";
 
         // Landing-frame race: the engine stomps the node with its default
         // pose after our rotation ran, and that first capture would bake the
         // wrong orientation into the cache PERMANENTLY (square diagonal-sword
         // icons). Accept only once the node carries the requested rotation —
         // UpdateParking re-applies it next frame.
-        if (!pv->RotationApplied()) return GateResult::kNotReady;
+        if (!pv->RotationApplied()) return "rot";
 
         // ★★RotationApplied is not enough on its own. It asks whether the node
         // carries the requested rotation, and a leftover model from a DIFFERENT
@@ -2002,9 +2133,9 @@ namespace FUI
         // came from the previous item's model under the previous item's light.
         // Measured: ACCEPT on f8977, that item's park on f8978.
         // Weapons and bags never showed it only because their angles differ.
-        if (!pv->ParkSettled()) return GateResult::kNotReady;
+        if (!pv->ParkSettled()) return "park";
 
-        return GateResult::kReady;
+        return nullptr;   // accepted
     }
 
     void IconCache::PostRender()
@@ -2118,6 +2249,16 @@ namespace FUI
                     m_pending.obj->GetName(), nonBg, w, h);
             }
 #endif
+            // ★★A SILENT retry, and it stays silent on purpose: the common case
+            // is simply "the engine has not finished drawing", which resolves
+            // on the next frame and would otherwise spam a line per frame per
+            // icon. What it must never do again is hide a REAL fault — a run
+            // of these ends in "timeout", and GiveUpPending names the likely
+            // cause once a run is long enough to mean something.
+            //
+            // (This line is where "no icon ever caches" lived for a whole
+            // investigation. The capture was landing on a surface nobody
+            // displays — see the bound-target note in ItemPreview::Render.)
             if (nonBg < 40) return;   // engine hasn't drawn yet — retry next frame
 
             // Clipped capture: content touches the margin edge, i.e. the
@@ -2369,6 +2510,7 @@ namespace FUI
                 static_cast<std::uint32_t>(srcDesc.Format), sprite);
             SKSE::log::info("[ICONS] cached '{}' {}x{} ({} total, {} queued)",
                 m_pending.obj->GetName(), trimW, trimH, m_icons.size(), m_queue.size());
+            m_timeoutStreak = 0;   // a real capture landed: the run is broken
             // GI68: it made it -- off the deferred list. This also covers the
             // case where a later, quieter frame captures it without any retry
             // pass at all, which is the common outcome.

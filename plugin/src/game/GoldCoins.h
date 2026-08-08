@@ -35,6 +35,14 @@ namespace FUI::GoldCoins
     [[nodiscard]] int PouchStored();   // 0..10000, cosave-persisted
     [[nodiscard]] int PouchCap();      // 10000
     [[nodiscard]] RE::TESBoundObject* PouchForm();
+    // ★Is a pouch actually ON the player right now? StoreToPouch does NOT ask
+    // -- it only weighs the value against the cap and the walking gold, which
+    // is right for a drop ONTO the pouch tile (the tile being there is proof
+    // enough). A right-click on a coin has no such proof, so it asks here
+    // first; without this, gold would vanish into a pouch sitting in a chest.
+    // The pouch's own gold travels with it when it leaves (OnPouchLeftPlayer),
+    // so "held" is the only state in which depositing means anything.
+    [[nodiscard]] bool PouchHeld();
     // ICON to draw for the pouch tile right now: 0x804 N (0~2 G) /
     // 0x80C S (3~9) / 0x80D M (10~9999) / 0x80E F (full). Draw-time only —
     // the inventory item itself never changes form.

@@ -2099,18 +2099,49 @@ namespace FUI::UIRoot
 
         // park the engine-drawn model: behind the opaque main window, or (for
         // translucent skins) at SCREEN CENTRE under the caching card
+        // ★★KEEP THE CAPTURE BOX ON SCREEN. The model is parked behind the main
+        // window and photographed out of the BACKBUFFER, so the box around it
+        // has to be backbuffer that exists. Park is the window's centre, the
+        // window can be dragged to an edge (only its titlebar is kept
+        // reachable), and a box hanging off the right or bottom clamps to a
+        // negative width -- at which point the pixel path returns without a
+        // word and EVERY item times out. Translucent skins never showed it
+        // because they park at screen centre regardless.
+        // ★Clamp the PARK, not the rect: pulling the rect back instead would
+        // photograph empty backbuffer beside the model.
+        // ★Every SetParkPos goes through here. The open-time anchor bypassed
+        // this rule while the per-frame one obeyed it, which would have left
+        // exactly the first (and most expensive) capture pass unprotected.
+        [[nodiscard]] ImVec2 ParkOnScreen(ImVec2 a_park)
+        {
+            const auto sz = RE::BSGraphics::Renderer::GetScreenSize();
+            if (sz.width <= 0 || sz.height <= 0) return a_park;
+            const ImVec2 centre(static_cast<float>(sz.width) * 0.5f,
+                                static_cast<float>(sz.height) * 0.5f);
+            const ImVec2 box = ItemPreview::GetSingleton()->CaptureCover();
+            if (box.x <= 0.0f || box.y <= 0.0f) return a_park;   // no shot sized yet
+            const float hw = box.x * 0.5f, hh = box.y * 0.5f;
+            // A box larger than the screen cannot be satisfied — centre it and
+            // let the rect clamp take the largest slice available.
+            a_park.x = (box.x >= static_cast<float>(sz.width))  ? centre.x
+                     : (std::max)(hw, (std::min)(static_cast<float>(sz.width) - hw, a_park.x));
+            a_park.y = (box.y >= static_cast<float>(sz.height)) ? centre.y
+                     : (std::max)(hh, (std::min)(static_cast<float>(sz.height) - hh, a_park.y));
+            return a_park;
+        }
+
         void ParkPreviewModel(const ImVec2& a_mainSize)
         {
+            auto* pv = ItemPreview::GetSingleton();
             if (Theme::S().translucent) {
                 const auto sz = RE::BSGraphics::Renderer::GetScreenSize();
-                ItemPreview::GetSingleton()->SetParkPos(
-                    ImVec2(static_cast<float>(sz.width) * 0.5f,
-                           static_cast<float>(sz.height) * 0.5f));
-            } else {
-                const ImVec2 wp = ImGui::GetWindowPos();
-                ItemPreview::GetSingleton()->SetParkPos(
-                    ImVec2(wp.x + a_mainSize.x * 0.5f, wp.y + a_mainSize.y * 0.5f));
+                pv->SetParkPos(ImVec2(static_cast<float>(sz.width) * 0.5f,
+                                      static_cast<float>(sz.height) * 0.5f));
+                return;
             }
+            const ImVec2 wp = ImGui::GetWindowPos();
+            pv->SetParkPos(ParkOnScreen(
+                ImVec2(wp.x + a_mainSize.x * 0.5f, wp.y + a_mainSize.y * 0.5f)));
         }
 
         // GOLD bar — pinned to the bottom of a column of width a_colW.
@@ -3136,7 +3167,8 @@ namespace FUI::UIRoot
             auto* wm = WinManager::GetSingleton();
             wm->Load();
             ItemPreview::GetSingleton()->SetParkPos(
-                Theme::S().translucent ? center : wm->MainCenter(center));
+                Theme::S().translucent ? center
+                                       : ParkOnScreen(wm->MainCenter(center)));
 
             // ini scale arrived after the init-time bake -> rebake once
             if (std::fabs(Theme::Scale() - g_bakedScale) > 0.005f) {

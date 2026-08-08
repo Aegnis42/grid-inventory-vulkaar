@@ -165,6 +165,7 @@ namespace FUI::Lang
         X(ActCloseBag, "close bag")                                                                         \
         X(ActRestore, "restore")                                                                            \
         X(ActWithdraw, "withdraw")                                                                          \
+        X(ActDeposit, "deposit")   /* coin tile -> pouch, that tile's amount only */                        \
         X(ActTakeIt, "take")                                                                                \
         X(ActBuy, "buy")                                                                                    \
         X(ActSteal, "steal")                                                                                \

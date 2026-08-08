@@ -210,6 +210,13 @@ namespace FUI
             kReady,
         };
         GateResult CheckPendingGates();
+        // ★The four acceptance gates on their own, so CheckPendingGates can ask
+        // "is it ready" BEFORE "has it waited too long". Asking in the other
+        // order discarded captures that completed on the deadline frame.
+        [[nodiscard]] bool CaptureAccepted() const;
+        // Which gate rejected, as a word; nullptr when all four are open.
+        // Exists for the per-frame trace — see the note at the implementation.
+        [[nodiscard]] const char* CaptureRejectReason() const;
 
         // giveUp MECHANISM (callers own the policy of when): warn, unload,
         // release the pending slot, and escalate repeat offenders to the
@@ -322,6 +329,12 @@ namespace FUI
         bool                                   m_pendingBusy = false;
         int                                    m_frames = 0;
         std::uint32_t                          m_stampBefore = 0;
+        // ★A run of timeouts means the backbuffer read is coming back empty —
+        // in practice, frame generation running over a menu. Counted so the
+        // cause can be named ONCE in the log instead of leaving the user with
+        // nothing but missing icons (see GiveUpPending).
+        int                                    m_timeoutStreak = 0;
+        bool                                   m_emptyCaptureWarned = false;
 
         // ★★1.0.5 — the same no-flicker guarantee the pinned item has, for
         // EVERY item: the newest key that item has a sprite for. A miss on the

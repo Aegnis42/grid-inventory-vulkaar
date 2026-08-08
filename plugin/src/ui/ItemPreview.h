@@ -6,6 +6,8 @@
 
 struct ID3D11Texture2D;
 struct ID3D11ShaderResourceView;
+struct ID3D11Device;
+struct D3D11_TEXTURE2D_DESC;
 
 namespace FUI
 {
@@ -135,6 +137,12 @@ namespace FUI
         // orientation and light were applied. Weapons and bags have distinct
         // angles, which is the only reason they never showed it.
         [[nodiscard]] bool ParkSettled() const;
+        // ★The raw tick count behind ParkSettled, for the timeout diagnostic.
+        // A capture that times out with a loaded, rotated model has only two
+        // suspects left -- this and the capture stamp -- and the log printed
+        // NEITHER, which is why a user's "nothing ever caches" report could not
+        // be told apart from a slow disk.
+        [[nodiscard]] int ParkTicks() const;
 
     private:
         ItemPreview() = default;
@@ -207,6 +215,20 @@ namespace FUI
         ID3D11Texture2D*          m_dstTex     = nullptr;
         ID3D11ShaderResourceView* m_dstSRV     = nullptr;
         ID3D11Texture2D*          m_scratchTex = nullptr;
+        // ★★What the capture textures were built for. renderWindows[0] is NOT
+        // reliably the surface the engine draws into: with a D3D12 swap chain
+        // (CS Upscaling) it is a different resource in a different format —
+        // measured 0x..2060 fmt=24 (R10G10B10A2) against a bound 0x..12a0
+        // fmt=28 (R8G8B8A8). A copy between those two formats fails outright,
+        // so the textures have to be rebuilt for whatever is actually bound.
+        // stored as raw ints so this header needs no d3d11/dxgi include
+        std::uint32_t             m_texFormat  = 0;   // DXGI_FORMAT_UNKNOWN
+        std::uint32_t             m_texW       = 0;
+        std::uint32_t             m_texH       = 0;
+        // Build/rebuild m_dstTex + m_dstSRV + m_scratchTex for this surface.
+        // Cheap no-op when the description already matches.
+        bool EnsureCaptureTextures(ID3D11Device* a_device,
+                                   const D3D11_TEXTURE2D_DESC& a_src);
         std::uint32_t             m_captureStamp = 0;
     };
 }

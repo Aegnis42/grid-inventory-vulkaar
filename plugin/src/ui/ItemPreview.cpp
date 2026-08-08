@@ -199,6 +199,11 @@ namespace FUI
         return m_parkTicks >= 2;
     }
 
+    int ItemPreview::ParkTicks() const
+    {
+        return m_parkTicks;
+    }
+
     ItemPreview* ItemPreview::GetSingleton()
     {
         static ItemPreview singleton;
@@ -242,20 +247,45 @@ namespace FUI
         srcTex->GetDesc(&srcDesc);
         srcTex->Release();
 
+        if (!EnsureCaptureTextures(device, srcDesc)) return false;
+
+        m_initialized = true;
+        return true;
+    }
+
+    bool ItemPreview::EnsureCaptureTextures(ID3D11Device* a_device,
+                                            const D3D11_TEXTURE2D_DESC& a_src)
+    {
+        if (!a_device) return false;
+        // Already built for this surface.
+        if (m_dstTex && m_dstSRV && m_scratchTex &&
+            m_texFormat == static_cast<std::uint32_t>(a_src.Format) &&
+            m_texW == a_src.Width && m_texH == a_src.Height) {
+            return true;
+        }
+        // ★Rebuilt, not patched: the scratch has to match the surface EXACTLY
+        // (CopyResource is a whole-resource copy) and the destination has to
+        // share its format family (CopySubresourceRegion). A 10-bit surface
+        // and an 8-bit one satisfy neither, and D3D reports it by silently
+        // doing nothing — which is exactly how this failure looked from the
+        // outside: every step "succeeded" and the pixels never arrived.
+        if (m_dstSRV)     { m_dstSRV->Release();     m_dstSRV = nullptr; }
+        if (m_dstTex)     { m_dstTex->Release();     m_dstTex = nullptr; }
+        if (m_scratchTex) { m_scratchTex->Release(); m_scratchTex = nullptr; }
+
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width            = kTexSize;
         desc.Height           = kTexSize;
         desc.MipLevels        = 1;
         desc.ArraySize        = 1;
-        desc.Format           = srcDesc.Format;
+        desc.Format           = a_src.Format;
         desc.SampleDesc.Count = 1;
         desc.Usage            = D3D11_USAGE_DEFAULT;
         desc.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
-
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &m_dstTex))) return false;
-
-        if (FAILED(device->CreateShaderResourceView(m_dstTex, nullptr, &m_dstSRV))) {
-            Shutdown();
+        if (FAILED(a_device->CreateTexture2D(&desc, nullptr, &m_dstTex))) return false;
+        if (FAILED(a_device->CreateShaderResourceView(m_dstTex, nullptr, &m_dstSRV))) {
+            m_dstTex->Release();
+            m_dstTex = nullptr;
             return false;
         }
 
@@ -264,19 +294,24 @@ namespace FUI
         // rect-only restore leaves any overspill visible (oversized items
         // peeking past the caching card for the capture frame). Full
         // save/restore reverts every pixel we touched.
-        D3D11_TEXTURE2D_DESC sdesc = srcDesc;
+        D3D11_TEXTURE2D_DESC sdesc = a_src;
         sdesc.MipLevels      = 1;
         sdesc.ArraySize      = 1;
         sdesc.Usage          = D3D11_USAGE_DEFAULT;
         sdesc.BindFlags      = 0;
         sdesc.CPUAccessFlags = 0;
         sdesc.MiscFlags      = 0;
-        if (FAILED(device->CreateTexture2D(&sdesc, nullptr, &m_scratchTex))) {
-            Shutdown();
+        if (FAILED(a_device->CreateTexture2D(&sdesc, nullptr, &m_scratchTex))) {
+            m_dstSRV->Release(); m_dstSRV = nullptr;
+            m_dstTex->Release(); m_dstTex = nullptr;
             return false;
         }
 
-        m_initialized = true;
+        m_texFormat = static_cast<std::uint32_t>(a_src.Format);
+        m_texW      = a_src.Width;
+        m_texH      = a_src.Height;
+        SKSE::log::info("[PREVIEW] capture textures built for {}x{} fmt={}",
+            a_src.Width, a_src.Height, static_cast<int>(a_src.Format));
         return true;
     }
 
@@ -835,8 +870,32 @@ namespace FUI
         auto* data = RE::BSGraphics::Renderer::GetRendererData();
         if (!data) return;
         auto* context = reinterpret_cast<ID3D11DeviceContext*>(data->context);
-        auto* rtv     = reinterpret_cast<ID3D11RenderTargetView*>(data->renderWindows[0].renderView);
-        if (!context || !m_dstTex || !m_scratchTex || !rtv) return;
+        if (!context) return;
+
+        // ★★★ASK THE PIPELINE, DO NOT ASSUME. renderWindows[0] used to be
+        // taken as "the screen", and with a D3D12 swap chain (CS Upscaling,
+        // and therefore anyone on DLSS/FSR or frame generation) it is not: the
+        // engine draws into a different resource in a different format. Every
+        // step then landed on a surface nobody displays — the clear, the read
+        // AND the restore — so the capture came back empty AND the parked
+        // model stayed visible behind the window. Measured on that setup:
+        //     renderWindows[0] = 0x..2060 fmt=24 (R10G10B10A2)
+        //     actually bound   = 0x..12a0 fmt=28 (R8G8B8A8)
+        // Whatever is bound right now IS the surface being drawn; take it, and
+        // fall back to renderWindows[0] only when nothing is bound at all.
+        struct RtvHold {
+            ID3D11RenderTargetView* p = nullptr;
+            bool owned = false;
+            ~RtvHold() { if (owned && p) p->Release(); }
+        } hold;
+        context->OMGetRenderTargets(1, &hold.p, nullptr);   // AddRef on success
+        hold.owned = (hold.p != nullptr);
+        if (!hold.p) {
+            hold.p = reinterpret_cast<ID3D11RenderTargetView*>(
+                data->renderWindows[0].renderView);
+        }
+        auto* rtv = hold.p;
+        if (!rtv) return;
 
         ID3D11Resource* srcRes = nullptr;
         rtv->GetResource(&srcRes);
@@ -845,6 +904,16 @@ namespace FUI
         srcRes->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&srcTex));
         srcRes->Release();
         if (!srcTex) return;
+
+        // The bound surface decides the capture textures, not the other way
+        // round. Free when it changes (swap-chain switch mid-session).
+        {
+            D3D11_TEXTURE2D_DESC bd{};
+            srcTex->GetDesc(&bd);
+            auto* dev = reinterpret_cast<ID3D11Device*>(data->forwarder);
+            if (!EnsureCaptureTextures(dev, bd)) { srcTex->Release(); return; }
+        }
+        if (!m_dstTex || !m_scratchTex) { srcTex->Release(); return; }
 
         // Compute the clamped backbuffer rect once. Save/clear/capture/restore
         // all operate on this single box.
@@ -855,7 +924,31 @@ namespace FUI
         int height = static_cast<int>(m_captureSize.y);
         if (left < 0) { width += left; left = 0; }
         if (top < 0)  { height += top; top = 0; }
-        if (width <= 0 || height <= 0) { srcTex->Release(); return; }
+
+        // ★★These two exits used to be SILENT, and they are the only way a
+        // capture can fail with a model that is loaded, rotated and settled:
+        // the stamp never advances, every gate keeps answering "not ready",
+        // and 45 frames later the item lands in the PERSISTED fail list. A
+        // user reporting "nothing ever caches" produced logs indistinguishable
+        // from a slow disk because of it. The rect is clamped against the
+        // BACKBUFFER, so a park point near a screen edge — the main window's
+        // centre on any opaque skin — is enough to starve it.
+        auto rectStarved = [&](const char* a_where) {
+            static int s_seen = 0;
+            if ((s_seen++ % 120) != 0) return;   // one line per 120 misses
+            SKSE::log::warn(
+                "[PREVIEW] capture rect starved ({}): rect=({},{}) {}x{} "
+                "screen={}x{} park=({:.0f},{:.0f}) box={:.0f}x{:.0f} cur='{}'",
+                a_where, left, top, width, height,
+                screenSize.width, screenSize.height, m_parkPos.x, m_parkPos.y,
+                m_captureSize.x, m_captureSize.y,
+                m_current ? m_current->GetName() : "-");
+        };
+        if (width <= 0 || height <= 0) {
+            rectStarved("negative after top-left clamp");
+            srcTex->Release();
+            return;
+        }
 
         const int maxW = static_cast<int>(screenSize.width) - left;
         const int maxH = static_cast<int>(screenSize.height) - top;
@@ -863,7 +956,11 @@ namespace FUI
         if (height > maxH) height = maxH;
         if (width > static_cast<int>(kTexSize))  width = static_cast<int>(kTexSize);
         if (height > static_cast<int>(kTexSize)) height = static_cast<int>(kTexSize);
-        if (width <= 0 || height <= 0) { srcTex->Release(); return; }
+        if (width <= 0 || height <= 0) {
+            rectStarved("off the right/bottom edge");
+            srcTex->Release();
+            return;
+        }
 
         D3D11_BOX box = {};
         box.left   = static_cast<UINT>(left);
@@ -889,8 +986,8 @@ namespace FUI
             }
         }
 
-        // Step 3 (render): engine paints the model to the backbuffer. Any
-        // overspill beyond the capture rect is erased by the full-frame
+        // Step 3 (render): the engine paints the model into the bound surface.
+        // Any overspill beyond the capture rect is erased by the full-frame
         // restore in Step 5, so nothing is ever visible on screen.
         inv->Render();
 

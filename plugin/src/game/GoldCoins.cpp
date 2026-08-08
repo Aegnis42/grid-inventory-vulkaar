@@ -225,6 +225,14 @@ namespace FUI::GoldCoins
 
     RE::TESBoundObject* PouchForm() { return g_pouch; }
 
+    bool PouchHeld()
+    {
+        // ★Asked from a click handler, so it may run before the forms resolve
+        // and on a frame where the player is not there at all (main menu).
+        auto* p = RE::PlayerCharacter::GetSingleton();
+        return p && g_pouch && p->GetItemCount(g_pouch) > 0;
+    }
+
     void SetBagWares(std::vector<BagWare> a_wares)
     {
         g_bagWares = std::move(a_wares);

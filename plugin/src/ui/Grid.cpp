@@ -2676,7 +2676,48 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // one place in this window where that is never wanted.
                         // The pouch is excluded above by its own branch.
                         } else if (GoldCoins::IsCoinForm(it.obj->GetFormID())) {
-                            // nothing: drag only
+                            // ★Right-click banks THIS TILE's gold, and only it.
+                            // The amount is the tile's own (coinValue), never
+                            // the walking total, so three 1000 G tiles deposit
+                            // a thousand at a time and the other two stay put.
+                            //
+                            // Order matters. Unpin FIRST: a pinned purse is
+                            // subtracted from walking gold, and StoreToPouch
+                            // draws FROM walking -- ask before unpinning and it
+                            // sees a pool the purse is not in and stores 0.
+                            // Same sequence the drop-on-pouch path uses.
+                            //
+                            // Restore the pin when nothing was stored (pouch
+                            // full, or gone), so a refused deposit leaves the
+                            // board exactly as it was. A PARTIAL store needs no
+                            // restore: the remainder is already back in walking
+                            // gold and redraws itself as auto coin tiles.
+                            //
+                            // ★★ERASE THE SLOT, pinned or not. An AUTO tile is
+                            // not a free-floating decoration -- it owns a
+                            // g_layout entry like everything else, and the
+                            // rebuild re-keys this form's auto slots #0,#1,...
+                            // BY GRID POSITION (see the coin branch in the
+                            // rebuild). So the slots decide which cells exist
+                            // and the walking total decides how many. Take the
+                            // gold without erasing a slot and the count simply
+                            // drops by one -- the rebuild keeps the front cells
+                            // and truncates the LAST one, which is why clicking
+                            // the first of eight emptied the eighth. Erasing
+                            // this slot is what makes the emptied cell the one
+                            // that was clicked; the survivors re-map around it.
+                            // Same reason the drop-on-pouch path erases too.
+                            if (GoldCoins::PouchHeld() && it.coinValue > 0) {
+                                const int  v = it.coinValue;
+                                const bool pinned = GoldCoins::PinnedValue(it.key) >= 0;
+                                if (pinned) GoldCoins::UnpinTile(it.key);
+                                if (GoldCoins::StoreToPouch(v) > 0) {
+                                    g_layout.erase(it.key);
+                                    if (g_sound) g_sound(it.obj, false);
+                                } else if (pinned) {
+                                    GoldCoins::PinAmount(it.key, v);
+                                }
+                            }
                         } else {   // D3: right-click = use, the vanilla click
                             if (g_poolTrace) {
                                 const auto le = g_layout.count(it.key) ? g_layout[it.key]
@@ -7082,7 +7123,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                      : mode == LootBarter::Mode::kPickpocket ? Lang::Str::ActSteal
                                                              : Lang::Str::ActTakeIt;
             } else if (isCoin) {
-                hasVerb = false;   // coins are mirror artefacts — drag only
+                // With a pouch on you, a coin tile has a verb at last: bank it.
+                // Without one there is still nothing a click can do, and the
+                // bar goes back to saying so rather than promising a deposit
+                // that would be refused.
+                if (GoldCoins::PouchHeld()) verb = Lang::Str::ActDeposit;
+                else                        hasVerb = false;
             } else if (LootBarter::IsLootMode(mode)) {
                 verb = Lang::Str::ActStoreIn;
             } else if (mode == LootBarter::Mode::kPickpocket) {
