@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,25 @@ namespace FUI::GoldCoins
         // player just bought (which is exactly what the old "stock it whenever
         // it is missing" rule did — bags were infinitely purchasable).
         std::map<RE::FormID, std::uint32_t> g_vendorCycle;
+
+        // ★★Merchants re-seeded since the last game load. NOT serialized, and
+        // cleared on every revert — it is a per-load allowance, not save state.
+        //
+        // The cycle counter above says "I stocked this merchant this cycle",
+        // and that is not the same as "the goods are still on the shelf". The
+        // vendor chest respawns on its own and takes our wares with it (they
+        // are not in its leveled entries), and that respawn is processed on the
+        // FIRST load after the game is launched. Measured on one save, same
+        // merchant, same cycle: first load after launch, the chest held 0 of
+        // ours; reloading the same save in the same session, 8. The counter
+        // said "done" both times, so the shelf stayed empty until the game was
+        // restarted.
+        // ★Bounded to once per load on purpose. Plain "stock it whenever it is
+        // missing" is what made bags infinitely purchasable before (see above):
+        // buy the last one, reopen, and it came back. With this the shelf can
+        // only be replenished after the chest was emptied by something other
+        // than the player's own shopping.
+        std::set<RE::FormID> g_reseeded;
 
         // how many general-purpose bags a general store shows per cycle
         constexpr int kGenericBagsPerCycle = 3;
@@ -244,21 +264,36 @@ namespace FUI::GoldCoins
 
     void SeedVendorStock(RE::Actor* a_merchant, RE::TESObjectREFR* a_container)
     {
-        if (!a_merchant || !a_container) return;
+        // ★★Every exit below used to be a silent `return`, and the log for a
+        // shop visit was therefore EMPTY -- indistinguishable from "never
+        // called". A run of these is the whole reason the "no bags on the first
+        // load after launching the game" report could not be read off a log.
+        // Each one names itself now; the reason must reach the log even when
+        // the answer is "nothing to do".
+        const auto bail = [&](const char* why) {
+            logger::info("[VENDOR] skip ({}) - merchant {}", why,
+                a_merchant ? a_merchant->GetDisplayFullName() : "<null>");
+        };
+        if (!a_merchant || !a_container) { bail("no merchant/container"); return; }
 
         auto* fac = a_merchant->GetVendorFaction();
-        if (!fac) return;
+        if (!fac) { bail("no vendor faction"); return; }
         auto* list = fac->vendorData.vendorSellBuyList;
-        if (!list) return;   // unrestricted vendor: not a general store either
+        // unrestricted vendor: not a general store either
+        if (!list) { bail("no sell/buy list"); return; }
 
         // "General goods" = the vendor's category list covers clutter. Testing
         // the KEYWORD rather than our own item matters: the pouch is a custom
         // MISC record with no VendorItem* keyword of its own, so matching it
         // against the list directly would exclude every merchant. Keywords keep
         // their EditorID at runtime, so no po3 Tweaks dependency here.
-        static RE::BGSKeyword* clutter =
-            RE::TESForm::LookupByEditorID<RE::BGSKeyword>("VendorItemClutter");
-        if (!clutter) return;
+        // ★NOT a function-local static any more. A static caches the FIRST
+        // lookup for the whole process, so one early miss would poison every
+        // shop until the game is restarted -- exactly the shape of a
+        // "only after a fresh launch" bug, and not something to leave standing
+        // while investigating one.
+        auto* clutter = RE::TESForm::LookupByEditorID<RE::BGSKeyword>("VendorItemClutter");
+        if (!clutter) { bail("VendorItemClutter keyword not found"); return; }
         const bool inList = list->HasForm(clutter);
         // The list is a whitelist unless notBuySell flips it into a blacklist.
         // ★No longer an early return: a SPECIALIST (alchemist, blacksmith) is
@@ -273,7 +308,7 @@ namespace FUI::GoldCoins
         // chest's leveled entries, so they are not regenerated, just gone.
         // Nothing to clean up on our side; we only decide what goes back.
         auto* cal = RE::Calendar::GetSingleton();
-        if (!cal) return;
+        if (!cal) { bail("no Calendar"); return; }
         float days = 2.0f;
         if (auto* gs = RE::GameSettingCollection::GetSingleton()) {
             if (auto* set = gs->GetSetting("iDaysToRespawnVendor")) {
@@ -286,12 +321,46 @@ namespace FUI::GoldCoins
         if (days < 0.1f) days = 2.0f;
         const auto cycle = static_cast<std::uint32_t>(cal->GetDaysPassed() / days);
 
-        const RE::FormID mid = a_merchant->GetFormID();
-        if (const auto it = g_vendorCycle.find(mid);
-            it != g_vendorCycle.end() && it->second >= cycle) {
-            return;   // already stocked this cycle — buying does not refill it
+        // ★★How many of OUR wares are on the shelf RIGHT NOW. This is not a
+        // statistic -- it is the thing the restock decision turns on, because
+        // "I stocked this cycle" and "the goods are still there" are different
+        // claims and the chest's own respawn is what pulls them apart.
+        // ★One pass, not one per ware: GetInventory() walks the whole list and
+        // allocates a map on every call, and this now runs on every shop open.
+        int oursInChest = 0;
+        {
+            std::set<RE::TESBoundObject*> ours;
+            for (const auto& w : g_bagWares) {
+                if (w.obj) ours.insert(w.obj);
+            }
+            if (g_pouch) ours.insert(g_pouch);
+            for (const auto& [obj, data] : a_container->GetInventory()) {
+                if (data.first > 0 && ours.contains(obj)) ++oursInChest;
+            }
         }
+
+        const RE::FormID mid = a_merchant->GetFormID();
+        const auto it = g_vendorCycle.find(mid);
+        const bool cycleDone = it != g_vendorCycle.end() && it->second >= cycle;
+        // Nothing of ours on the shelf and we have not already replenished this
+        // merchant since the load -> the chest was emptied by something that is
+        // not the player's shopping (its own respawn), so the counter is lying.
+        const bool emptied = oursInChest == 0 && !g_reseeded.contains(mid);
+
+        if (cycleDone && !emptied) {
+            // already stocked this cycle — buying does not refill it
+            logger::info("[VENDOR] {}: cycle {} already stocked, {} of ours on the shelf",
+                a_merchant->GetDisplayFullName(), cycle, oursInChest);
+            return;
+        }
+        logger::info("[VENDOR] {} (0x{:08X}): cycle {} (day {:.1f} / {:.0f}), general={}, "
+                     "{} of ours on the shelf -- {}",
+            a_merchant->GetDisplayFullName(), mid, cycle, cal->GetDaysPassed(), days,
+            isGeneral, oursInChest,
+            cycleDone ? "chest respawned since we stocked it, re-seeding once this load"
+                      : "new cycle");
         g_vendorCycle[mid] = cycle;
+        g_reseeded.insert(mid);
 
         auto place = [&](RE::TESBoundObject* item, const char* why) {
             if (!item) return;
@@ -341,8 +410,7 @@ namespace FUI::GoldCoins
             }
             for (int i = 0; i < want; ++i) place(generic[idx[i]], "rotating");
         }
-        logger::info("[VENDOR] cycle {} for {} — {} typed candidate(s), {} generic",
-            cycle, a_merchant->GetDisplayFullName(),
+        logger::info("[VENDOR]   {} typed candidate(s), {} generic in the pool",
             g_bagWares.size() - generic.size(), generic.size());
     }
 
@@ -890,6 +958,9 @@ namespace FUI::GoldCoins
         // per-save state: a new game must not inherit the last save's cycles,
         // or its first merchants look "already stocked" and skip a rotation
         g_vendorCycle.clear();
+        // per-LOAD state: the re-seed allowance is renewed by every load, which
+        // is exactly when the chest respawn that spends it happens
+        g_reseeded.clear();
         g_pending.clear();
         g_lastLedger = -1;   // skip auto-store on the first tick after load
         g_dirty = true;

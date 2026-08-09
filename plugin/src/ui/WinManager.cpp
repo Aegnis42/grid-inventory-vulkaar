@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 
 namespace FUI
 {
@@ -701,17 +702,44 @@ namespace FUI
         if (dL == 0.0f && dR == 0.0f && dT == 0.0f && dB == 0.0f) return;
 
         // Docked children hold the edge they were flush against. Closed ones
-        // are included (a_openOnly=false) or they would reopen detached.
+        // are included or they would reopen detached.
+        //
+        // ★★Level by level, not flat over the subtree. A resize moves only THIS
+        // window's edges, so only a DIRECT child can be tested against them; a
+        // grandchild is flush against its own parent, which merely TRANSLATES,
+        // so it has to inherit that parent's delta instead of being measured
+        // against a window it never touched.
+        // The old code walked the whole subtree but tested every level against
+        // oldMin/oldMax, so the test could only ever match direct children:
+        // a bag snapped to the main window followed when the partner panel
+        // opened, and a bag snapped to THAT bag was left behind.
         constexpr float eps = 2.0f;
-        for (const auto& k : SubtreeOf(a_key, false)) {
-            auto* c = Find(k);
-            if (!c || !c->posKnown) continue;
-            const float cL = c->pos.x, cR = c->pos.x + c->size.x;
-            const float cT = c->pos.y, cB = c->pos.y + c->size.y;
-            if (std::abs(cR - oldMin.x) <= eps)      c->pos.x += dL;
-            else if (std::abs(cL - oldMax.x) <= eps) c->pos.x += dR;
-            if (std::abs(cB - oldMin.y) <= eps)      c->pos.y += dT;
-            else if (std::abs(cT - oldMax.y) <= eps) c->pos.y += dB;
+        std::unordered_map<std::string, ImVec2> delta;   // key -> how far it moved
+        delta[a_key] = ImVec2(0.0f, 0.0f);               // root: already applied
+        std::vector<std::string> order{ a_key };
+        // breadth-first, so a parent's delta is settled before its children ask
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            const std::string cur = order[i];   // by value: `order` grows below
+            for (auto& c : m_wins) {
+                if (c.parent != cur || c.key == "main") continue;
+                if (delta.contains(c.key)) continue;   // cycle / diamond guard
+                ImVec2 d(0.0f, 0.0f);
+                if (cur == a_key) {
+                    if (c.posKnown) {
+                        const float cL = c.pos.x, cR = c.pos.x + c.size.x;
+                        const float cT = c.pos.y, cB = c.pos.y + c.size.y;
+                        if (std::abs(cR - oldMin.x) <= eps)      d.x = dL;
+                        else if (std::abs(cL - oldMax.x) <= eps) d.x = dR;
+                        if (std::abs(cB - oldMin.y) <= eps)      d.y = dT;
+                        else if (std::abs(cT - oldMax.y) <= eps) d.y = dB;
+                    }
+                } else {
+                    d = delta[cur];   // rigidly attached to a parent that moved
+                }
+                if (c.posKnown) { c.pos.x += d.x; c.pos.y += d.y; }
+                delta[c.key] = d;
+                order.push_back(c.key);
+            }
         }
     }
 

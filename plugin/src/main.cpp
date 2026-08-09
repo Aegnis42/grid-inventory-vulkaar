@@ -492,6 +492,73 @@ namespace
         return s;
     }
 
+    // ★★Is this BOOK record a NOTE (a loose page / letter) rather than a book?
+    //
+    // The record cannot answer. OBJ_BOOK carries a Type with a kNoteScroll
+    // value, and it is 0 on every book in the load order — 1,135 of 1,135,
+    // matching an earlier count of 1,134 of 1,134 on a different load order.
+    // Skyrim never fills the field. (The library could not read it anyway:
+    // kNoteScroll is -1 while the member is a uint8_t, so 0xFF != -1 and the
+    // comparison is always false.) The mesh is the only signal left.
+    //
+    // ★Matched on the FILE NAME's start, not anywhere in the path. A bare
+    // find("note") also hits 'notebook', 'denote', and any folder someone
+    // named "notes" — a short substring against a whole path is how the armour
+    // classifier once mis-sorted silently. Vanilla notes are
+    // 'clutter\books\note0N.nif', so the file simply begins with it.
+    // The nif's file name alone (no directories) — every mesh-based rule below
+    // works on this, never on the whole path, for the reason in the note above.
+    [[nodiscard]] std::string ModelFileOf(RE::TESBoundObject* a_obj)
+    {
+        std::string mp = ModelPathOf(a_obj);   // lowercased, backslashes
+        const auto slash = mp.rfind('\\');
+        return slash == std::string::npos ? mp : mp.substr(slash + 1);
+    }
+
+    [[nodiscard]] bool IsNoteMesh(RE::TESBoundObject* a_obj)
+    {
+        return ModelFileOf(a_obj).starts_with("note");
+    }
+
+    // ★★An INGOT and an ORE carry the exact same keyword.
+    //
+    // Vanilla ships one VendorItemOreIngot for both — measured across two load
+    // orders (60 and 90 records), no second keyword separates them anywhere.
+    // So the mesh again. 'ingot' is long enough to match anywhere in the file
+    // name safely, which is what picks up 'madnessingot01' and 'dummyingot'
+    // alongside the plain 'ingotEbony' family.
+    //
+    // ★Only the ingot side gets a rule. The ore side would need find("ore"),
+    // and a three-letter needle hides inside score/store/forest — the same trap
+    // that IsNoteMesh() sidesteps. Everything that is not an ingot simply stays
+    // misc_ore, exactly as before.
+    [[nodiscard]] bool IsIngotMesh(RE::TESBoundObject* a_obj)
+    {
+        return ModelFileOf(a_obj).find("ingot") != std::string::npos;
+    }
+
+    // ★A DRINK and a plate of food also share one keyword (VendorItemFood), so
+    // this is best effort: a drink whose mesh is not named after any of these
+    // simply stays "food", which is where it sat before this category existed.
+    //
+    // ★No "ale" and no "rum" — three-letter needles hide inside whale and
+    // drumstick. Every word here is >=4 chars and was checked against the 242
+    // distinct food meshes of the test load orders for false hits.
+    [[nodiscard]] bool IsDrinkMesh(RE::TESBoundObject* a_obj)
+    {
+        static constexpr std::string_view kWords[] = {
+            "wine", "mead", "flagon", "tankard", "liquor", "brandy", "grog",
+            "goblet", "bottle", "drink", "milkjug", "waterskin", "skooma",
+            "jagga", "matze", "shein", "sujamma",
+        };
+        const std::string file = ModelFileOf(a_obj);
+        if (file.empty()) return false;
+        for (const auto w : kWords) {
+            if (file.find(w) != std::string::npos) return true;
+        }
+        return false;
+    }
+
     std::unordered_map<std::string, ItemDef> g_modelDefs;   // derived, lazy
     bool g_modelDefsDirty = true;
 
@@ -549,21 +616,32 @@ namespace
         put("armor_cloth",     2, 3, -90, 0, 180, 0.8f);   // <- armor_body
         put("armor_shield",    2, 3, -90, 180, 0, 0.9f);
         put("armor_hands",     2, 2, -90, 0, 180, 1.0f);
+        put("armor_gloves",    2, 2, -90, 0, 180, 1.0f);   // <- armor_hands
         put("armor_feet",      2, 2, 0, 0, 165, 1.0f);
+        put("armor_shoes",     2, 2, 0, 0, 165, 1.0f);     // <- armor_feet
         put("armor_head",      2, 2, -90, 0, 0, 1.0f);
+        put("armor_hood",      2, 2, -90, 0, 0, 1.0f);     // <- armor_head
+        put("armor_accessory", 2, 3, -90, 0, 180, 0.8f);   // <- armor_cloth
         put("book",            1, 2, -90, 0, 0, 1.0f);
         put("book_skill",      1, 2, -90, 0, 0, 1.0f);     // <- book
         put("book_spell",      1, 2, -90, 0, 0, 1.0f);     // <- book
+        put("book_note",       1, 2, -90, 0, 0, 1.0f);     // <- book
         put("scroll",          2, 1, -90, 0, 0, 1.0f);
         put("potion",          1, 1, 0, 0, -90, 1.0f);
         put("poison",          1, 1, 0, 0, -90, 1.0f);     // <- potion
         put("food",            1, 1, 0, 0, -90, 1.0f);     // <- potion
+        put("food_raw",        1, 1, 0, 0, -90, 1.0f);     // <- food
+        put("food_drink",      1, 1, 0, 0, -90, 1.0f);     // <- food
         put("ingredient",      1, 1, -90, 0, 0, 1.0f);     // <- misc
         put("soulgem",         1, 1, -90, 0, 0, 1.0f);     // <- misc
         put("key",             1, 1, 0, 0, 90, 9.5f);
         put("misc_ore",        1, 1, -90, 0, 0, 1.0f);     // <- misc
+        put("misc_ingot",      1, 1, -90, 0, 0, 1.0f);     // <- misc_ore
         put("misc_gem",        1, 1, -90, 0, 0, 1.0f);     // <- misc
         put("misc_hide",       1, 1, -90, 0, 0, 1.0f);     // <- misc
+        put("misc_animalpart", 1, 1, -90, 0, 0, 1.0f);     // <- misc
+        put("misc_tool",       1, 1, -90, 0, 0, 1.0f);     // <- misc
+        put("misc_clutter",    1, 1, -90, 0, 0, 1.0f);     // <- misc
         put("misc",            1, 1, -90, 0, 0, 1.0f);
     }
 
@@ -608,20 +686,27 @@ namespace
                 }
             }
             if (armo->HasPartOf(S::kShield)) return "armor_shield";
-            if (armo->HasPartOf(S::kHands))  return "armor_hands";
-            if (armo->HasPartOf(S::kFeet))   return "armor_feet";
+            // clothing-type limb/head gear is a glove, a shoe, a hood — soft
+            // things that hang differently from the plate they share a slot
+            // with. Same discriminator the body already splits on.
+            const bool cloth =
+                armo->GetArmorType() == RE::BGSBipedObjectForm::ArmorType::kClothing;
+            if (armo->HasPartOf(S::kHands)) return cloth ? "armor_gloves" : "armor_hands";
+            if (armo->HasPartOf(S::kFeet))  return cloth ? "armor_shoes"  : "armor_feet";
             if (armo->HasPartOf(S::kHead) || armo->HasPartOf(S::kHair) ||
                 armo->HasPartOf(S::kCirclet)) {
-                return "armor_head";
+                return cloth ? "armor_hood" : "armor_head";
             }
             // B10: custom biped slots (capes 46, backpacks, accessories...)
             // used to be swallowed by the armor_head fallback (2x2 helmet
-            // defaults) — a body-like default fits them far better
-            return "armor_cloth";
+            // defaults), then by armor_cloth — but a cape is not a robe, and
+            // this is 908 records on a heavy load order, so it owns a category.
+            return "armor_accessory";
         }
         if (auto* book = a_obj->As<RE::TESObjectBOOK>()) {
             if (book->TeachesSpell()) return "book_spell";
             if (book->TeachesSkill()) return "book_skill";
+            if (IsNoteMesh(a_obj))    return "book_note";
             return "book";
         }
         if (a_obj->Is(RE::FormType::Scroll)) return "scroll";
@@ -630,16 +715,30 @@ namespace
         }
         if (auto* alch = a_obj->As<RE::AlchemyItem>()) {
             if (alch->IsPoison()) return "poison";
-            if (alch->IsFood())   return "food";
+            if (alch->IsFood()) {
+                // ★mesh before keyword here, the opposite of everywhere else:
+                // a category only decides a default SHAPE, and the bottle is
+                // what makes a drink different. Vanilla milk carries
+                // VendorItemFoodRaw yet comes in a jug — it wants the bottle.
+                if (IsDrinkMesh(a_obj))                        return "food_drink";
+                if (alch->HasKeywordString("VendorItemFoodRaw")) return "food_raw";
+                return "food";
+            }
             return "potion";
         }
         if (a_obj->Is(RE::FormType::Ingredient)) return "ingredient";
         if (a_obj->Is(RE::FormType::SoulGem))    return "soulgem";
         if (a_obj->Is(RE::FormType::KeyMaster))  return "key";
         if (auto* misc = a_obj->As<RE::TESObjectMISC>()) {
-            if (misc->HasKeywordString("VendorItemOreIngot"))   return "misc_ore";
+            if (misc->HasKeywordString("VendorItemOreIngot")) {
+                return IsIngotMesh(a_obj) ? "misc_ingot" : "misc_ore";
+            }
             if (misc->HasKeywordString("VendorItemGem"))        return "misc_gem";
             if (misc->HasKeywordString("VendorItemAnimalHide")) return "misc_hide";
+            // narrowest first: a bone or a hammer also carries VendorItemClutter
+            if (misc->HasKeywordString("VendorItemAnimalPart")) return "misc_animalpart";
+            if (misc->HasKeywordString("VendorItemTool"))       return "misc_tool";
+            if (misc->HasKeywordString("VendorItemClutter"))    return "misc_clutter";
         }
         return "misc";
     }
@@ -674,8 +773,24 @@ namespace
             k.erase(0, k.find_first_not_of(" \t"));
             k.erase(k.find_last_not_of(" \t") + 1);
             if (k != a_key) continue;
-            if (a_def) { *it = FormatItemDef(a_key, *a_def); }
-            else       { lines.erase(it); }
+            if (a_def) {
+                *it = FormatItemDef(a_key, *a_def);
+            } else {
+                // ★Take the "; Name" comment written directly above with it.
+                // Erasing the entry alone leaves the comment behind, where it
+                // then reads as the label of the NEXT, unrelated item — 211 of
+                // those had piled up in the shipped file. Index >= 2 keeps the
+                // two header comments safe.
+                auto first = it;
+                if (it != lines.begin()) {
+                    const auto prev = std::prev(it);
+                    if (std::distance(lines.begin(), prev) >= 2 &&
+                        !prev->empty() && prev->front() == ';') {
+                        first = prev;
+                    }
+                }
+                lines.erase(first, std::next(it));
+            }
             done = true;
             break;
         }
@@ -917,10 +1032,17 @@ namespace
                 { "weap_battleaxe", { "weap_warhammer" } },
                 { "ammo",           { "ammo_arrow", "ammo_bolt" } },
                 { "armor_body",     { "armor_body_heavy", "armor_body_light", "armor_cloth" } },
-                { "armor_head",     { "armor_circlet" } },
-                { "book",           { "book_skill", "book_spell" } },
+                { "armor_head",     { "armor_circlet", "armor_hood" } },
+                { "armor_hands",    { "armor_gloves" } },
+                { "armor_feet",     { "armor_shoes" } },
+                { "armor_cloth",    { "armor_accessory" } },
+                { "book",           { "book_skill", "book_spell", "book_note" } },
                 { "potion",         { "poison", "food" } },
-                { "misc",           { "ingredient", "soulgem", "misc_ore", "misc_gem", "misc_hide" } },
+                { "food",           { "food_raw", "food_drink" } },
+                { "misc_ore",       { "misc_ingot" } },
+                { "misc",           { "ingredient", "soulgem", "misc_ore", "misc_gem",
+                                      "misc_hide", "misc_animalpart", "misc_tool",
+                                      "misc_clutter" } },
             };
 
         std::vector<std::pair<std::string, std::string>> entries;   // key, values
@@ -1520,7 +1642,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 0, 6, 0 },
+    .Version              = { 1, 0, 7, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)

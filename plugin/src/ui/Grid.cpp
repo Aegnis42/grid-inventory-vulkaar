@@ -4119,13 +4119,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
                     auto emitCoin = [&](const std::string& key, int value,
                                         const LayoutEntry* pos) {
-                        if (g_held && key == g_held->key) return;   // carried: cell stays free
+                        if (g_held && key == g_held->key) return;   // cell stays free
                         Item it;
                         it.key = key;
-                        it.obj = obj;
+                        // ★★The KEY names a coin form; the VALUE is what the
+                        // purse actually holds. They can disagree — a save
+                        // written before the shrink path re-keyed still has a
+                        // 900 G purse, split down to 50, wearing its 0x803 key.
+                        // The value is the truth, so the drawn form comes from
+                        // the value's band. Auto tiles always agree already
+                        // (InstanceValue only ever yields values inside the
+                        // form's own band), so this changes nothing for them
+                        // and repairs an old pin the moment it is drawn.
+                        auto* drawn = value >= 0
+                                          ? GoldCoins::CoinForTier(GoldCoins::BandTier(value))
+                                          : nullptr;
+                        it.obj = drawn ? drawn : obj;
                         it.glow = glow;
                         it.count = 1;   // coins: one unit per tile (never favoritable)
-                        it.def = gdef;
+                        it.def = (drawn && drawn != obj && g_resolver) ? g_resolver(drawn)
+                                                                      : gdef;
                         it.mask = MaskOf(it.def);
                         it.coinValue = value;
                         if (pos) {
@@ -5953,8 +5966,29 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const int val = (std::min)(a_count, GoldCoins::kCoinCap);
             if (const int sv = GoldCoins::PinnedValue(a_srcKey); sv >= 0) {
                 const int rem = sv - val;   // source was a pin: shrink/remove it
-                if (rem > 0) GoldCoins::PinAmount(a_srcKey, rem);
-                else       { GoldCoins::UnpinTile(a_srcKey); g_layout.erase(a_srcKey); }
+                if (rem <= 0) {
+                    GoldCoins::UnpinTile(a_srcKey);
+                    g_layout.erase(a_srcKey);
+                } else if (GoldCoins::BandTier(rem) == GoldCoins::BandTier(sv)) {
+                    GoldCoins::PinAmount(a_srcKey, rem);   // same band: key still fits
+                } else {
+                    // ★★A tile KEY carries its coin FORM, so a value that
+                    // changes band has to be re-keyed or the purse keeps
+                    // drawing the old tier's icon. Growing already did this
+                    // (MergeGoldInto -> PlacePin); SHRINKING kept the key and
+                    // silently lied — 900 G split down to 50 still drew the
+                    // 100~1000 stack. Both directions go through PlacePin now.
+                    LayoutEntry pos{};
+                    bool havePos = false;
+                    if (auto li = g_layout.find(a_srcKey); li != g_layout.end()) {
+                        pos = li->second;
+                        havePos = true;
+                    }
+                    GoldCoins::UnpinTile(a_srcKey);
+                    g_layout.erase(a_srcKey);
+                    PlacePin(rem, havePos ? pos.col : -1, havePos ? pos.row : -1,
+                             havePos ? pos.bag : std::string{});
+                }
             } else {
                 // AUTO source: converting only part of walking gold would let
                 // Desired() reshuffle the OTHER auto tiles. Convert the WHOLE
@@ -6123,9 +6157,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
     int ItemValue(RE::TESBoundObject* a_obj)
     {
-        if (!a_obj) return -1;
+        if (!a_obj) return 0;
         const auto it = g_values.find(a_obj->GetFormID());
-        return it == g_values.end() ? -1 : it->second;
+        if (it != g_values.end()) return it->second;
+        // ★★The cache is rebuilt from the PLAYER's inventory only, so every
+        // item on the far side of a barter or container window misses it — and
+        // the old -1 sentinel was not caught anywhere, it was PRINTED. Every
+        // merchant tooltip read "Value -1" (measured: vanilla has no negative
+        // book value at all — Spell Tome: Raise Zombie is 49, and 0 of the 821
+        // BOOK records in Skyrim.esm are negative).
+        // ★Asking the form is not a patch: the cache stores exactly this call's
+        // result (see the GI44 note at the fill site), so player items are
+        // unchanged and the other side simply gets the same answer.
+        return a_obj->GetGoldValue();
     }
 
     int UnitValueWith(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl)
@@ -6780,13 +6824,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // GI64: what this thing is FOR. Only the two items whose behaviour is
         // ours rather than the game's -- everything else explains itself through
         // its own stats.
+        //
+        // ★★Bag-ness is the one entry in TileContext that IS derivable from the
+        // object, and the wares list passed `false` because it has no tile def
+        // to read -- so a bag on a merchant's shelf described nothing at all,
+        // when its capacity is the only thing you need before buying one.
+        // Ask the def instead of trusting the caller.
+        // ★Deliberately NOT folded into a_tile.isBag: that flag also picks the
+        // right-click verb, and it is tested BEFORE `partner` below -- a bag on
+        // a shelf must stay "buy", not become "open bag".
+        const bool describesBag = a_tile.isBag || ResolveDef(a_obj).bag != 0;
         const char* rmb = UIRoot::KeyLabel(UIRoot::Act::kSecondary);
+        // ★The last line of each block is an ACTION ("right-click to open" /
+        // "to withdraw"), and right-click does something else entirely on the
+        // other side of a barter window (buy) or in the trash (restore).
+        // Everything above it describes the thing and is still true while
+        // deciding, so only the action line drops out.
+        // ★This mirrors the verb chain below: the bag/pouch verb is only
+        // reached when none of equipSlot / parked / partner claimed it. If that
+        // order ever changes, this has to change with it.
+        const bool ownAction = !a_tile.partner && !a_tile.parked && !a_tile.equipSlot;
         if (isPouch) {
             ImGui::Separator();
             ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::PouchLine1));
             ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::PouchLine2));
-            ImGui::TextColored(Theme::TipSub(), Lang::T(Lang::Str::PouchLine3), rmb);
-        } else if (a_tile.isBag) {
+            if (ownAction) {
+                ImGui::TextColored(Theme::TipSub(), Lang::T(Lang::Str::PouchLine3), rmb);
+            }
+        } else if (describesBag) {
             const auto bd = ResolveDef(a_obj);
             const int bw = (std::max)(1, bd.bw);
             const int bh = (std::max)(1, bd.bh);
@@ -6802,7 +6867,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             } else {
                 ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::BagLine1));
             }
-            ImGui::TextColored(Theme::TipSub(), Lang::T(Lang::Str::BagLine2), rmb);
+            if (ownAction) {
+                ImGui::TextColored(Theme::TipSub(), Lang::T(Lang::Str::BagLine2), rmb);
+            }
         }
 
         // One effect per line — shared by potions/ingredients and enchantments.
@@ -7055,8 +7122,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // weight is meaningless under the space system (W1) — value only.
         // GI43: THIS unit's value (temper folded in, vanilla parity) -- the
         // scoped list is already resolved above; kAny falls back to the base.
-        ImGui::TextColored(Theme::TipSub(), "%s %d",
-            Lang::T(Lang::Str::Value), UnitValueWith(a_obj, scoped));
+        // ★Not for coins: the "1,000G" line above IS the value, and the coin
+        // forms carry 0 in the record (they are icons for a ledger, not goods),
+        // so this line could only ever add a contradictory second number.
+        if (a_coinValue < 0) {
+            ImGui::TextColored(Theme::TipSub(), "%s %d",
+                Lang::T(Lang::Str::Value), UnitValueWith(a_obj, scoped));
+        }
 
         // Phase 4: barter price (buy on the merchant side, sell on the player
         // side) — crimson when the payer can't afford it (design pass E)
@@ -7488,9 +7560,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const ImVec2 bp = ImGui::GetItemRectMin();
                 const ImVec2 bs = ImGui::GetItemRectSize();
                 const ImVec2 ts = ImGui::CalcTextSize(colLbl);
+                // ★★Val(), not sk.hi — the third call site to learn this (see
+                // LootBarter's figure and the favourite mark). On a LIGHT panel
+                // `hi` is a structural token, and worse: this button's own hover
+                // fill is lifted TOWARD it (ButtonHovered = btnFace + (hi -
+                // btnFace) * 0.28). Painting the label in `hi` therefore puts
+                // 63,65,66 text on a 39,41,42 ground — the word disappears at
+                // exactly the moment the cursor arrives, and only here, because
+                // every other emphasised text already asks Val().
                 dl->AddText(ImVec2(bp.x + (bs.x - ts.x) * 0.5f,
                                    bp.y + (bs.y - ts.y) * 0.5f),
-                    ImGui::GetColorU32(hov ? sk.hi : sk.inkDim), colLbl);
+                    hov ? Theme::Val() : ImGui::GetColorU32(sk.inkDim), colLbl);
                 if (hov) {
                     // bottom bar, not a floating card under the cursor: the
                     // card landed on the grid the player is aiming at

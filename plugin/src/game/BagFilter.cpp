@@ -24,9 +24,13 @@ alchemy = cat:ingredient, vendor:VendorItemIngredient
 soulgem = cat:soulgem, vendor:VendorItemSoulGem
 potion  = cat:potion, cat:poison, vendor:VendorItemPotion
 key     = cat:key, kwd:VendorItemKey, frm:Skyrim.esm|0x00000A, vendor:VendorItemClutter
-ore     = cat:misc_ore, vendor:VendorItemOreIngot
+ore     = cat:misc_ore, cat:misc_ingot, vendor:VendorItemOreIngot
 hide    = cat:misc_hide, kwd:VendorItemAnimalPart, vendor:VendorItemAnimalHide
 )";
+        // ★The ore pouch names BOTH ore categories. Splitting misc_ingot out of
+        // misc_ore silently narrowed this rule — the pouch kept its name and
+        // its icon and simply stopped taking ingots. Any future category split
+        // has to be walked past this table for the same reason.
         // ★kwd:VendorItemKey is not redundant with cat:key. Some vanilla keys
         // are MISC records, not KEYM — the two Skull Keys, found by the phase-0
         // sweep — so a rule that reads the record type alone misses them.
