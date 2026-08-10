@@ -9,6 +9,7 @@
 #include "ui/LootBarter.h"
 #include "ui/Sfx.h"
 #include "game/BagFilter.h"
+#include "game/Costume.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
 #include "ui/UIRoot.h"
@@ -6995,6 +6996,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 for (auto& [o2, d2] : winv) {
                     auto* e2 = d2.second.get();
                     if (!o2 || !e2 || !e2->IsWorn()) continue;
+                    // ★Never compare against the costume anchor. It is a 0-rating
+                    // placeholder, so every helmet would tout "+N over what you
+                    // are wearing" against a slot the player considers empty.
+                    if (Costume::IsAnchor(o2)) continue;
                     auto* wa = o2->As<RE::TESObjectARMO>();
                     if (!wa) continue;
                     if ((static_cast<std::uint32_t>(wa->GetSlotMask()) & hmask) == 0) continue;

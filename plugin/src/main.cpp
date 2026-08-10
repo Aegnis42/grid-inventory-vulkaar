@@ -1,5 +1,6 @@
 #include "api/HostApi.h"
 #include "game/BagFilter.h"
+#include "game/Costume.h"
 #include "game/GoldCoins.h"
 #include "ui/Editor.h"
 #include "ui/Fallback.h"
@@ -1604,6 +1605,7 @@ namespace
         FUI::Loadout::SaveGame(a_intfc);
         FUI::Grid::SaveGame(a_intfc);
         FUI::GoldCoins::SaveGame(a_intfc);
+        FUI::Costume::SaveGame(a_intfc);
         FUI::LootBarter::SaveGame(a_intfc);   // F7: container spot memory (GCLY)
     }
 
@@ -1617,6 +1619,8 @@ namespace
                 FUI::Grid::LoadRecord(a_intfc, version);
             } else if (type == FUI::GoldCoins::kRecordType) {
                 FUI::GoldCoins::LoadRecord(a_intfc, version);
+            } else if (type == FUI::Costume::kRecordType) {
+                FUI::Costume::LoadRecord(a_intfc, version);
             } else if (type == FUI::LootBarter::kContRecordType) {
                 FUI::LootBarter::LoadRecord(a_intfc, version);   // F7 (GCLY)
             } else {
@@ -1633,6 +1637,7 @@ namespace
     void RevertCallback(SKSE::SerializationInterface* a_intfc)
     {
         FUI::Loadout::RevertGame(a_intfc);
+        FUI::Costume::RevertGame(a_intfc);
         FUI::Grid::RevertGame(a_intfc);
         FUI::GoldCoins::RevertGame(a_intfc);
         FUI::LootBarter::RevertGame();   // F7: container spot memory

@@ -1,5 +1,6 @@
 ﻿#include "ui/Equip.h"
 #include "ui/Fallback.h"
+#include "game/Costume.h"
 #include "ui/Grid.h"
 #include "ui/Loadout.h"
 #include "ui/IconCache.h"
@@ -10,8 +11,10 @@
 #include "ui/WinManager.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>   // RenderCheckMark (the costume tab marker)
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <map>
 #include <string>
@@ -284,6 +287,10 @@ namespace FUI::Equip
             for (auto& [obj, data] : inv) {
                 auto& [count, entry] = data;
                 if (count <= 0 || !entry || !entry->IsWorn()) continue;
+                // ★The costume anchor is worn but is not gear -- it is the
+                // placeholder that gives a bare slot an appearance list. Showing
+                // it on the doll would advertise a helmet the player never put on.
+                if (Costume::IsAnchor(obj)) continue;
                 auto* armo = obj->As<RE::TESObjectARMO>();
                 if (!armo) continue;
                 const char* slot = SlotForArmor(armo);
@@ -885,6 +892,10 @@ namespace FUI::Equip
             SKSE::log::info("[EQUIP] {}{}", obj->GetName(), slot ? " (left hand)" : "");
         }
         g_pending.clear();
+        // Gear changed -> the costume has different armour to borrow from.
+        // Marked, not applied: one outfit change lands as many equip calls and
+        // the rebuild behind this is a whole-actor one.
+        Costume::MarkDirty();
         Grid::MarkEquipsApplied();   // suppression has done its job
         Grid::RequestRebuild();
         g_rebuildLag = 2;
@@ -941,6 +952,34 @@ namespace FUI::Equip
             if (active && activeChanged) {
                 ImGui::SetScrollHereX(0.5f);   // keep the active tab visible
             }
+
+            // ---- COSTUME marker (mockup B) ---------------------------------
+            // The checked tab's outfit is worn as an APPEARANCE -- its stats
+            // never apply, and the gear really equipped keeps all of its.
+            //
+            // ★The marker lives INSIDE the tab, before the name. An ImGui
+            // Checkbox was tried first and read as a separate control: it
+            // carries its own frame background, so the strip showed a box beside
+            // a box instead of one tab with a mark in it. Drawn by hand here for
+            // that reason -- there is no way to take the frame off a Checkbox.
+            //
+            // ★Disabled on the ACTIVE tab: dressing as the set already on the
+            // body changes nothing. The marker is still drawn (dimmer) so the
+            // tab does not change width when it becomes active.
+            const bool hasMark = (i >= 1);   // EQUIP (0) is the base set
+            const bool canMark = hasMark && Costume::CanBeTab(i);
+            const bool marked = hasMark && Costume::IsTab(i);
+
+            // Mockup B sizes, taken from the glyph rather than the font size:
+            // a Tabler `square` at 15px draws its box across ~0.75 of the em, so
+            // against 13px label text the box is ~11px -> 0.86 of the font size.
+            const float mkSz = std::floor(ImGui::GetFontSize() * 0.86f);
+            const float mkGap = 6.0f * S;          // mockup B: 6px
+            const ImVec2 fpad = ImGui::GetStyle().FramePadding;
+            const char* nm = Loadout::Name(i);
+            const ImVec2 nmSz = ImGui::CalcTextSize(nm);
+            const float lead = hasMark ? mkSz + mkGap : 0.0f;
+            const ImVec2 tabPos = ImGui::GetCursorScreenPos();
             // ★A loadout tab is a BUTTON, and it now says on/off the same way
             // every other button does. It used to have its own two colours —
             // sel .30 for on (the only cyan face on screen) and acc .10 for off
@@ -959,23 +998,69 @@ namespace FUI::Equip
                 sk.lightPanel && !active ? Theme::Col(sk.ink, 0.10f)
                                          : Theme::Col(sk.sel, 0.40f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::Col(sk.sel, 0.55f));
-            ImGui::PushStyleColor(ImGuiCol_Text,
+            const ImVec4 inkVec =
                 sk.lightPanel
                     ? (active ? Theme::BtnOnInkVec()
                               : ImGui::GetStyleColorVec4(ImGuiCol_Text))
-                    : (active ? Theme::ValVec() : sk.ink));
-            const std::string lbl = std::string(Loadout::Name(i)) + "##lt" + std::to_string(i);
-            if (Sfx::Button(lbl.c_str(), ImVec2(0, tabH))) {
-                if (!active) Loadout::RequestSwitch(i);
-            }
+                    : (active ? Theme::ValVec() : sk.ink);
+            ImGui::PushStyleColor(ImGuiCol_Text, inkVec);
+            // ★Label-less: the name is drawn by hand below, beside the marker.
+            // Letting the button draw it would centre it over the marker's space.
+            const std::string lbl = "##lt" + std::to_string(i);
+            const bool hitTab = Sfx::Button(
+                lbl.c_str(), ImVec2(fpad.x * 2.0f + lead + nmSz.x, tabH));
             ImGui::PopStyleColor(4);
 
-            if (i >= 1 && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            auto* tdl = ImGui::GetWindowDrawList();
+            tdl->AddText(ImVec2(tabPos.x + fpad.x + lead,
+                                tabPos.y + (tabH - nmSz.y) * 0.5f),
+                         ImGui::GetColorU32(inkVec), nm);
+
+            bool onMark = false;
+            if (hasMark) {
+                const ImVec2 m0(tabPos.x + fpad.x, tabPos.y + (tabH - mkSz) * 0.5f);
+                const ImVec2 m1(m0.x + mkSz, m0.y + mkSz);
+                // Same ink as the name at three strengths. ★0.63 is not a
+                // guess: mockup B drew the unchecked mark #8b8d8e on a #1e2021
+                // tab in #cacbcc text, and 30 + (202-30)a = 139 solves to 0.63.
+                // The 0.45 tried first was visibly fainter than the mockup.
+                const float a = canMark ? (marked ? 1.0f : 0.63f) : 0.30f;
+                const ImU32 mc = ImGui::GetColorU32(
+                    ImVec4(inkVec.x, inkVec.y, inkVec.z, inkVec.w * a));
+                tdl->AddRect(m0, m1, mc, 2.0f * S, 0, (std::max)(1.0f, S));
+                if (marked) {
+                    ImGui::RenderCheckMark(tdl,
+                        ImVec2(m0.x + mkSz * 0.17f, m0.y + mkSz * 0.17f),
+                        mc, mkSz * 0.66f);
+                }
+                // ★One button, two targets, split by where the press landed.
+                // An overlapping InvisibleButton would become the "last item"
+                // and the next SameLine would measure from it instead of the tab.
+                onMark = ImGui::GetIO().MousePos.x < m1.x + mkGap * 0.5f;
+            }
+
+            if (hitTab) {
+                const bool pressedMark = hasMark && canMark &&
+                    ImGui::GetIO().MouseClickedPos[0].x < tabPos.x + fpad.x + lead;
+                if (pressedMark) Costume::SetTab(marked ? -1 : i);
+                else if (!active) Loadout::RequestSwitch(i);
+            }
+            if (hasMark && onMark && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", Lang::T(canMark ? Lang::Str::CostumeHint
+                                                       : Lang::Str::CostumeWornHint));
+            }
+
+            // ★Rename and delete belong to the NAME, not the marker. Without
+            // this the marker inherited both: double-clicking it opened the
+            // rename field it had just toggled the costume with, and a
+            // right-click there asked to delete the tab.
+            if (i >= 1 && !onMark && ImGui::IsItemHovered() &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 s_renaming = i;
                 s_renameFocus = true;
                 std::snprintf(s_renameBuf, sizeof(s_renameBuf), "%s", Loadout::Name(i));
             }
-            if (i >= 1 && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            if (i >= 1 && !onMark && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                 g_delTarget = i;
                 g_buyOpen = false;
                 Sfx::SelectOn();

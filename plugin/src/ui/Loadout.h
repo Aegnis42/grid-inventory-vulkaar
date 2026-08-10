@@ -45,6 +45,15 @@ namespace FUI::Loadout
     [[nodiscard]] std::vector<std::uint16_t> ReservedSigs(RE::FormID a_id);
     [[nodiscard]] bool IsReserved(RE::FormID a_id);
 
+    // The forms a tab is holding, for the costume system to read an outfit out
+    // of a tab without equipping it.
+    // ★Only meaningful for an INACTIVE tab. The active tab's list is a snapshot
+    // taken when it was last switched TO, so it goes stale the moment the player
+    // equips anything; the live answer for the active tab is the worn gear
+    // itself. Costume::CanBeTab already excludes the active tab, which is what
+    // keeps this from being asked the question it cannot answer.
+    [[nodiscard]] std::vector<RE::FormID> FormsOf(int a_index);
+
     void ResetSession();                 // load/new-game: back to base, clear presets
 
     // L3: SKSE cosave persistence. Revert (fires before every load AND on new

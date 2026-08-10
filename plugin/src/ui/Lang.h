@@ -138,6 +138,8 @@ namespace FUI::Lang
         X(BagCollect, "COLLECT")   /* typed bag: pull matching items in */                                  \
         X(BagCollectTip, "Pull every %s from the pack into this bag")                                       \
         X(BagOnly, "Holds %s only")   /* typed bag tooltip */                                               \
+        X(CostumeHint, "Wear this set as an appearance (stats stay with your equipment)")                   \
+        X(CostumeWornHint, "You are already wearing this set")                                              \
         X(FilterAlchemy, "alchemy ingredients")                                                             \
         X(FilterOre, "ore and ingots")                                                                      \
         X(FilterHide, "hides and animal parts")                                                             \

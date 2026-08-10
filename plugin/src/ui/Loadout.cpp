@@ -1,4 +1,5 @@
 #include "ui/Loadout.h"
+#include "game/Costume.h"
 #include "ui/Grid.h"
 #include "ui/Lang.h"
 
@@ -102,6 +103,12 @@ namespace FUI::Loadout
                 [](RE::TESBoundObject& o) { return o.Is(RE::FormType::Armor); });
             for (auto& [obj, data] : inv) {
                 if (data.first <= 0 || !data.second || !data.second->IsWorn()) continue;
+                // ★The costume anchor is worn but is not the player's gear -- it
+                // is a placeholder this plugin equips to give a bare slot an
+                // appearance list. Capturing it would write a phantom helmet
+                // into the preset, and activating that preset would then try to
+                // equip a form the player is not supposed to own.
+                if (Costume::IsAnchor(obj)) continue;
                 // GI53: a worn SHIELD was already captured by the left-hand
                 // path above -- a second (form, right) entry duplicated it in
                 // the preset: ReservedCount said 2, EquipSet equipped it twice,
@@ -218,6 +225,9 @@ namespace FUI::Loadout
             if (auto* proc = p->GetActorRuntimeData().currentProcess) {
                 proc->Update3DModel(p);                     // force biped refresh while paused
             }
+            // The costume dresses whatever is worn, and what is worn just
+            // changed -- including possibly becoming the costume's own tab.
+            Costume::MarkDirty();
             Grid::RequestRebuild();
             SKSE::log::info("[LOADOUT] switched to [{}] '{}' ({} items)",
                 a_target, g_loadouts[a_target].name, g_loadouts[a_target].items.size());
@@ -275,6 +285,10 @@ namespace FUI::Loadout
             }
             g_loadouts.erase(g_loadouts.begin() + a_idx);
             if (g_active > a_idx) --g_active;
+            // ★The costume points at a tab by INDEX, so a deletion either kills
+            // it or shifts it. Left alone it would silently dress the player as
+            // whichever tab slid into the gap.
+            Costume::OnTabRemoved(a_idx);
             Grid::RequestRebuild();
             SKSE::log::info("[LOADOUT] removed preset [{}]", a_idx);
         }
@@ -354,6 +368,16 @@ namespace FUI::Loadout
     }
 
     bool IsReserved(RE::FormID a_id) { return ReservedCount(a_id) > 0; }
+
+    std::vector<RE::FormID> FormsOf(int a_index)
+    {
+        EnsureInit();
+        std::vector<RE::FormID> out;
+        if (a_index < 0 || a_index >= static_cast<int>(g_loadouts.size())) return out;
+        out.reserve(g_loadouts[a_index].items.size());
+        for (const auto& e : g_loadouts[a_index].items) out.push_back(e.id);
+        return out;
+    }
 
     void RequestSwitch(int a_target) { g_pendingSwitch = a_target; }
     void RequestPurchase() { g_pendingPurchase = true; }

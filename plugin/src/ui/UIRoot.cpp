@@ -1,6 +1,7 @@
 ﻿#include "ui/UIRoot.h"
 #include "ui/Editor.h"
 #include "ui/Equip.h"
+#include "game/Costume.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
 #include "ui/GridMenu.h"
@@ -3551,6 +3552,10 @@ namespace FUI::UIRoot
         Grid::ProcessFavorites();  // GI32: favourites, same reason
         Equip::ProcessPending();   // equip/unequip OUTSIDE the render pass
         Loadout::ProcessPending();  // L1: deferred loadout tab switch
+        // ★After the switch, not before: switching changes what is worn, and
+        // the costume dresses whatever is worn. Coalesced -- a full set change
+        // fires many equip events and DoReset3D rebuilds the whole actor.
+        Costume::Tick();
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)
         Grid::CapacityTick();       // W1+W2: weight bypass / space overload
