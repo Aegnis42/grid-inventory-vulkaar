@@ -421,6 +421,22 @@ namespace FUI
         auto* device = reinterpret_cast<ID3D11Device*>(data->forwarder);
         if (!device) return false;
 
+        // ★★Reject 10-bit entries HERE, where every loader meets. Such a file was
+        // written by a build that copied a R10G10B10A2 backbuffer byte-for-byte
+        // without unpacking it, so its pixels are channel-shredded -- the
+        // speckled icons reported under Frame Generation. Refusing it is a cache
+        // miss, and a miss recaptures cleanly; there is nothing to salvage.
+        if (a_fmt == static_cast<std::uint32_t>(DXGI_FORMAT_R10G10B10A2_UNORM) ||
+            a_fmt == static_cast<std::uint32_t>(DXGI_FORMAT_R10G10B10A2_UINT)) {
+            static bool s_said = false;
+            if (!s_said) {
+                s_said = true;
+                SKSE::log::warn("[ICONS] cached icons from an older build are 10-bit "
+                                "(shredded) -- recapturing them");
+            }
+            return false;
+        }
+
         IconCache::Icon icon;
         icon.w = a_w;
         icon.h = a_h;
@@ -1050,6 +1066,12 @@ namespace FUI
             a_w = static_cast<int>(it->second.w);
             a_h = static_cast<int>(it->second.h);
             a_fmt = it->second.fmt;
+            // ★Same rejection as CreateIconTexture, for the pixel-style derive
+            // path that reads the pak directly instead of going through it.
+            if (a_fmt == static_cast<std::uint32_t>(DXGI_FORMAT_R10G10B10A2_UNORM) ||
+                a_fmt == static_cast<std::uint32_t>(DXGI_FORMAT_R10G10B10A2_UINT)) {
+                return false;
+            }
             return true;
         }
     }
@@ -2190,6 +2212,33 @@ namespace FUI
         // not drawn yet — retry next frame; timeout still bounds us.)
         std::vector<std::uint8_t> pixels;
         int trimX = 0, trimY = 0, trimW = 0, trimH = 0;
+
+        // ★★★The backbuffer is not always 8 bits per channel. Community Shaders'
+        // Frame Generation installs a D3D11-to-D3D12 proxy and the swap chain
+        // comes back as R10G10B10A2 -- measured side by side with the same save:
+        //
+        //   FG off: fmt=28 (R8G8B8A8)     magenta reads FF00FF   pure=100%
+        //   FG on : fmt=24 (R10G10B10A2)  magenta reads FF03F0   pure=0%
+        //
+        // FF03F0 is not corruption; it is 0xFFF003FF (R=1023,G=0,B=1023,A=3)
+        // read a byte at a time. Everything downstream assumes 8-bit RGBA, so
+        // the pixels are unpacked once here and the rest of the pipeline -- trim,
+        // chroma key, defringe, mips, disk cache -- keeps its one assumption.
+        const bool is10Bit = srcDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ||
+                             srcDesc.Format == DXGI_FORMAT_R10G10B10A2_UINT;
+        // What `pixels` actually holds afterwards. ★Not srcDesc.Format: storing
+        // unpacked bytes under the 10-bit tag would bake the same defect into the
+        // texture and into the on-disk cache.
+        const DXGI_FORMAT pixFmt = is10Bit ? DXGI_FORMAT_R8G8B8A8_UNORM : srcDesc.Format;
+        if (is10Bit) {
+            static bool s_said = false;
+            if (!s_said) {
+                s_said = true;
+                SKSE::log::info("[ICONS] backbuffer is 10-bit ({}) -- unpacking captures "
+                                "to 8-bit RGBA (upscaler/frame-generation proxy)",
+                    static_cast<int>(srcDesc.Format));
+            }
+        }
         {
             D3D11_TEXTURE2D_DESC sd = {};
             sd.Width            = static_cast<UINT>(w);
@@ -2221,13 +2270,32 @@ namespace FUI
                 for (int y = 0; y < h; ++y) {
                     const auto* row = static_cast<const std::uint8_t*>(map.pData) +
                                       static_cast<size_t>(y) * map.RowPitch;
-                    std::memcpy(pixels.data() + static_cast<size_t>(y) * w * 4, row,
-                        static_cast<size_t>(w) * 4);
+                    auto* dst = pixels.data() + static_cast<size_t>(y) * w * 4;
+                    if (is10Bit) {
+                        // ★★★Unpack, do not memcpy. A 10-bit surface is still 4
+                        // bytes per pixel, so a straight copy "works" and every
+                        // channel lands across a byte boundary: what comes out is
+                        // neighbouring channels welded together, which is exactly
+                        // the speckled icons reported under Frame Generation.
+                        const auto* src32 = reinterpret_cast<const std::uint32_t*>(row);
+                        for (int x = 0; x < w; ++x) {
+                            const std::uint32_t v = src32[x];
+                            dst[x * 4 + 0] = static_cast<std::uint8_t>(((v >>  0) & 0x3FF) >> 2);
+                            dst[x * 4 + 1] = static_cast<std::uint8_t>(((v >> 10) & 0x3FF) >> 2);
+                            dst[x * 4 + 2] = static_cast<std::uint8_t>(((v >> 20) & 0x3FF) >> 2);
+                            dst[x * 4 + 3] = 255;   // 2-bit alpha is not ours to use
+                        }
+                    } else {
+                        std::memcpy(dst, row, static_cast<size_t>(w) * 4);
+                    }
                     for (int x = 0; x < w; ++x) {
                         // content = anything that is not chroma magenta
                         // (symmetric in R/B, so BGRA vs RGBA never matters)
-                        const bool bg = row[x * 4 + 0] > 200 && row[x * 4 + 2] > 200 &&
-                                        row[x * 4 + 1] < 60;
+                        // ★Read from dst, not the raw row: on a 10-bit surface
+                        // those are different numbers, and the magenta the key
+                        // looks for only exists after the unpack.
+                        const bool bg = dst[x * 4 + 0] > 200 && dst[x * 4 + 2] > 200 &&
+                                        dst[x * 4 + 1] < 60;
                         if (!bg) {
                             ++nonBg;
                             minX = (std::min)(minX, x);
@@ -2443,7 +2511,7 @@ namespace FUI
         icon.w = trimW;
         icon.h = trimH;
         icon.tex = CreateMippedTexture(device, sprite.data(), trimW, trimH,
-            srcDesc.Format, &icon.srv);
+            pixFmt, &icon.srv);
         if (!icon.tex) { giveUp("tex fail"); return; }
         // ★1.0.5: the glow sprite that used to be built here is gone, and with
         // it a CPU downscale+blur on EVERY capture. A precache already skipped
@@ -2492,7 +2560,7 @@ namespace FUI
             m_pinSprite  = std::move(sprite);
             m_pinW = trimW;
             m_pinH = trimH;
-            m_pinFmt = static_cast<std::uint32_t>(srcDesc.Format);
+            m_pinFmt = static_cast<std::uint32_t>(pixFmt);
             // ★Queue the dot version HERE, not from the draw. TickPixelDerive
             // runs between this harvest and the draw, so a key queued by the
             // draw is only reached on the NEXT frame — by which time the next
@@ -2507,7 +2575,7 @@ namespace FUI
             }
         } else {
             SaveToDisk(m_pending.key, trimW, trimH,
-                static_cast<std::uint32_t>(srcDesc.Format), sprite);
+                static_cast<std::uint32_t>(pixFmt), sprite);
             SKSE::log::info("[ICONS] cached '{}' {}x{} ({} total, {} queued)",
                 m_pending.obj->GetName(), trimW, trimH, m_icons.size(), m_queue.size());
             m_timeoutStreak = 0;   // a real capture landed: the run is broken

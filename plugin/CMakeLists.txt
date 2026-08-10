@@ -43,6 +43,8 @@ set(SOURCES
     src/game/GoldCoins.cpp
     src/game/BagFilter.h
     src/game/BagFilter.cpp
+    src/game/Costume.h
+    src/game/Costume.cpp
     src/ui/ItemPreview.h
     src/ui/ItemPreview.cpp
     src/ui/GridMenu.h
@@ -91,6 +93,18 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     d3dcompiler     # the silhouette pixel shader (Windows SDK, same as d3d11)
     windowscodecs   # WIC: PNG decoding for the drawn icon set (Windows SDK)
 )
+
+# --- Icon-capture diagnostics (OFF; never ship enabled) ---
+# Builds a plugin that reads the capture rect back to the CPU and logs what it
+# found. That readback stalls the render thread, so it exists only to hand a
+# one-off build to a user whose environment cannot be reproduced here -- an
+# upscaler changes the backbuffer's format, size and contents, and guessing at
+# which one from a screenshot is how days get spent.
+option(GI_CAPTURE_DIAG "Log icon capture surface + pixel stats (SLOW)" OFF)
+if(GI_CAPTURE_DIAG)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE GI_CAPTURE_DIAG)
+    message(STATUS "GridInventory: icon capture diagnostics ENABLED (slow build)")
+endif()
 
 # --- Deploy DLL to a local MO2 mod folder (developer convenience) ---
 # Point MOD_ROOT at your own mod folder (-DMOD_ROOT=...). The copy step is

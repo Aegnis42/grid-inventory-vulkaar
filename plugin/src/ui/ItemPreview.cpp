@@ -7,6 +7,9 @@
 
 #include <d3d11_1.h>
 
+#include <algorithm>
+#include <array>
+
 // Ported from ModExplorerMenu (Modex) by patchulidev — Item3DPreview.cpp.
 // https://github.com/patchulidev/ModExplorerMenu (GPL-3.0 with Modding Exception)
 // Changes vs upstream: CommonLibSSE-NG (main) accessors, REL wrappers for
@@ -172,6 +175,75 @@ namespace FUI
         }
     }
 
+
+#ifdef GI_CAPTURE_DIAG
+    // ★DIAGNOSTIC BUILD ONLY. Reads the capture rect back to the CPU, which
+    // stalls the render thread -- never ship this enabled.
+    //
+    // Reports what the reported "speckled icon" needs to be told apart:
+    //   pure%   how much of the rect is EXACTLY the magenta we painted
+    //   keyed%  how much would pass the chroma key (R>200 B>200 G<60)
+    // Called once before the model is drawn and once after. If pure% is already
+    // below 100 in "after-clear", the rect was polluted before the model existed
+    // and the alpha pipeline never had a chance -- that is the upscaler.
+    static void ProbeRect(ID3D11DeviceContext* a_ctx, ID3D11Texture2D* a_src,
+                          const D3D11_BOX& a_box, int a_w, int a_h, const char* a_when)
+    {
+        static int s_probes = 0;
+        if (s_probes >= 8) return;   // a handful of icons, then silence
+        auto* data = RE::BSGraphics::Renderer::GetRendererData();
+        auto* dev = data ? reinterpret_cast<ID3D11Device*>(data->forwarder) : nullptr;
+        if (!dev) return;
+
+        D3D11_TEXTURE2D_DESC sd = {};
+        a_src->GetDesc(&sd);
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(a_w);
+        td.Height = static_cast<UINT>(a_h);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = sd.Format;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_STAGING;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ID3D11Texture2D* staging = nullptr;
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &staging))) return;
+        a_ctx->CopySubresourceRegion(staging, 0, 0, 0, 0, a_src, 0, &a_box);
+
+        D3D11_MAPPED_SUBRESOURCE map = {};
+        if (SUCCEEDED(a_ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
+            int total = 0, pure = 0, keyed = 0;
+            auto at = [&](int x, int y) {
+                const auto* p = static_cast<const std::uint8_t*>(map.pData) +
+                                static_cast<size_t>(y) * map.RowPitch + static_cast<size_t>(x) * 4;
+                return std::array<int, 4>{ p[0], p[1], p[2], p[3] };
+            };
+            for (int y = 0; y < a_h; y += 2) {
+                for (int x = 0; x < a_w; x += 2) {
+                    const auto c = at(x, y);
+                    ++total;
+                    // The painted colour is (255,0,255) in whichever channel
+                    // order the surface uses -- both ends are 255, middle is 0.
+                    if (c[0] == 255 && c[1] == 0 && c[2] == 255) ++pure;
+                    if (c[0] > 200 && c[2] > 200 && c[1] < 60) ++keyed;
+                }
+            }
+            const auto tl = at(1, 1);
+            const auto br = at((std::max)(0, a_w - 2), (std::max)(0, a_h - 2));
+            const auto mid = at(a_w / 2, a_h / 2);
+            a_ctx->Unmap(staging, 0);
+            ++s_probes;
+            SKSE::log::info("[ICONDIAG] {} rect=({},{}) {}x{} pure={:.1f}% keyed={:.1f}% "
+                            "| corner {:02X}{:02X}{:02X}/{:02X}{:02X}{:02X} "
+                            "mid {:02X}{:02X}{:02X}",
+                a_when, a_box.left, a_box.top, a_w, a_h,
+                total ? 100.0 * pure / total : 0.0,
+                total ? 100.0 * keyed / total : 0.0,
+                tl[0], tl[1], tl[2], br[0], br[1], br[2], mid[0], mid[1], mid[2]);
+        }
+        staging->Release();
+    }
+#endif
 
     // ★1.0.5 — every load goes through here so the fresh-request path and the
     // self-heal reload cannot drift apart; they used to be two separate calls,
@@ -970,6 +1042,69 @@ namespace FUI
         box.bottom = static_cast<UINT>(top + height);
         box.back   = 1;
 
+#ifdef GI_CAPTURE_DIAG
+        // Surface facts, once. An upscaler changes exactly these: the format
+        // (HDR/typeless), the size (render resolution below output), and the
+        // sample count. Reported by NAME so the report needs no lookup table.
+        {
+            static bool s_told = false;
+            if (!s_told) {
+                s_told = true;
+                D3D11_TEXTURE2D_DESC sd = {};
+                srcTex->GetDesc(&sd);
+                const char* fmt = "other";
+                switch (sd.Format) {
+                case DXGI_FORMAT_R8G8B8A8_UNORM:      fmt = "R8G8B8A8_UNORM"; break;
+                case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: fmt = "R8G8B8A8_UNORM_SRGB"; break;
+                case DXGI_FORMAT_B8G8R8A8_UNORM:      fmt = "B8G8R8A8_UNORM"; break;
+                case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: fmt = "B8G8R8A8_UNORM_SRGB"; break;
+                case DXGI_FORMAT_R10G10B10A2_UNORM:   fmt = "R10G10B10A2_UNORM"; break;
+                case DXGI_FORMAT_R16G16B16A16_FLOAT:  fmt = "R16G16B16A16_FLOAT"; break;
+                case DXGI_FORMAT_R11G11B10_FLOAT:     fmt = "R11G11B10_FLOAT"; break;
+                default: break;
+                }
+                SKSE::log::info("[ICONDIAG] backbuffer {}x{} fmt={} ({}) samples={} "
+                                "bindFlags=0x{:X} misc=0x{:X}",
+                    sd.Width, sd.Height, static_cast<int>(sd.Format), fmt,
+                    sd.SampleDesc.Count, sd.BindFlags, sd.MiscFlags);
+
+                // ★★★Is D3D11 still the real device, or a proxy over D3D12?
+                // Community Shaders' Frame Generation installs a D3D11-to-D3D12
+                // proxy and says so in its own UI ("can create compatibility
+                // issues"); its status line then reads "D3D12 Swap Chain:
+                // Active". Under that proxy the D3D11 backbuffer this capture
+                // reads is not the surface being presented, which fits the
+                // report exactly: shape correct (we drew it), colour garbage
+                // (we read a buffer nobody filled).
+                //
+                // Asked of the SWAP CHAIN rather than inferred from anything
+                // else -- one QueryInterface settles it.
+                if (auto* win = data->renderWindows;
+                    win && win[0].swapChain) {
+                    auto* sc = reinterpret_cast<IUnknown*>(win[0].swapChain);
+                    IUnknown* dev12 = nullptr;
+                    IDXGISwapChain* sc1 = nullptr;
+                    bool is12 = false;
+                    if (SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain),
+                                                     reinterpret_cast<void**>(&sc1))) && sc1) {
+                        // GUID of ID3D12Device, spelled out so this file needs
+                        // no d3d12.h just to ask the question.
+                        const GUID kID3D12Device = { 0x189819f1, 0x1db6, 0x4b57,
+                            { 0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7 } };
+                        is12 = SUCCEEDED(sc1->GetDevice(kID3D12Device,
+                                                        reinterpret_cast<void**>(&dev12))) && dev12;
+                        if (dev12) dev12->Release();
+                        sc1->Release();
+                    }
+                    SKSE::log::info("[ICONDIAG] swapchain device is {} -- {}",
+                        is12 ? "D3D12" : "D3D11",
+                        is12 ? "PROXY ACTIVE: backbuffer capture is not reliable here"
+                             : "native, capture path is valid");
+                }
+            }
+        }
+#endif
+
         // Step 1 (save): stash the WHOLE backbuffer for restoration — the
         // model draw is not confined to the capture rect.
         context->CopyResource(m_scratchTex, srcTex);
@@ -986,6 +1121,16 @@ namespace FUI
             }
         }
 
+        // ★DIAG: read the rect back BEFORE the model is drawn. The whole alpha
+        // pipeline assumes this rect is now PURE magenta -- if an upscaler (or
+        // anything else hooked into the frame) has already touched it, every
+        // later stage is working on a lie and the chroma key produces the
+        // reported speckle. Measuring after the model can never tell the two
+        // apart: model pixels and polluted pixels both read as "not background".
+#ifdef GI_CAPTURE_DIAG
+        ProbeRect(context, srcTex, box, width, height, "after-clear ");
+#endif
+
         // Step 3 (render): the engine paints the model into the bound surface.
         // Any overspill beyond the capture rect is erased by the full-frame
         // restore in Step 5, so nothing is ever visible on screen.
@@ -999,57 +1144,7 @@ namespace FUI
         // background — proves whether inv->Render() actually drew anything.
         // Compiled out by default: a GPU readback stall on the render thread.
 #ifdef GI_CAPTURE_DIAG
-        {
-            static int s_probes = 0;
-            const auto& rt = inv->GetRuntimeData();
-            const bool modelReady = !rt.loadedModels.empty() && rt.loadedModels.back().spModel &&
-                                    rt.loadedModels.back().spModel->worldBound.radius > 0.0f;
-            if (s_probes < 3 && modelReady) {
-                ++s_probes;
-                auto* data2 = RE::BSGraphics::Renderer::GetRendererData();
-                auto* dev = data2 ? reinterpret_cast<ID3D11Device*>(data2->forwarder) : nullptr;
-                if (dev) {
-                    D3D11_TEXTURE2D_DESC sd = {};
-                    srcTex->GetDesc(&sd);
-                    D3D11_TEXTURE2D_DESC td = {};
-                    td.Width = static_cast<UINT>(width);
-                    td.Height = static_cast<UINT>(height);
-                    td.MipLevels = 1;
-                    td.ArraySize = 1;
-                    td.Format = sd.Format;
-                    td.SampleDesc.Count = 1;
-                    td.Usage = D3D11_USAGE_STAGING;
-                    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-                    ID3D11Texture2D* staging = nullptr;
-                    if (SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging))) {
-                        context->CopySubresourceRegion(staging, 0, 0, 0, 0, srcTex, 0, &box);
-                        D3D11_MAPPED_SUBRESOURCE map = {};
-                        if (SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
-                            int diff = 0;
-                            const int bgR = static_cast<int>(kCaptureBg[0] * 255.0f);
-                            const int bgG = static_cast<int>(kCaptureBg[1] * 255.0f);
-                            const int bgB = static_cast<int>(kCaptureBg[2] * 255.0f);
-                            for (int y = 0; y < height; y += 4) {
-                                const auto* row = static_cast<const std::uint8_t*>(map.pData) +
-                                                  static_cast<size_t>(y) * map.RowPitch;
-                                for (int x = 0; x < width; x += 4) {
-                                    const int b0 = row[x * 4 + 0], b1 = row[x * 4 + 1], b2 = row[x * 4 + 2];
-                                    if (std::abs(b0 - bgR) > 12 && std::abs(b0 - bgB) > 12) { ++diff; continue; }
-                                    if (std::abs(b1 - bgG) > 12) { ++diff; continue; }
-                                    if (std::abs(b2 - bgR) > 12 && std::abs(b2 - bgB) > 12) ++diff;
-                                }
-                            }
-                            context->Unmap(staging, 0);
-                            SKSE::log::info(
-                                "[PREVIEW] probe: rect=({},{}) {}x{} nonBg(sampled)={} radius={:.1f}",
-                                left, top, width, height, diff,
-                                rt.loadedModels.back().spModel->worldBound.radius);
-                        }
-                        staging->Release();
-                    }
-                }
-            }
-        }
+        ProbeRect(context, srcTex, box, width, height, "after-model");
 #endif
 
         // Step 5 (restore): write the whole saved frame back — erases the
