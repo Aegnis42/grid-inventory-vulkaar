@@ -19,8 +19,21 @@ namespace FUI::Loadout
     void SetName(int a_index, const char* a_name);   // presets only (index>=1)
 
     // purchase economics (L2): cost = 5000 * (owned preset tabs + 1) — deleting
-    // a tab restores the tier. No refunds. Hard cap: 20 preset tabs.
-    inline constexpr int kMaxPresets = 20;
+    // a tab restores the tier. No refunds.
+    //
+    // ★★NINE, because the quick wheel has ten places and EQUIP takes one of
+    // them. The cap used to be 20, which the inventory strip could show and the
+    // wheel could not: tab eleven onward simply never appeared there, with
+    // nothing said about it. A limit the player cannot see is worse than a
+    // lower one they can, and "buy a tab that half the mod ignores" is not a
+    // purchase anyone would make knowingly.
+    // ★This counts PRESETS, not tabs -- EQUIP is not a preset and is not sold.
+    // Wheeler.cpp static_asserts that the two still agree, so raising this
+    // without widening the wheel fails the build rather than the player.
+    // ★Saves made under the old cap keep every tab they have: nothing is
+    // deleted, only further purchases stop. Those extra tabs still work in the
+    // inventory; they are the ones the wheel could never show anyway.
+    inline constexpr int kMaxPresets = 9;
     [[nodiscard]] int  NextCost();
     [[nodiscard]] int  PlayerGold();
     [[nodiscard]] bool AtCap();          // preset count reached kMaxPresets

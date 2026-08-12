@@ -44,6 +44,16 @@ namespace FUI::Wheeler
         constexpr int   kSlots = 10;
         constexpr float kStep = 360.0f / kSlots;
 
+        // ★★The wheel cannot grow -- the ring is a painting cut into ten -- so
+        // the LIST has to fit it. EQUIP occupies one place and is not a preset,
+        // which is why the preset cap is one less than the slot count.
+        // ★A comment saying "keep these in step" is a comment nobody reads on
+        // the day they raise the cap. This fails the build instead.
+        static_assert(Loadout::kMaxPresets + 1 <= kSlots,
+                      "preset cap exceeds the wheel: EQUIP takes a slot, so the "
+                      "cap must be kSlots - 1 (raise kSlots only if the artwork "
+                      "is re-cut, and see the COSTUME group too)");
+
         // Radii in the TEXTURE's own space (the bake is a 512 square centred on
         // the wheel; 256 is its half-size and also its outermost droplet).
         constexpr float kTexHalf = 256.0f;
