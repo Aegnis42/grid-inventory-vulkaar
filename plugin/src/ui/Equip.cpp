@@ -631,6 +631,16 @@ namespace FUI::Equip
         return true;
     }
 
+    bool UnequipItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                     std::uint16_t a_sig, int a_hand, int a_count)
+    {
+        if (!a_obj) return false;
+        SKSE::log::info("[ACT] unequip '{}' hand={}", a_obj->GetName(), a_hand);
+        g_pending.push_back({ a_obj->GetFormID(), "", true, a_uid, -1, a_sig, {},
+                              a_hand, EquipCountFor(a_obj, a_count) });
+        return true;
+    }
+
     bool EquipItem(RE::TESBoundObject* a_obj, const std::string& a_slotId,
                    std::uint16_t a_uid, int a_xlIdx, std::uint16_t a_sig,
                    const std::string& a_srcKey, int a_tileCount)
@@ -780,6 +790,15 @@ namespace FUI::Equip
                     }
                     auto* a2 = o2->As<RE::TESObjectARMO>();
                     if (!a2) continue;
+                    // ★★NEVER the costume anchors. They are ARMO and they hold
+                    // biped slots, so this pass takes them for the player's own
+                    // gear and strips them -- and an anchor stripped is a
+                    // costume piece with nothing to hang on, which is the bare
+                    // chest after equipping something over a costume. They are
+                    // not the player's property (see Costume.h): the costume
+                    // system raises and drops them, and the next Apply already
+                    // removes any that stopped being needed.
+                    if (Costume::IsAnchor(o2)) continue;
                     if (static_cast<std::uint32_t>(a2->GetSlotMask()) & mask) {
                         em->UnequipObject(player, o2,
                             Grid::WornExtraOf(Grid::LiveEntryOf(player, o2)), 1, nullptr,
@@ -889,6 +908,10 @@ namespace FUI::Equip
             if (IsWearOrConsume(obj) && emptied) {
                 Grid::ForgetTile(act.srcKey);
             }
+            // ★Equipping is the strongest "I have seen this" there is -- the
+            // player picked it out and put it on. The NEW wash must not be
+            // waiting for them when they take it off again.
+            Grid::NoteFormSeen(obj);
             SKSE::log::info("[EQUIP] {}{}", obj->GetName(), slot ? " (left hand)" : "");
         }
         g_pending.clear();

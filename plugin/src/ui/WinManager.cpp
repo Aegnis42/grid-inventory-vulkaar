@@ -3,6 +3,7 @@
 #include "ui/LootBarter.h"
 #include "ui/Theme.h"
 #include "ui/UIRoot.h"
+#include "ui/Wheeler.h"
 #include "ui/WinManager.h"
 
 #include <algorithm>
@@ -169,6 +170,26 @@ namespace FUI
 
     // ---- persistence (F6: replaces localStorage fabinv_winpos/winparent) ----
     // line format:  key = x,y,w,h[,parent:<key>]
+
+    bool WinManager::ReadWheelEnabled(bool a_default)
+    {
+        std::ifstream in(kUiIniPath);
+        if (!in) return a_default;
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            auto key = line.substr(0, eq);
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            if (key != "!wheelon") continue;
+            try {
+                return std::stoi(line.substr(eq + 1)) != 0;
+            } catch (...) {
+                return a_default;
+            }
+        }
+        return a_default;
+    }
 
     void WinManager::Load()
     {
@@ -343,6 +364,10 @@ namespace FUI
                 try { EachSkin([&](int s) { Theme::SetIconGainOf(s, 2, std::stof(rest)); }); } catch (...) {}
                 continue;
             }
+            if (key == "!wheelon") {        // quick wheel on/off
+                try { Wheeler::SetEnabled(std::stoi(rest) != 0); } catch (...) {}
+                continue;
+            }
             if (key == "!merchgoldinf") {   // F3: unlimited merchant gold
                 try { LootBarter::SetMerchantGoldInfinite(std::stoi(rest) != 0); } catch (...) {}
                 continue;
@@ -351,6 +376,14 @@ namespace FUI
                 try { LootBarter::SetMerchantBuysAll(std::stoi(rest) != 0); } catch (...) {}
                 continue;
             }
+            // ★★!wheelkb / !wheelpad are READ NO MORE, and existing lines are
+            // skipped rather than obeyed. The quick menu answers to the game's
+            // own Favorites binding now, and two sources for one key is a bug
+            // waiting for its moment: this file is re-read every time the
+            // inventory opens, so a stale line here quietly took the hotkey
+            // back on the first visit -- the wheel worked until you opened your
+            // bag, then stopped, with nothing in the log to connect the two.
+            if (key == "!wheelkb" || key == "!wheelpad") continue;
             if (key == "!iconstyle") {      // 0 realistic / 2 drawn / 3 pixel (1 = retired)
                 try {
                     const int v = static_cast<int>(ParseIconStyle(rest));
@@ -451,6 +484,7 @@ namespace FUI
         // these are a property of the SETUP BEING SHARED: a preset built around
         // "the merchant always has gold" plays differently without it. The file
         // says so in its header, and importing is always a deliberate act.
+        out << "!wheelon = " << (Wheeler::Enabled() ? 1 : 0) << "\n";
         out << "!merchgoldinf = " << (LootBarter::MerchantGoldInfinite() ? 1 : 0) << "\n";
         out << "!merchbuyall = " << (LootBarter::MerchantBuysAll() ? 1 : 0) << "\n";
         // GI47: the item/category defs ride along -- one file, whole look
@@ -563,6 +597,9 @@ namespace FUI
                         }
                     }
                     // Merchant options: same keys and same tolerance as Load.
+                    else if (key == "!wheelon") {
+                        Wheeler::SetEnabled(std::stoi(rest) != 0);
+                    }
                     else if (key == "!merchgoldinf") {
                         LootBarter::SetMerchantGoldInfinite(std::stoi(rest) != 0);
                     }
@@ -622,7 +659,18 @@ namespace FUI
     void WinManager::Save() const
     {
         std::ofstream out(kUiIniPath, std::ios::trunc);
-        if (!out) return;
+        // ★★A SILENT RETURN HERE LOSES EVERY SETTING THE PLAYER TOUCHED. It was
+        // silent, and the failure looked exactly like a feature not working:
+        // the quick wheel switch reported success in its own log, changed the
+        // game immediately, and was gone on the next launch -- because nothing
+        // between the button and the disk ever said the write had failed.
+        // A write that can fail must say so.
+        if (!out) {
+            SKSE::log::error("[UI] SETTINGS NOT SAVED -- cannot open {} for writing. "
+                             "Nothing changed in the settings panel will survive a restart.",
+                             kUiIniPath);
+            return;
+        }
         out << "; GridInventory window layout (auto-generated)\n";
         out << "; key = x,y,w,h[,parent:<key>]\n";
         out << "!uiscale = " << Theme::Scale() << "\n";
@@ -638,8 +686,12 @@ namespace FUI
         out << "; !dispN = iconStyle, glowStyle x3, glowGain x6, iconGain x3\n";
         out << "; !shadN = [shadow dist, blur, opacity] x3 icon styles\n";
         EachSkin([&](int s) { WriteDispLine(out, s); });
+        out << "!wheelon = " << (Wheeler::Enabled() ? 1 : 0) << "\n";
         out << "!merchgoldinf = " << (LootBarter::MerchantGoldInfinite() ? 1 : 0) << "\n";
         out << "!merchbuyall = " << (LootBarter::MerchantBuysAll() ? 1 : 0) << "\n";
+        // ★No wheel hotkey written any more -- see the reader above. It lives
+        // in the game's own controls, and writing a second copy here is what
+        // let an old value climb back in.
         for (const auto& w : m_wins) {
             if (!w.posKnown) continue;
             out << w.key << " = "
@@ -647,6 +699,32 @@ namespace FUI
                 << static_cast<int>(w.size.x) << ',' << static_cast<int>(w.size.y);
             if (!w.parent.empty()) out << ",parent:" << w.parent;
             out << "\n";
+        }
+        // ★Checked AFTER the writes, not just at open. A stream can open and
+        // still fail to commit -- a full disk, a virtualised path that accepts
+        // the handle and drops the bytes -- and the caller has no other way to
+        // find out.
+        out.flush();
+        if (!out) {
+            SKSE::log::error("[UI] SETTINGS NOT SAVED -- {} opened but the write failed.",
+                             kUiIniPath);
+            return;
+        }
+        // ★★Say WHERE, not just "saved". The path is RELATIVE, so where it
+        // lands depends on the working directory and on whatever virtual file
+        // system the launcher put in front of it -- and a mod manager may
+        // redirect the write somewhere neither the player nor this code can
+        // guess. "It reported success and the file did not change" is not a
+        // state anyone can debug without this line.
+        // ★Logged once per session: this fires on every window move, and a
+        // path that never changes does not need saying sixty times.
+        static bool s_saidWhere = false;
+        if (!s_saidWhere) {
+            s_saidWhere = true;
+            std::error_code ec;
+            const auto abs = std::filesystem::absolute(kUiIniPath, ec);
+            SKSE::log::info("[UI] settings saved -> {}",
+                            ec ? kUiIniPath : abs.string());
         }
     }
 

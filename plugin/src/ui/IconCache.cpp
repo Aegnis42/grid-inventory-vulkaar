@@ -2,6 +2,11 @@
 #include "ui/ItemPreview.h"
 #include "ui/Theme.h"
 
+#include <imgui.h>   // GetFrameCount: "was this drawn recently?"
+
+#include <algorithm>   // sort (eviction order)
+#include <vector>
+
 #include <d3d11.h>
 // ★PNG decoding uses WIC — part of the Windows SDK, already on every machine
 // that runs the game. A vendored decoder (stb_image et al) would be a new
@@ -440,6 +445,11 @@ namespace FUI
         IconCache::Icon icon;
         icon.w = a_w;
         icon.h = a_h;
+        // ★Every entry is priced HERE, where the texture is actually made, so
+        // no caller can add one to the cache without a size on it. The 4/3 is
+        // the mip tail: 1 + 1/4 + 1/16 + ... converges there.
+        icon.bytes = static_cast<std::uint32_t>(
+            static_cast<std::uint64_t>(a_w) * a_h * 4ull * 4ull / 3ull);
         icon.tex = CreateMippedTexture(device, a_px, a_w, a_h,
             static_cast<DXGI_FORMAT>(a_fmt), &icon.srv);
         if (!icon.tex) return false;
@@ -704,7 +714,30 @@ namespace FUI
         if (it == m_icons.end()) {
             it = m_icons.find(LegacyKeyFor(a_obj, def));   // pre-migration pak
         }
-        if (it != m_icons.end()) return &it->second;
+        // ★★Fill the miss HERE, from the pak, in this frame. The queue path
+        // below would also load it -- synchronously, even -- but only AFTER
+        // this call has already answered "nothing", so the tile spends one
+        // frame on its category drawing and then swaps. One frame is enough to
+        // read as a flicker, and with a budget in play that flicker would fire
+        // every time a scrolled-away icon came back. Costs a file read and an
+        // upload; both are already happening on this thread.
+        // ★Rate-limited: a screenful of misses at once is a hitch, so the rest
+        // fall through to the old behaviour for a frame and arrive next.
+        if (it == m_icons.end() && m_refillLeft > 0 && !m_failed.contains(key)) {
+            if (LoadFromDisk(key)) {
+                --m_refillLeft;
+                it = m_icons.find(key);
+            }
+        }
+        if (it != m_icons.end()) {
+            // ★What "recently used" MEANS. Nothing else marks an icon as being
+            // on screen -- the draw just reads the SRV -- so if this line is
+            // not here the budget cannot tell the visible grid from a corpse
+            // looted an hour ago, and it will happily drop what the player is
+            // looking at.
+            it->second.lastUsed = m_tick.load(std::memory_order_relaxed);
+            return &it->second;
+        }
 
         // live edit: while the current key's capture is in flight, keep
         // showing the pinned item's latest completed capture (no flicker)
@@ -1169,7 +1202,7 @@ namespace FUI
         m_pixelQueued.clear();
     }
 
-    bool IconCache::LoadFromDisk(std::uint64_t a_key)
+    bool IconCache::LoadFromDisk(std::uint64_t a_key) const
     {
         ScanPak();
         const auto it = g_pakIndex.find(a_key);
@@ -2664,6 +2697,62 @@ namespace FUI
         m_pending = Pending{};
         m_queue.clear();
         m_queued.clear();
+    }
+
+    std::uint64_t IconCache::VramBytes() const
+    {
+        std::uint64_t n = 0;
+        for (const auto& [key, ic] : m_icons) n += ic.bytes;
+        return n;
+    }
+
+    void IconCache::TrimToBudget()
+    {
+        // The refill allowance is per FRAME, and this is the once-a-frame
+        // place that runs outside the draw. Reset it here so the two can
+        // never drift apart. Same for the clock the ages are measured on.
+        m_refillLeft = kRefillPerFrame;
+        const int now = m_tick.fetch_add(1, std::memory_order_relaxed) + 1;
+
+        std::uint64_t total = VramBytes();
+        if (total <= kVramBudget) return;
+
+        // ★★Only what the pak can give back. A pinned item's captures are kept
+        // OFF disk on purpose (a rotation drag would write one file per
+        // degree), so dropping one would not be an eviction -- it would be a
+        // deletion, and the edit in progress would lose its subject.
+        // ★And nothing drawn in the last couple of seconds. The grid does not
+        // tell us what is on screen; the only evidence is that Get() was
+        // called, so a window of ticks is what stands in for "visible". Too
+        // tight and a scroll evicts the row it is scrolling toward.
+        constexpr int kKeepTicks = 120;   // ~2s at 60fps
+        ScanPak();
+
+        std::vector<std::pair<int, std::uint64_t>> victims;   // (lastUsed, key)
+        victims.reserve(m_icons.size());
+        for (const auto& [key, ic] : m_icons) {
+            if (key == m_pinLastKey) continue;
+            if (now - ic.lastUsed < kKeepTicks) continue;
+            if (!g_pakIndex.contains(key)) continue;   // nowhere to load it back from
+            victims.emplace_back(ic.lastUsed, key);
+        }
+        std::sort(victims.begin(), victims.end());   // oldest first
+
+        std::uint64_t freed = 0;
+        std::size_t   n = 0;
+        for (const auto& [used, key] : victims) {
+            if (total - freed <= kVramBudget) break;
+            const auto it = m_icons.find(key);
+            if (it == m_icons.end()) continue;
+            freed += it->second.bytes;
+            ++n;
+            ReleaseIcon(it->second);
+            m_icons.erase(it);
+        }
+        if (n) {
+            SKSE::log::info("[ICONS] trimmed {} icons, {} MB -> {} MB (budget {} MB)",
+                n, total >> 20, (total - freed) >> 20, kVramBudget >> 20);
+        }
     }
 
     void IconCache::Clear()

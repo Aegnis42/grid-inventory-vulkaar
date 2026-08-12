@@ -48,6 +48,15 @@ namespace FUI::Equip
                  std::uint16_t a_sig = 0, const std::string& a_srcKey = {},
                  int a_tileCount = 1);
 
+    // Take a worn item off. ★Same queue as everything else, so it is safe from
+    // the render pass; the doll has always had this on right-click, but only
+    // through its own slot widget. Surfaces without a doll -- the quick wheel --
+    // need it as a call.
+    // a_hand: 0 none, 1 right, 2 left. It matters when both hands wear
+    // identical units; 0 lets the engine pick, which is right for armour.
+    bool UnequipItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0,
+                     std::uint16_t a_sig = 0, int a_hand = 0, int a_count = 1);
+
     // Does using this take the unit OFF the board — worn, drunk, eaten, learnt?
     // The board bookkeeping (vacate the cell, forget the tile, hint the drain)
     // must run for those and NOT for a scripted item that is only being poked:

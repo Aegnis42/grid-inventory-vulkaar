@@ -19,6 +19,25 @@ namespace FUI::Costume
 
         int  g_tab = -1;          // checked tab, -1 = none
         int  g_appliedTab = -2;   // what the body is currently wearing (-2 = unknown)
+
+        // ★★★HOW A REBUILD IS SEEN. Not the biped pointer -- the engine reuses
+        // that (measured: the same pointer over 11s), so a rebuild is invisible
+        // there. `BIPOBJECT::addon` is not: it names the ARMA actually hanging
+        // in that slot right now. We dress a slot, note what ended up in it,
+        // and if the engine later puts something else there it has rebuilt the
+        // body from the restored lists -- which is the bald head.
+        // ★A pointer kept for COMPARISON only, never dereferenced.
+        int         g_watchSlot = -1;
+        const void* g_watchAddon = nullptr;
+
+        // Post-load re-dress schedule -- the belt to the watch's braces. The
+        // watch catches a rebuild in one frame; this covers the case where a
+        // rebuild leaves the same addon in place and the watch sees nothing.
+        constexpr int kReapplyTimes = 3;
+        constexpr int kReapplyFirst = 30;    // ~0.5s after the load lands
+        constexpr int kReapplyEvery = 90;    // ~1.5s between the rest
+        int g_reapplyLeft = 0;
+        int g_reapplyAt = 0;
         bool g_dirty = false;
 
         // ---- the anchor (PLAN_COSTUME §5) ----------------------------------
@@ -36,8 +55,15 @@ namespace FUI::Costume
         // serve them: armorAddons is overwritten per-ARMO, so two pieces sharing
         // a carrier would have to share an appearance. The ARMA is shared freely
         // -- it is never rendered, only replaced.
+        // ★24, not 8. Eight was a guess at how many slots a costume leaves
+        // bare, and a real set overran it: a 17-piece outfit needed 11 and the
+        // last three simply did not appear -- silently, apart from one warning
+        // in the log. The ceiling is now the number of slots a costume can
+        // cover at all, so the count can no longer be the thing that is wrong.
+        // ★They cost nothing to carry: no model, no keywords, 0/0/0, and only
+        // the ones a costume actually needs are ever equipped.
         constexpr std::uint32_t kAnchorFirst = 0x82B;
-        constexpr int           kAnchorCount = 8;
+        constexpr int           kAnchorCount = 24;
         constexpr const char*   kPlugin = "Grid Inventory.esp";
 
         int  g_anchorTries = 0;        // give up rather than loop forever
@@ -200,6 +226,13 @@ namespace FUI::Costume
     // ---- applying ---------------------------------------------------------
 
     void MarkDirty() { g_dirty = true; }
+
+    void NoteGameLoaded()
+    {
+        g_reapplyLeft = kReapplyTimes;
+        g_reapplyAt = g_frame + kReapplyFirst;
+        SKSE::log::info("[COSTUME] load: {} re-dress passes scheduled", kReapplyTimes);
+    }
 
     namespace
     {
@@ -522,6 +555,15 @@ namespace FUI::Costume
             }
             a_form->bipedModelData.bipedObjectSlots = static_cast<Slot>(a_mask);
         };
+        // ★Every slot the costume is going to fill, worked out BEFORE the loop.
+        // It has to be complete on the first iteration: the carrier that gets
+        // the skin may well be processed before the carrier wearing the chest,
+        // and a set built up as we go would fence the skin against a costume
+        // that had not been laid down yet.
+        std::uint32_t dressed = 0;
+        for (std::uint32_t i = 0; i < kSlots; ++i) {
+            if (donor[i]) dressed |= 1u << i;
+        }
         if (wanted) {
             for (auto* armo : worn) {
                 if (armo->armorAddons.size() == 0) continue;
@@ -546,6 +588,26 @@ namespace FUI::Costume
                         if (!(covered & (1u << i))) continue;
                         want = skin->GetArmorAddonByMask(race, SlotOf(i));
                         if (want) { at = i; break; }
+                    }
+                    // ★★★AND FENCE IT IN. A body replacer's skin addon is ONE
+                    // mesh for the whole body, and it claims every slot that
+                    // body covers -- on UBE that is body + forearms + hands
+                    // together. Lend it to a bare HANDS carrier and the engine
+                    // puts it on all three, painting bare skin straight over
+                    // the costume's chest. Borrowing it to fill one empty slot
+                    // emptied two full ones.
+                    // ★It is the SKIN that gets narrowed, not the costume that
+                    // gets moved: the costume's claim is the correct one, and
+                    // the skin is only here to keep a limb from vanishing.
+                    // Restored with every other mask edit by RestoreAll.
+                    if (want) {
+                        const auto sm = static_cast<std::uint32_t>(want->GetSlotMask());
+                        if (sm & dressed) {
+                            reclaim(want, sm & ~dressed);
+                            SKSE::log::info("[COSTUME]     skin addon fenced: 0x{:08X} -> "
+                                            "0x{:08X} (costume owns 0x{:08X})",
+                                sm, sm & ~dressed, dressed);
+                        }
                     }
                 }
 
@@ -597,6 +659,17 @@ namespace FUI::Costume
                     SKSE::log::info("[COSTUME]     addon slots 0x{:08X} widened to 0x{:08X} "
                                     "to reach the carrier", armaMask, armaMask | covered);
                 }
+                // ★★TRIED AND REVERTED: widening the CARRIER to the addon's
+                // mask when the two overlap without matching. The reasoning was
+                // sound -- the engine only builds where the carrier claims, so
+                // an addon spanning body+53 lent to a body-only carrier should
+                // come out half-built -- and it fired exactly where predicted
+                // (`carrier widened by 0x00800000` on the piece in question).
+                // The bare chest did not change. So the missing part is not a
+                // claim the carrier failed to make, and the cost of keeping it
+                // was real: 0x00800154 on another piece meant one carrier
+                // claiming five slots, which is five other garments it can take
+                // the place of.
 
                 Backup b;
                 b.armo = armo;
@@ -652,13 +725,76 @@ namespace FUI::Costume
 
         g_lastRebuild = g_frame;
         g_appliedTab = wanted ? g_tab : -1;
-        SKSE::log::info("[COSTUME] applied tab {}: {} redressed, {} mask edit(s)",
-            g_appliedTab, backups.size(), edits.size());
+
+        // ★Sample AFTER the rebuild -- what is in the slot now is the thing a
+        // later rebuild would replace. Sampling before would record the body we
+        // just discarded and the watch would fire on our own work, forever.
+        // ★A slot the costume actually DRESSED. An untouched slot holds the
+        // same addon before and after, so watching one would never notice
+        // anything, and watching an empty one would compare null to null.
+        g_watchSlot = -1;
+        g_watchAddon = nullptr;
+        if (wanted) {
+            auto* bp = player->GetActorRuntimeData().biped.get();
+            if (bp) {
+                for (std::uint32_t i = 0; i < kSlots; ++i) {
+                    if (!donor[i] || !bp->objects[i].addon) continue;
+                    g_watchSlot = static_cast<int>(i);
+                    g_watchAddon = bp->objects[i].addon;
+                    break;
+                }
+            }
+        }
+        SKSE::log::info("[COSTUME] applied tab {}: {} redressed, {} mask edit(s) "
+                        "(watching slot {})",
+            g_appliedTab, backups.size(), edits.size(), g_watchSlot);
+
+        // ★★When a costume piece does not appear and every step above still
+        // reports success, the question has stopped being "did we ask
+        // correctly" and become "what did the answer turn out to be". Compare
+        // what was lent against BipedAnim::objects[i].addon and print
+        // objects[i].part->GetModel(); a MISMATCH names the addon that won the
+        // slot instead, and the mesh path says whose it is. That is what found
+        // the body replacer's skin painting over the chest.
     }
 
     void Tick()
     {
         ++g_frame;   // counted every tick, not only on the ones that rebuild
+        // ★★★AFTER A LOAD, DRESS MORE THAN ONCE.
+        //
+        // A load finishes, the costume is applied, the log says so -- and the
+        // player is bald. The engine is still working on the actor: it builds
+        // the body again from the addon lists, which by then have been put back
+        // (they must be -- they live on the shared form). The anchors stay worn,
+        // claiming their slots with no model to put there, and that IS the bald
+        // head. Nothing here is wrong except the timing.
+        //
+        // ★There is no signal to watch for. The obvious one -- "did the biped
+        // pointer change" -- does not work: the engine reuses it (measured at
+        // 11s on the same pointer), so a rebuild is invisible from outside.
+        // Since the end of the load sequence cannot be observed, cover it:
+        // re-dress on a schedule until the actor has settled. Cheap, because
+        // Update3DModel is the engine's own light path, and it stops on its own.
+        if (g_reapplyLeft > 0 && g_frame >= g_reapplyAt) {
+            --g_reapplyLeft;
+            g_reapplyAt = g_frame + kReapplyEvery;
+            g_appliedTab = -2;   // "already applied" is exactly the wrong answer
+            g_dirty = true;
+        }
+
+        // ★The watch. One slot is enough -- a rebuild remakes the whole body,
+        // so whichever slot we sampled tells the same story as all of them.
+        if (g_watchSlot >= 0 && !g_dirty) {
+            auto* p = RE::PlayerCharacter::GetSingleton();
+            auto* bp = (p && p->Is3DLoaded()) ? p->GetActorRuntimeData().biped.get() : nullptr;
+            if (bp && bp->objects[g_watchSlot].addon != g_watchAddon) {
+                SKSE::log::info("[COSTUME] slot {} was rebuilt from under us -- redressing",
+                    g_watchSlot);
+                g_appliedTab = -2;
+                g_dirty = true;
+            }
+        }
         // ★Every tick, not a window around the rebuild. The bug does not appear
         // where the work happens, so watching only there proved nothing.
         if (!g_dirty) return;
@@ -697,5 +833,11 @@ namespace FUI::Costume
         g_tab = -1;
         g_appliedTab = -2;   // unknown: the next Apply must run even if -1
         g_dirty = false;
+        // ★The schedule belongs to the save being left. NoteGameLoaded opens a
+        // fresh one for the save coming in. The watch goes with it: its slot
+        // and addon describe a body that is being torn down.
+        g_reapplyLeft = 0;
+        g_watchSlot = -1;
+        g_watchAddon = nullptr;
     }
 }

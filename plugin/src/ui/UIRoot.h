@@ -1,6 +1,8 @@
 ﻿#pragma once
 
 #include <functional>
+#include <string>
+#include <vector>
 
 struct ImDrawList;
 struct ImFont;
@@ -11,10 +13,31 @@ struct ImVec2;
 // opens/closes the menu via the UI message queue.
 namespace FUI::UIRoot
 {
+    // ---- the bottom prompt bar --------------------------------------------
+    // ★Public so surfaces OUTSIDE the inventory can use the real bar instead of
+    // drawing a lookalike. The quick menu is the first of those, and a
+    // hand-rolled row there would be a second thing to keep in step with the
+    // theme, the scale, the keycap chrome and the vignette that lets any of it
+    // read over a snowfield.
+    struct PromptBit
+    {
+        std::string key;     // "" = plain text (drag / wheel / a warning)
+        std::string label;
+        bool        sep = false;   // draw a divider before this bit
+    };
+    void DrawPromptRow(const std::vector<PromptBit>& a_bits, bool a_warn, float a_fade);
+
     // One line of help for the BOTTOM prompt bar, good for this frame only.
     // Call it while a control is hovered; the bar shows it in place of its
     // ambient hints. Keeps help out from under the cursor.
     void NoteHoverHint(const char* a_text);
+
+    // A real bold face for the few places that want weight (the quick menu's
+    // hub). ★It takes the string because the bold face is baked with Latin and
+    // hangul only -- a japanese or cyrillic name has no glyph there and would
+    // draw tofu, so anything it cannot spell comes back as the main font
+    // instead: not bold, but readable, which is the right way round.
+    ImFont* BoldFont(const char* a_utf8);
 
     void RegisterMenu();  // RE::UI::Register (call at kDataLoaded)
     bool TryInitD3D();    // idempotent ImGui init from renderer data

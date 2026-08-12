@@ -3,8 +3,9 @@
 An SKSE plugin that replaces the vanilla inventory outright. Every item occupies
 real squares on a grid, and **three screens** share the same grid UI:
 **inventory · containers (chests, corpses, followers, pickpocketing) · merchants.**
-Everything else (crafting stations, magic, favourites Q, gifts, journal, map, TAB)
-stays vanilla/SkyUI.
+**Favourites (`Q`) is replaced by the quick wheel**, which can be switched off
+in the settings to get the vanilla menu back. Everything else (crafting
+stations, magic, gifts, journal, map, TAB) stays vanilla/SkyUI.
 
 Icons are captured from each item's own 3D model by the game itself — no icon
 pack, and any modded item is supported automatically with no patches.
@@ -112,11 +113,60 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
   locked (Perfect Touch unlocks), reverse-pickpocketing + Poisoned-perk planting.
 - Containers auto-open after a successful lockpick (yields to QuickLoot-style widgets).
 
+### The quick wheel — change gear without opening anything
+
+**Hold the game's Favourites key (`Q` by default)** and the screen falls back
+while a ten-slot ring opens. It **replaces the vanilla favourites menu**, so it
+answers that key and follows it if you rebind it in the game's own controls.
+
+- **`A` / `D` switch group** — there are four.
+
+  | Group | What it holds |
+  |---|---|
+  | PRESET | Your loadout tabs — picking one changes into that set |
+  | COSTUME | The same tabs, **appearance only** (see below) |
+  | GEAR | Weapons, armour and potions you have starred |
+  | MAGIC | Spells and shouts you have starred |
+
+- **Aiming**: roll the mouse wheel, or just move the mouse that way.
+  **Letting go of the key applies it.** On a pad: left stick aims, D-pad
+  left/right switches group.
+- **To choose nothing**, bring the cursor back to the middle and release.
+  In the middle the pointer leaves a trail of ink, so you can see where your
+  hand is even with nothing selected.
+- **GEAR and MAGIC also take clicks** — left is your right hand, right is your
+  left. Anything not held in a hand is simply used. Picking something already
+  equipped takes it off.
+- **Rearranging**: hold the left button on a slot and carry it; each neighbour
+  you pass steps aside on its own. Where you drop it is saved, and **a visit
+  that rearranged applies nothing.** Each group remembers its own layout, and
+  the inventory's tab order is left alone.
+- **Starring IS registering** — `F` in the inventory, or the game's own
+  favourite in the magic menu. There is no separate step for the wheel.
+- **It can be turned off** — set **QUICK WHEEL** to Off in the settings and the
+  vanilla favourites menu comes back whole, number hotkeys included. The
+  wheel's layout is kept, so turning it back on returns you to it.
+
+### Costumes — keep the stats, change the look
+
+Point one loadout tab at your appearance and your body shows that set while
+everything the game measures still comes from what you are really wearing.
+
+- Set it from the marker on the inventory's tabs, or from the wheel's
+  **COSTUME** group. One at a time — choosing another clears the last.
+- **Choosing EQUIP takes the costume off** and your own gear shows again. (It
+  does not switch you to the EQUIP set; that is the PRESET wheel's job.)
+- Armour rating, enchantments, tempering and perks are **the equipped item's**.
+  Nothing is unequipped for this, not even for an instant — only the appearance
+  list is borrowed while the body is rebuilt.
+- The set you are currently wearing cannot be used as a costume (it would be
+  wearing the same thing twice).
+
 ### Settings (SETTINGS in the title bar)
 - UI scale, 19 skins, languages (live switch), glow style/brightness, icon
   brightness/style, item shadow (distance/blur/opacity), capture light, icon
-  cache reset, precache all, trade options (unlimited merchant gold / merchant
-  buys anything).
+  cache reset, precache all, **quick wheel on/off**, trade options (unlimited
+  merchant gold / merchant buys anything).
 - Sliders take a drag, the ± buttons at either end (held for continuous), a
   double-click to type an exact value, and a right-click to restore the default.
 
@@ -201,6 +251,7 @@ The same notes are in that folder's `_README.txt`.
 | Input | Action |
 |------|------|
 | Inventory key (default `I`) | Open / close — follows the game's own key binding |
+| Favourites key (default `Q`, hold) | **Quick wheel** — wheel/mouse to aim, release to apply · `A`/`D` group · left/right click = right/left hand · drag to rearrange |
 | Left-click | Pick up → left-click the destination (on another item = swap) |
 | Right-click | Equip/use · open bag · pouch withdraw · (loot/shop/pickpocket) store·sell·plant · (while carrying) cancel |
 | Shift+Left-click | Stack / gold split slider |
@@ -209,7 +260,7 @@ The same notes are in that folder's `_README.txt`.
 | Shift (hold) | Compare against equipped |
 | `C` | Inspect in 3D — your grid, the equipment panel and container/merchant cells alike. Drag rotate · wheel zoom · `R` reset |
 | `R` | Over your grid = drop one / over a container = take all |
-| `F` | Favourite (feeds the vanilla Q menu) |
+| `F` | Favourite — goes straight onto the quick wheel's GEAR group |
 | Drop outside | Discard (cancelled while a chest/shop window is open) |
 | `ESC` | One layer at a time: 3D inspect → popups → trash → pouch → settings → EDIT → inventory. A carried item is dropped first |
 
@@ -223,7 +274,9 @@ The same notes are in that folder's `_README.txt`.
   co-save — **retrieve them before uninstalling.**
 - Selling a pouch auto-withdraws the stored gold first; only the empty pouch sells.
 - After swapping retextures, run Settings → Icons → **Icon cache reset**.
-- No key rebinding (only the inventory key follows the game's control settings).
+- No keys of its own to rebind — the inventory uses the game's **Inventory**
+  key and the quick wheel uses the game's **Favourites** key. Change them in
+  the game's control settings.
 - CJK text uses your Windows system fonts (no fonts redistributed).
 - Deleting the language folder leaves the UI running in English. Back up any
   translation you wrote — a mod update overwrites `GridInventory_lang\`.

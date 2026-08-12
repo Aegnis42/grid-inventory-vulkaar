@@ -92,6 +92,16 @@ namespace FUI::Costume
     void MarkDirty();
     void Tick();   // game thread; performs a pending Apply
 
+    // ★A save has just finished loading. The costume is re-applied several
+    // times over the next few seconds rather than once: the engine keeps
+    // rebuilding the actor after a load, each rebuild reads the addon lists we
+    // have already put back, and the result is the plain body -- with the
+    // anchors still worn, which is a bald head. There is no event for "the
+    // engine is done", and the obvious probe does not work either (it reuses
+    // the biped pointer, so a rebuild cannot be seen from outside), so the
+    // window is covered instead of watched.
+    void NoteGameLoaded();
+
     // ---- persistence ----------------------------------------------------
     // Which tab is checked is per-save state. Its own record rather than a
     // field on the loadout one: the two systems version independently, and a

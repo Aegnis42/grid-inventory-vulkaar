@@ -587,6 +587,15 @@ namespace FUI::Grid
     // the counts become the baseline the next opening is measured against.
     void NoteInventorySeen();
 
+    // ★One form counts as seen. EQUIPPING something is a stronger "I have
+    // looked at this" than hovering it, so the NEW mark has no business
+    // surviving it.
+    // ★★It raises the BASELINE, not just the mark. Clearing the mark alone
+    // would not hold: equipping takes the tile off the board, and unequipping
+    // brings back a tile the new-item test has never seen, so the mark simply
+    // comes back. The baseline is what that test compares against.
+    void NoteFormSeen(RE::TESBoundObject* a_obj);
+
     // Grid pixel metrics (main window sizes itself around these).
     inline constexpr int   kCols    = 10;
     inline constexpr int   kMinRows = 14;

@@ -112,8 +112,8 @@ namespace FUI::Lang
         X(EquippedLabel, "Equipped")   /* shift-compare card */                                             \
         X(HintTakeAll, "R  Take all")                                                                        \
         X(PrecacheLabel, "PRECACHE ALL")                                                                    \
-        X(IconReloadLabel, "DRAWN ICONS")   /* re-read the fallback PNG folder */                           \
-        X(IconReloadBtn, "Reload")                                                                          \
+        /* shown after a cache reset: it re-reads the drawn PNGs too, but a file */                         \
+        /* ADDED since launch is not in the virtual Data folder to be found.     */                         \
         X(IconReloadDone, "reloaded (new files need a game restart)")                                       \
         X(HintSliderReset, "Right-click: default")   /* the number is appended in code */                   \
         X(IconKeyLabel, "icon file")   /* editor: what to name a custom PNG */                              \
@@ -133,6 +133,10 @@ namespace FUI::Lang
         X(ToggleDefault, "Default")                                                                         \
         X(ToggleUnlimited, "Unlimited")                                                                     \
         X(ToggleAnything, "Anything")                                                                       \
+        X(ToggleOn, "On")                                                                                   \
+        X(ToggleOff, "Off")                                                                                 \
+        /* settings: turn the quick wheel off and hand the key back to the game */                          \
+        X(WheelEnableLabel, "QUICK WHEEL")                                                                  \
         X(StealTitle, "STEAL")   /* F6a steal container */                                                  \
         X(TrashTitle, "TRASH")   /* F2 trash window */                                                      \
         X(BagCollect, "COLLECT")   /* typed bag: pull matching items in */                                  \
@@ -214,7 +218,12 @@ namespace FUI::Lang
         X(BadgeQuest, "Quest item — can't be dropped or sold")                                              \
         X(BadgeStolen, "Stolen")                                                                            \
         X(BadgeWontBuy, "This merchant won't buy it")                                                       \
-        X(InspectHint, "drag rotate · wheel zoom · R reset · C / ESC close")   /* inspect overlay */
+        X(InspectHint, "drag rotate · wheel zoom · R reset · C / ESC close")   /* inspect overlay */\
+        X(WheelKeyLabel, "WHEEL KEY")   /* settings: rebind the quick menu's hotkey */              \
+        X(WheelKeyPress, "press keys...")   /* ...and hold as many as you want */                   \
+        X(WheelGroup, "group")   /* quick menu: mouse up/down moves between the two fans */          \
+        X(WheelPick, "pick")                                                                        \
+        X(WheelApply, "release to apply")
 
     enum class Str : int
     {

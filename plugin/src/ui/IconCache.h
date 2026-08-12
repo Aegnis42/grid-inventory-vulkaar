@@ -2,6 +2,7 @@
 
 #include "ui/ItemDef.h"
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <unordered_map>
@@ -39,6 +40,9 @@ namespace FUI
             int                       gw = 0;     // glow canvas incl. padding
             int                       gh = 0;
             int                       gpad = 0;   // margin baked on each side
+            // ---- eviction bookkeeping (m_icons only; Fallback ignores these)
+            int                       lastUsed = 0;   // cache tick Get() saw it
+            std::uint32_t             bytes = 0;      // VRAM incl. the mip tail
         };
 
         static IconCache* GetSingleton();
@@ -106,6 +110,33 @@ namespace FUI
         // captures replace a single in-memory slot and skip the disk write —
         // the FINAL sprite is flushed to disk when the pin moves/clears.
         void SetPin(RE::TESBoundObject* a_obj);
+
+        // ---- VRAM budget -----------------------------------------------------
+        // ★★A sprite in the pak costs nothing to get back -- one file read --
+        // so holding every icon a session ever drew is a habit, not a need.
+        // Without a ceiling the cache only grows: what is in VRAM at any moment
+        // is "every item seen since launch", and that number has no end.
+        // ★The budget does NOTHING in ordinary play. A full grid is ~77 MB and
+        // a measured session sat at 49 MB; this is a roof, not a policy.
+        // ★Only entries the pak can restore are ever dropped. A pinned item's
+        // captures are deliberately kept off disk, so dropping one would lose
+        // it -- see TrimToBudget.
+        static constexpr std::uint64_t kVramBudget = 256ull << 20;
+        // Uploads per frame while re-filling. Each one is a read plus a CPU
+        // mip chain, and a screenful at once is a visible hitch.
+        static constexpr int kRefillPerFrame = 8;
+        void TrimToBudget();                  // call OUTSIDE the ImGui frame
+        [[nodiscard]] std::uint64_t VramBytes() const;
+        // ★Age is counted in TICKS, not ImGui frames. ImGui only runs a frame
+        // while one of our menus is up, so its counter STOPS the moment the
+        // inventory closes -- and then every icon looks freshly used forever
+        // and nothing is ever trimmed, which is precisely when trimming is
+        // wanted. This one is advanced from the game tick, so it keeps going
+        // with nothing on screen.
+        // ★atomic: written on the game thread, read from the render pass. A
+        // torn read would only mis-age one icon by one tick, but the type
+        // costs nothing and says which threads meet here.
+        mutable std::atomic<int> m_tick{ 0 };
 
         [[nodiscard]] bool        IsBusy() const { return m_pendingBusy || !m_queue.empty(); }
         [[nodiscard]] const Icon* Get(RE::TESBoundObject* a_obj) const;   // resolves def internally
@@ -253,7 +284,10 @@ namespace FUI
 
         // Disk cache: an item is captured once EVER (per def); later sessions
         // load the pixels straight from disk — no engine renders at all.
-        bool LoadFromDisk(std::uint64_t a_key);
+        // const because Get() calls it: m_icons is mutable and nothing else
+        // is touched, so filling a miss is not a change the caller can see.
+        bool LoadFromDisk(std::uint64_t a_key) const;
+        mutable int m_refillLeft = kRefillPerFrame;   // reset each TrimToBudget
         static void SaveToDisk(std::uint64_t a_key, int a_w, int a_h, std::uint32_t a_fmt,
                                const std::vector<std::uint8_t>& a_pixels);
 
@@ -296,7 +330,12 @@ namespace FUI
         void ReleasePixelIcons();
 
         DefResolver                            m_resolver;
-        std::unordered_map<std::uint64_t, Icon> m_icons;
+        // ★mutable, for the same reason the pixel bookkeeping above is: Get()
+        // is const and now FILLS a miss from the pak on the spot rather than
+        // reporting one. Same answer either way from the caller's side -- the
+        // sprite was always going to arrive, this only decides whether it
+        // arrives this frame or the next.
+        mutable std::unordered_map<std::uint64_t, Icon> m_icons;
         Style                                   m_style = Style::kRealistic;
         std::deque<Pending>                    m_queue;
         std::unordered_set<std::uint64_t>      m_queued;    // membership for m_queue

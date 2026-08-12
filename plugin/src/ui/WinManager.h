@@ -46,6 +46,21 @@ namespace FUI
 
         void Load();         // read the ui ini once (call again to hot-reload)
         void Save() const;
+
+        // ★★Read ONE switch out of the ui ini, without the rest of Load.
+        //
+        // Load runs when the inventory is first drawn, because that is when the
+        // things it configures (skins, scale, window boxes) first matter. The
+        // quick wheel is not one of those: it answers a key during ordinary
+        // play, so a player who turns it off and restarts had it back until
+        // they happened to open their bag -- the wheel would open and suppress
+        // the vanilla menu it was supposed to have handed back.
+        //
+        // ★Not a second copy of the value: Save() still writes it in one place
+        // and Load() still reads it with everything else. This is the same key
+        // read earlier, for the one setting that is needed before any menu
+        // exists. Returns the default when the file or key is absent.
+        [[nodiscard]] static bool ReadWheelEnabled(bool a_default);
         // GI46-48: NAMED share files. "Default" -> GridInventory_Default.ini,
         // "P1" -> GridInventory_P1.ini ... each beside its icon bundle
         // (GridInventory_<name>_icons.pak). One ini carries the style subset

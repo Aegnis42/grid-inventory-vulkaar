@@ -73,6 +73,8 @@ set(SOURCES
     src/ui/Theme.cpp
     src/ui/Lang.h
     src/ui/Lang.cpp
+    src/ui/Wheeler.h
+    src/ui/Wheeler.cpp
 )
 
 add_library(${PROJECT_NAME} SHARED ${SOURCES})

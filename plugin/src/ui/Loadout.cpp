@@ -2,6 +2,7 @@
 #include "game/Costume.h"
 #include "ui/Grid.h"
 #include "ui/Lang.h"
+#include "ui/Wheeler.h"
 
 #include <set>
 #include <string>
@@ -35,6 +36,11 @@ namespace FUI::Loadout
         int  g_pendingSwitch = -1;
         bool g_pendingPurchase = false;
         int  g_pendingRemove = -1;
+
+        // The active tab's list versus the gear actually on the player. Set by
+        // the equip event, cleared by the re-read it triggers.
+        bool g_activeStale = false;
+        bool g_switching = false;   // DoSwitch is mid-strip; do not re-read
 
         constexpr RE::FormID kLeftHandSlot = 0x13F43;   // BGSEquipSlot "LeftHand"
         constexpr RE::FormID kGold001 = 0x0000000F;
@@ -217,10 +223,18 @@ namespace FUI::Loadout
             if (a_target < 0 || a_target >= static_cast<int>(g_loadouts.size())) return;
             if (a_target == g_active) return;
 
+            // ★The guard is not politeness -- it is the difference between a
+            // working switch and a wiped tab. Stripping and re-dressing fires
+            // a storm of equip events, and a re-read that landed between the
+            // strip and the re-dress would write "wearing nothing" over the
+            // tab being built.
+            g_switching = true;
             g_loadouts[g_active].items = CaptureWorn(p);   // snapshot leaving tab
             UnequipAll(p, em);                             // strip
             EquipSet(p, em, g_loadouts[a_target].items);   // equip target (missing skipped)
             g_active = a_target;
+            g_switching = false;
+            g_activeStale = false;   // the new tab's list IS what is now worn
 
             if (auto* proc = p->GetActorRuntimeData().currentProcess) {
                 proc->Update3DModel(p);                     // force biped refresh while paused
@@ -289,6 +303,11 @@ namespace FUI::Loadout
             // it or shifts it. Left alone it would silently dress the player as
             // whichever tab slid into the gap.
             Costume::OnTabRemoved(a_idx);
+            // ★...and so does the quick wheel's arrangement, for the same
+            // reason. It rebuilds itself on every open and needs no other
+            // notice -- but a deletion is invisible to a rebuild, because the
+            // number it freed is immediately occupied by the tab above.
+            Wheeler::OnTabRemoved(a_idx);
             Grid::RequestRebuild();
             SKSE::log::info("[LOADOUT] removed preset [{}]", a_idx);
         }
@@ -369,6 +388,8 @@ namespace FUI::Loadout
 
     bool IsReserved(RE::FormID a_id) { return ReservedCount(a_id) > 0; }
 
+    void MarkActiveStale() { g_activeStale = true; }
+
     std::vector<RE::FormID> FormsOf(int a_index)
     {
         EnsureInit();
@@ -396,6 +417,25 @@ namespace FUI::Loadout
                 const int t = g_pendingSwitch;
                 g_pendingSwitch = -1;
                 DoSwitch(t);
+            }
+        }
+
+        // ★★Re-read HERE, on the game thread, and not inside FormsOf. FormsOf
+        // is called from the render pass -- the quick menu draws ten slots a
+        // frame through it -- and a re-read is an inventory scan. Scanning the
+        // player's inventory from the render thread while the game thread is
+        // free to change it is a crash waiting for a busy frame. This runs
+        // every tick, so "stale" never outlives one.
+        // ★Once per change, not once per event: a full set change fires an
+        // equip event per piece, and they collapse into this single scan.
+        if (g_activeStale && !g_switching) {
+            auto* p = RE::PlayerCharacter::GetSingleton();
+            // Main menu / mid-load: no player, or no body to read gear off.
+            // Stay stale -- the tick comes round again.
+            if (p && p->Is3DLoaded() && g_active >= 0 &&
+                g_active < static_cast<int>(g_loadouts.size())) {
+                g_loadouts[g_active].items = CaptureWorn(p);
+                g_activeStale = false;
             }
         }
     }

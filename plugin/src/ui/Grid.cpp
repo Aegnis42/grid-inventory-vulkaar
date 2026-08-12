@@ -652,21 +652,28 @@ namespace FUI::Grid
                     continue;
                 }
                 if (InstanceSig(xl) == a_sig) return true;
-                // ★★The PLAIN pool owns no list, so a star for it has nowhere
-                // of its own to live. The engine only ever hangs an ExtraHotkey
-                // on an ExtraDataList, and a plain unit has none -- which is why
-                // starring one was impossible while a variant sibling existed:
-                // SetFavorite picked that sibling's list every time. Measured,
-                // not assumed (the log shows the engine minting a list only when
-                // the entry had none at all).
+                // ★★★THE PLAIN POOL NO LONGER BORROWS ITS NEIGHBOUR'S STAR.
                 //
-                // So the plain pool reads ANY star on the entry as its own. The
-                // cost is visible and accepted: star a plain dagger and the
-                // stolen one lights up too, because they share the one mark the
-                // engine allows. They are the same dagger; the mark is coarser
-                // than the board, and the board says so honestly rather than
-                // showing nothing at all.
-                if (a_sig == 0) return true;
+                // There used to be `if (a_sig == 0) return true;` here, on the
+                // reasoning that a plain unit owns no ExtraDataList and so a
+                // star for it has nowhere to live -- the engine writes into a
+                // variant sibling's list instead. That measurement was real,
+                // and it stopped being the whole story the day ProcessFavorites
+                // learned to LIFT every existing star before calling
+                // SetFavorite: with the entry momentarily bare, the engine
+                // mints a fresh list, and the plain pool ends up owning one
+                // like everybody else. The line outlived the problem.
+                //
+                // What it cost while it stayed: star the tempered sword and the
+                // plain one lit up beside it, because "any star on this entry"
+                // is true for a plain pool by definition. The favourites menu
+                // -- reading the engine rather than us -- showed only the
+                // tempered one, which is how it was caught.
+                //
+                // ★If a plain unit ever genuinely fails to get its own list,
+                // the star belongs to the sibling that did, and NOT lighting up
+                // is then the honest answer: that is the unit the game will
+                // actually reach for.
             }
             return false;
         }
@@ -5183,6 +5190,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
             SKSE::log::info("[GRID] rebuilt: {} items, {} views, gold {}",
                 g_items.size(), g_views.size(), g_gold);
+            // ★DIAG: a tile with no column, or parked in the overflow zone, is
+            // skipped by the occupancy shading AND by the sprite pass -- so
+            // "the background is missing" and "the cell looks empty" are the
+            // same state seen from two distances. Name them; a count alone
+            // would not say WHICH item, and the report is about one item.
+            for (const auto& it : g_items) {
+                if (it.col >= 0 && !it.overflow) continue;
+                SKSE::log::info("[GRID]   unplaced: '{}' col={} row={} overflow={} "
+                                "bag='{}' {}x{} count={}",
+                    it.obj ? it.obj->GetName() : "?", it.col, it.row,
+                    it.overflow ? 1 : 0, it.inBag, it.mask.w, it.mask.h, it.count);
+            }
             g_capacityDirty = true;   // occupancy changed (W2)
         }
     }
@@ -5401,14 +5420,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const std::uint16_t tsig = xl ? InstanceSig(xl) : 0;
                 const bool on = PoolHasStar(entry, f.uid, tsig);
                 if (on && !xl) {
-                    // ★Turning the PLAIN pool off. Its star is not on a list of
-                    // its own -- there is none -- so naming the pool would match
-                    // nothing and the toggle would jam in the "on" position.
-                    // Every star on the entry comes off instead, which is the
-                    // same coarseness the "on" side already accepted: the plain
-                    // pool and its variant siblings share one mark, so they turn
-                    // off together too. A toggle that cannot be untoggled is the
-                    // one outcome worth avoiding here.
+                    // ★Turning a pool off that has NO list of its own. Naming it
+                    // would match nothing and the toggle would jam in the "on"
+                    // position, so every star on the entry comes off instead.
+                    // A toggle that cannot be untoggled is the one outcome worth
+                    // avoiding here.
+                    // ★This is now the rare path, not the plain pool's normal
+                    // one: lifting the other stars before SetFavorite gets the
+                    // engine to mint a list for a plain unit too, so it usually
+                    // owns one and takes the precise branch below. Reached only
+                    // when that failed -- and then we do not know which list
+                    // holds this pool's mark, so coarse is the honest answer.
                     std::vector<std::string> all;
                     if (entry->extraLists) {
                         for (auto* x : *entry->extraLists) {
@@ -9277,6 +9299,33 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_trashDeleteQ.clear();
         g_trashAsk = {};
         RequestRebuild();
+    }
+
+    void NoteFormSeen(RE::TESBoundObject* a_obj)
+    {
+        if (!a_obj) return;
+        const RE::FormID fid = a_obj->GetFormID();
+        // ★The baseline first. Without it the mark returns the moment the item
+        // comes back off the body: unequipping rebuilds a tile the new-item
+        // test has not seen before, and that test asks the baseline, not the
+        // mark. Read the count from the ENGINE, the same source the baseline
+        // is taken from, so the two cannot disagree.
+        if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+            auto inv = player->GetInventory(
+                [&](RE::TESBoundObject& o) { return &o == a_obj; });
+            int n = 0;
+            for (const auto& [o, d] : inv) n = d.first;
+            if (n > 0) g_seenCount[fid] = n;
+        }
+        // ...then the marks on whatever tiles this form is showing as. A form
+        // can hold several (split stacks, named units), and equipping one is
+        // still "I have seen this item".
+        std::erase_if(g_newTiles, [fid](const std::string& k) {
+            for (const auto& it : g_items) {
+                if (it.key == k) return it.obj && it.obj->GetFormID() == fid;
+            }
+            return false;
+        });
     }
 
     void NoteInventorySeen()

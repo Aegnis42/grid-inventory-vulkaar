@@ -14,6 +14,7 @@
 #include "ui/Sfx.h"
 #include "ui/ItemPreview.h"
 #include "ui/UIRoot.h"
+#include "ui/Wheeler.h"
 
 #include <cmath>
 #include <cstdio>
@@ -81,6 +82,10 @@ namespace
             // renders. While the menu is open (game paused) GridInventoryMenu::
             // AdvanceMovie drives Tick - this path covers unpaused frames.
             FUI::UIRoot::Tick();
+            // ★Every tick, open or not: the CLOSE animation has to keep running
+            // after the hotkey is already released, and it is what finally takes
+            // the overlay menu down.
+            FUI::Wheeler::Tick();
             LockpickReopenTick();   // lockpick auto-open fallback
         }
         static inline REL::Relocation<decltype(thunk)> func;
@@ -177,6 +182,9 @@ namespace
         {
             if (a_event && a_event->actor && a_event->actor->IsPlayerRef()) {
                 FUI::Grid::MarkCapacityDirty();
+                // The active preset IS what the player is wearing, so anything
+                // that changes the worn gear changes that tab.
+                FUI::Loadout::MarkActiveStale();
             }
             return RE::BSEventNotifyControl::kContinue;
         }
@@ -350,6 +358,27 @@ namespace
                 return RE::BSEventNotifyControl::kContinue;
             }
             for (auto* e = *a_event; e; e = e->next) {
+                // ★The wheeler gets first refusal, on every device. It is a
+                // gameplay overlay, so it has to see the hotkey before the
+                // "only while our inventory is open" filters below throw the
+                // event away — and it must see key-UP too, which the keyboard
+                // branch further down drops.
+                if (auto* ts = e->AsThumbstickEvent()) {
+                    if (FUI::Wheeler::OnThumbstick(ts)) continue;
+                } else if (auto* mm = e->AsMouseMoveEvent()) {
+                    if (FUI::Wheeler::OnMouseMove(mm)) continue;
+                } else if (auto* wb = e->AsButtonEvent()) {
+                    if (FUI::Wheeler::OnButton(wb)) continue;
+                }
+                // ★★NOT muted here. Silencing the game's own input is done at
+                // PlayerControls' and MenuControls' entry points instead (see
+                // InputLock / MenuLock in Wheeler.cpp), because an event is one
+                // object shared by the whole sink chain: blanking it in OUR
+                // sink also blanks it for every listener that runs after us,
+                // and which side of us the game sits on is not ours to decide.
+                // Those hooks blank, call the original, and put the value back.
+                if (FUI::Wheeler::IsOpen()) continue;
+
                 // A real mouse event hands the pointer back from the pad.
                 // This is the ONLY reliable signal — see UIRoot::NoteMouseInput.
                 if (e->GetDevice() == RE::INPUT_DEVICE::kMouse) {
@@ -1147,6 +1176,29 @@ namespace
         return true;
     }
 
+    // ★★The vanilla favourites menu is closed on sight -- the quick wheel has
+    // taken its place and answers to the same key. Without this, one press
+    // opens both: the wheel reads the key from the input stream while the menu
+    // opens through the engine's own path, and the two are not the same road.
+    // ★No "swallow-then-open" dance like the inventory below needs. The wheel
+    // is already up by the time this arrives; there is nothing to wait for.
+    bool HandleFavoritesMenuIntercept(const RE::MenuOpenCloseEvent& a_event)
+    {
+        if (a_event.menuName != RE::FavoritesMenu::MENU_NAME) return false;
+        // ★★★THE SWITCH LIVES HERE, not only on the wheel's own input. This is
+        // the half that gives the vanilla screen back: with the wheel off it
+        // opens exactly as it always did, hotkey binding and all. Gating only
+        // the wheel would have left the menu suppressed with nothing put in
+        // its place -- the favourites key would simply have stopped working.
+        if (!FUI::Wheeler::Enabled()) return false;
+        if (!a_event.opening) return false;
+        if (auto* mq = RE::UIMessageQueue::GetSingleton()) {
+            mq->AddMessage(RE::FavoritesMenu::MENU_NAME,
+                RE::UI_MESSAGE_TYPE::kHide, nullptr);
+        }
+        return true;
+    }
+
     // Vanilla InventoryMenu: swallow-then-open (our grid opens once the
     // vanilla menu finished closing).
     bool HandleInventoryMenuIntercept(const RE::MenuOpenCloseEvent& a_event)
@@ -1329,6 +1381,7 @@ namespace
                 HandleLockpickAutoReopen(*a_event);   // observation only
                 HandleMessageBoxAside(*a_event) ||
                     HandleTextInputHotkeyBlock(*a_event) ||
+                    HandleFavoritesMenuIntercept(*a_event) ||
                     HandleInventoryMenuIntercept(*a_event) ||
                     HandleContainerMenuIntercept(*a_event) ||
                     HandleBarterMenuIntercept(*a_event);
@@ -1341,6 +1394,7 @@ namespace
     {
         // ---- UI bootstrap ----
         FUI::UIRoot::RegisterMenu();
+        FUI::Wheeler::RegisterMenu();
         FUI::UIRoot::TryInitD3D();   // renderer is live at kDataLoaded; retried in Open() if not
         // capture orientation = same resolution path as the old pipeline:
         // items ini override -> category preset (PLAN_B §2-G3)
@@ -1593,8 +1647,14 @@ namespace
             FUI::Grid::MarkLayoutFresh();
             break;
         case SKSE::MessagingInterface::kPreLoadGame:
+            ResetSession();
+            break;
         case SKSE::MessagingInterface::kPostLoadGame:
             ResetSession();
+            // ★The costume has to be put on again -- more than once. See
+            // Costume::NoteGameLoaded: the engine rebuilds the actor for a
+            // while after this message, and every rebuild undoes it.
+            FUI::Costume::NoteGameLoaded();
             break;
         }
     }
@@ -1607,6 +1667,7 @@ namespace
         FUI::GoldCoins::SaveGame(a_intfc);
         FUI::Costume::SaveGame(a_intfc);
         FUI::LootBarter::SaveGame(a_intfc);   // F7: container spot memory (GCLY)
+        FUI::Wheeler::SaveGame(a_intfc);      // quick-wheel slot order (GWHL)
     }
 
     void LoadCallback(SKSE::SerializationInterface* a_intfc)
@@ -1621,6 +1682,8 @@ namespace
                 FUI::GoldCoins::LoadRecord(a_intfc, version);
             } else if (type == FUI::Costume::kRecordType) {
                 FUI::Costume::LoadRecord(a_intfc, version);
+            } else if (type == FUI::Wheeler::kRecordType) {
+                FUI::Wheeler::LoadRecord(a_intfc, version);
             } else if (type == FUI::LootBarter::kContRecordType) {
                 FUI::LootBarter::LoadRecord(a_intfc, version);   // F7 (GCLY)
             } else {
@@ -1638,6 +1701,7 @@ namespace
     {
         FUI::Loadout::RevertGame(a_intfc);
         FUI::Costume::RevertGame(a_intfc);
+        FUI::Wheeler::RevertGame(a_intfc);
         FUI::Grid::RevertGame(a_intfc);
         FUI::GoldCoins::RevertGame(a_intfc);
         FUI::LootBarter::RevertGame();   // F7: container spot memory
@@ -1647,7 +1711,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 0, 7, 0 },
+    .Version              = { 1, 1, 0, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)

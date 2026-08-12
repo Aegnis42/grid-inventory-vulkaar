@@ -13,6 +13,7 @@
 #include "ui/Lang.h"
 #include "ui/Sfx.h"
 #include "ui/Theme.h"
+#include "ui/Wheeler.h"
 #include "ui/WinManager.h"
 
 #include <imgui.h>
@@ -46,6 +47,7 @@ namespace FUI::UIRoot
         constexpr float kScrollSmoothing  = 10.0f;
 
         ImFont* g_fontMain = nullptr;
+        ImFont* g_fontBold = nullptr;   // latin + hangul only, see BoldFont()
 
         // icon-brightness UP pass. GI57: the >1 gain used to be ADDITIVE
         // (dst + t*src) — bright pixels received the most, dark ones almost
@@ -356,12 +358,14 @@ namespace FUI::UIRoot
 
             auto exists = [](const char* p) { return std::filesystem::exists(p); };
             const char* kMalgun = "C:\\Windows\\Fonts\\malgun.ttf";
+            const char* kMalgunBd = "C:\\Windows\\Fonts\\malgunbd.ttf";
             const char* kYaHei  = "C:\\Windows\\Fonts\\msyh.ttc";
             const char* kMeiryo = "C:\\Windows\\Fonts\\meiryo.ttc";
             const char* kYuGoth = "C:\\Windows\\Fonts\\YuGothM.ttc";
 
             io.Fonts->Clear();
             g_fontMain = nullptr;
+            g_fontBold = nullptr;
 
             if (exists(kMalgun)) {
                 ImFontConfig base;
@@ -397,6 +401,23 @@ namespace FUI::UIRoot
                     const char* pf = Lang::FontPath();
                     const char* face = (pf && pf[0] && exists(pf)) ? pf : kMalgun;
                     io.Fonts->AddFontFromFileTTF(face, kBodyFont * k, &mc, extra);
+                }
+                // ★A second, BOLD face -- the only honest way to get weight.
+                // Redrawing a glyph at small offsets thickens it, but each copy
+                // lands on its own subpixel phase, so the counters inside a
+                // letter fill with half-tone and the word reads smeared rather
+                // than heavy. Malgun ships a bold cut; use it.
+                // ★No glyph range here, unlike the body face. This atlas bakes
+                // on demand, so an unrestricted face costs only the characters
+                // actually drawn -- and it keeps IsGlyphInFont() honest: with a
+                // range set, the face can own a glyph the atlas is not allowed
+                // to bake, and BoldFont() would hand back a font that draws
+                // nothing.
+                if (exists(kMalgunBd)) {
+                    ImFontConfig bc;
+                    bc.OversampleH = 2;
+                    bc.OversampleV = 2;
+                    g_fontBold = io.Fonts->AddFontFromFileTTF(kMalgunBd, kBodyFont * k, &bc);
                 }
             } else {
                 g_fontMain = io.Fonts->AddFontDefault();
@@ -1395,6 +1416,11 @@ namespace FUI::UIRoot
         // ICON CACHE — manual reset for retexture installs: every icon
         // re-renders from the CURRENT meshes/textures. Two-click armed
         // (3s window) so a stray click can't wipe the cache.
+        // ★It re-reads the DRAWN icons too. Those had their own button, and it
+        // was one button too many: both answer the same question — "I changed
+        // what an icon is made of, show me" — and which one to press depended
+        // on knowing whether that icon happens to be a 3D capture or a PNG,
+        // which is exactly the thing the player should not have to know.
         void RowCacheReset(const SettingsCtx& a_c)
         {
             const auto& sk = Theme::S();
@@ -1407,6 +1433,14 @@ namespace FUI::UIRoot
             if (Sfx::Button(Lang::T(armed ? Lang::Str::Confirm : Lang::Str::CacheReset))) {
                 if (armed) {
                     g_iconsReset.store(true);
+                    g_flatReload.store(true);   // Tick: SRVs must not drop mid-frame
+                    // ★The captures visibly re-render, so this note is not
+                    // there to prove the button worked -- it is there for the
+                    // one thing a reload cannot do. A PNG added to the mod
+                    // folder after launch is not in the virtual Data folder
+                    // the plugin sees, and no amount of re-reading will find
+                    // it.
+                    g_flatReloadNote = ImGui::GetTime() + 3.5;
                     s_armedUntil = 0.0;
                 } else {
                     s_armedUntil = ImGui::GetTime() + 3.0;
@@ -1427,23 +1461,6 @@ namespace FUI::UIRoot
         // The tool deliberately does not re-implement the rules: a second copy
         // in another language would answer confidently and wrongly the moment
         // Fallback.cpp changes.
-        void RowIconReload(const SettingsCtx& a_c)
-        {
-            SettingLabel(a_c, Lang::Str::IconReloadLabel);
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
-            RightAlign(BtnW(Lang::T(Lang::Str::IconReloadBtn)));
-            if (Sfx::Button(Lang::T(Lang::Str::IconReloadBtn))) {
-                g_flatReload.store(true);   // Tick: SRVs must not drop mid-frame
-                // ★Say it ran, in the prompt bar. When nothing on screen changes
-                // — the common case, and the correct one if the file did not
-                // change — a silent button reads as a broken button, and the
-                // next thing that arrives is a bug report about the button
-                // rather than about the file.
-                g_flatReloadNote = ImGui::GetTime() + 3.5;
-            }
-            ImGui::PopStyleVar();
-        }
-
         void RowPrecache(const SettingsCtx& a_c)
         {
             const auto& sk = Theme::S();
@@ -1517,6 +1534,35 @@ namespace FUI::UIRoot
 
         // F3 — MERCHANT GOLD: Default / Unlimited chips (GlowStyle grammar).
         // PushID: both trade rows share the "Default" chip label.
+        // ★★QUICK WHEEL — on, or the game's own favourites menu. The wheel
+        // REPLACES that menu rather than sitting beside it: it answers the same
+        // key and suppresses the screen that key used to open. So the switch is
+        // not "show a feature", it is "which of these two exists" -- and off
+        // gives the vanilla screen back whole, hotkey binding included.
+        void RowWheelEnable(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::WheelEnableLabel);
+            ImGui::PushID("wheelon");
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
+            RightAlign(BtnRowW({ Lang::T(Lang::Str::ToggleOn),
+                                 Lang::T(Lang::Str::ToggleOff) }));
+            for (int want : { 1, 0 }) {
+                const bool on = Wheeler::Enabled() == (want == 1);
+                if (on) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, Theme::BtnOn());
+                    ImGui::PushStyleColor(ImGuiCol_Text, Theme::BtnOnInkVec());
+                }
+                if (Sfx::Button(Lang::T(want ? Lang::Str::ToggleOn : Lang::Str::ToggleOff))) {
+                    Wheeler::SetEnabled(want == 1);
+                    WinManager::GetSingleton()->Save();
+                }
+                if (on) ImGui::PopStyleColor(2);
+                if (want == 1) ImGui::SameLine(0.0f, 6.0f * a_c.S);
+            }
+            ImGui::PopStyleVar();
+            ImGui::PopID();
+        }
+
         void RowMerchantGold(const SettingsCtx& a_c)
         {
             SettingLabel(a_c, Lang::Str::MerchGoldSetLabel);
@@ -1579,7 +1625,13 @@ namespace FUI::UIRoot
             const SettingsRowFn* rows;
             size_t               count;
         };
-        constexpr SettingsRowFn kRowsGeneral[] = { RowScale, RowCellScale, RowLanguage, RowPreset, RowPresetExport };
+        // ★No WHEEL KEY row. The quick menu answers to the game's own
+        // Favorites binding now, so the place to change it is the game's
+        // controls -- a second, private binding for the same key would be a
+        // setting that can disagree with the one the player already trusts.
+        constexpr SettingsRowFn kRowsGeneral[] = { RowScale, RowCellScale, RowLanguage,
+                                                   RowWheelEnable,
+                                                   RowPreset, RowPresetExport };
         // ★SKIN leads DISPLAY rather than sitting in GENERAL: every row under
         // it is now stored PER SKIN, so the skin chip is the context those
         // rows are read in. Choosing a skin first and tuning below it is the
@@ -1594,7 +1646,7 @@ namespace FUI::UIRoot
         // like, and the rows under it (reset, precache) are how you re-take
         // them. Reading top to bottom is the order the work is actually done.
         constexpr SettingsRowFn kRowsIcons[]   = { RowCaptureLight, RowCacheReset,
-                                                   RowPrecache, RowDeferred, RowIconReload };
+                                                   RowPrecache, RowDeferred };
         constexpr SettingsSection kSettingsSections[] = {
             { Lang::Str::SectionGeneral, kRowsGeneral, std::size(kRowsGeneral) },
             { Lang::Str::SectionDisplay, kRowsDisplay, std::size(kRowsDisplay) },
@@ -1651,6 +1703,7 @@ namespace FUI::UIRoot
                 lw(Lang::Str::CaptureLightLabel),
                 lw(Lang::Str::PrecacheLabel),
                 lw(Lang::Str::MerchGoldSetLabel),
+                lw(Lang::Str::WheelEnableLabel),
                 lw(Lang::Str::MerchStockSetLabel) }));
             const float trackW = 176.0f * S;
             // language chips sized like image-3: real padding, so the window
@@ -2252,14 +2305,11 @@ namespace FUI::UIRoot
         std::string g_hoverHint;
         int         g_hoverHintFrame = -1;
 
-        struct PromptBit
-        {
-            std::string key;     // "" = plain text (drag / wheel / a warning)
-            std::string label;
-            bool        sep = false;   // draw a divider before this bit
-        };
-
-        void DrawPromptRow(const std::vector<PromptBit>& a_bits, bool a_warn, float a_fade)
+        // ★PromptBit moved to the header and the entry point is public now —
+        // the quick menu draws THIS bar rather than a lookalike, and two
+        // copies of the keycap chrome would have drifted apart within a
+        // release. The body stays here; the public name forwards to it.
+        void DrawPromptRowImpl(const std::vector<PromptBit>& a_bits, bool a_warn, float a_fade)
         {
             if (a_bits.empty() || a_fade <= 0.01f) return;
             const auto& io = ImGui::GetIO();
@@ -2734,10 +2784,35 @@ namespace FUI::UIRoot
         }
     }
 
+    void DrawPromptRow(const std::vector<PromptBit>& a_bits, bool a_warn, float a_fade)
+    {
+        DrawPromptRowImpl(a_bits, a_warn, a_fade);
+    }
+
     void NoteHoverHint(const char* a_text)
     {
         g_hoverHint = a_text ? a_text : "";
         g_hoverHintFrame = ImGui::GetFrameCount();
+    }
+
+    ImFont* BoldFont(const char* a_utf8)
+    {
+        ImFont* main = g_fontMain ? g_fontMain : ImGui::GetFont();
+        if (!g_fontBold || !a_utf8) return main;
+        // ★One codepoint it cannot spell sends the WHOLE line back to the main
+        // face. Half a word in bold and half in tofu is worse than a word that
+        // is merely not bold, and mixing faces mid-string is not something the
+        // caller can see coming.
+        for (const char* p = a_utf8; *p;) {
+            unsigned int cp = 0;
+            const int n = ImTextCharFromUtf8(&cp, p, nullptr);
+            if (n <= 0) break;
+            p += n;
+            if (cp == ' ' || cp == '\t' || cp == '\n') continue;
+            if (cp > IM_UNICODE_CODEPOINT_MAX) return main;
+            if (!g_fontBold->IsGlyphInFont(static_cast<ImWchar>(cp))) return main;
+        }
+        return g_fontBold;
     }
 
     void DrawItemIconQuad(ImDrawList* a_dl, void* a_srv, const ImVec2 a_p[4])
@@ -3582,8 +3657,18 @@ namespace FUI::UIRoot
             // restart — which is the difference between "author a PNG" being a
             // loop and being a chore.
             Fallback::ReloadAssets();
+            // ★The wheel keeps its OWN copies of the same drawings, so a reload
+            // that only emptied the grid's cache left the two surfaces showing
+            // different pictures of the same file.
+            Wheeler::ReloadMedallions();
             Grid::RequestRebuild();
         }
+        // ★★OUTSIDE the ImGui frame, which is the whole reason it lives here
+        // and not in the draw: trimming releases SRVs, and a draw list still
+        // holding one is the crash ResetDiskCache's comment warns about. Also
+        // resets the per-frame refill allowance -- one place, so the two
+        // cannot drift.
+        IconCache::GetSingleton()->TrimToBudget();
     }
 
     bool IsTextInputActive()
