@@ -8,6 +8,7 @@
 #include "ui/Lang.h"
 #include "ui/LootBarter.h"
 #include "ui/Sfx.h"
+#include "ui/Wheeler.h"
 #include "game/BagFilter.h"
 #include "game/Costume.h"
 #include "game/GoldCoins.h"
@@ -5419,6 +5420,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // nothing changed on screen.
                 const std::uint16_t tsig = xl ? InstanceSig(xl) : 0;
                 const bool on = PoolHasStar(entry, f.uid, tsig);
+                // ★★Tell the wheel the moment the star comes off, not the next
+                // time it happens to look. It re-reads the favourites only when
+                // it opens, so unstar-and-restar inside one inventory visit was
+                // invisible to it and the item returned to the slot it had been
+                // dragged to -- while the same two clicks either side of opening
+                // the wheel put it at the front. The act reports itself now.
+                if (on) Wheeler::ForgetFavorite(f.obj->GetFormID());
                 if (on && !xl) {
                     // ★Turning a pool off that has NO list of its own. Naming it
                     // would match nothing and the toggle would jam in the "on"

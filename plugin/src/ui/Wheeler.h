@@ -199,6 +199,18 @@ namespace FUI::Wheeler
     [[nodiscard]] bool Enabled();
     void SetEnabled(bool a_on);
 
+    // ★★A star has just been taken off this form, so it gives up its place on
+    // the wheel. Called by whatever removes the star, at the moment it does.
+    //
+    // ★Why not just notice at the next open: the wheel only re-reads the
+    // favourites when it opens, so unstarring and re-starring inside one visit
+    // to the inventory left no trace for it to see -- the item came back to
+    // the slot it had been dragged to, while doing the same thing either side
+    // of opening the wheel put it at the front. Same two actions, two answers,
+    // and the difference was whether an unrelated menu happened to be shown in
+    // between. The act has to report itself.
+    void ForgetFavorite(RE::FormID a_form);
+
     // ---- assets ----------------------------------------------------------
     // ★★Drop the wheel's own drawn-icon cache. The medallions come out of the
     // same fallback folder the grid draws from -- "the folder IS the surface

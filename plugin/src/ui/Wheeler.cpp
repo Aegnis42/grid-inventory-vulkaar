@@ -161,8 +161,37 @@ namespace FUI::Wheeler
         // potion runs out would move everything else.
         void ApplyOrder(FavItem* a_list, int a_n, int a_which)
         {
-            const auto& want = g_order[a_which];
+            auto& want = g_order[a_which];
             if (want.empty()) return;
+            // ★★★A PLACE IS HELD BY A STAR, NOT RESERVED BY A NAME. Anything in
+            // the table that is not starred right now gives its place up, so
+            // "newly starred" means the same thing whether the item is new to
+            // the wheel or was on it yesterday: it lands in the first free
+            // place from the front.
+            //
+            // ★It used to keep the name and hand the place back the moment that
+            // exact item was starred again. Unstar everything, star one thing,
+            // and it went to wherever that item had been dragged months ago --
+            // an empty wheel that still remembers is a wheel the player cannot
+            // reset by any means they can see.
+            //
+            // ★This is what RememberOrder already believed: it writes the
+            // arrangement AS DRAWN on every drag, so a slot whose item was
+            // missing at that moment was zeroed anyway. Only the reader was
+            // still treating the table as a booking. The two agree now.
+            //
+            // ★The cost, accepted: put a starred item in a chest and take it
+            // out again and it comes back at the front rather than where it
+            // was. Its star went into the chest with it, and a place kept for
+            // something that is not starred is the very thing above.
+            for (auto& id : want) {
+                if (!id) continue;
+                bool starred = false;
+                for (int i = 0; i < a_n && !starred; ++i) {
+                    starred = a_list[i].form && a_list[i].form->GetFormID() == id;
+                }
+                if (!starred) id = 0;
+            }
             FavItem out[kSlots]{};
             bool taken[kSlots]{};
             for (int slot = 0; slot < kSlots && slot < static_cast<int>(want.size()); ++slot) {
@@ -2177,6 +2206,18 @@ namespace FUI::Wheeler
         // comment saying it was not -- and the copy was missing the drag state.
         if (!a_on) CloseWheel();
         SKSE::log::info("[WHEEL] {}", a_on ? "enabled" : "disabled -- vanilla favourites restored");
+    }
+
+    void ForgetFavorite(RE::FormID a_form)
+    {
+        if (!a_form) return;
+        // ★Both lists: an item and a spell can never share a FormID, so asking
+        // each is cheaper than deciding which one to ask.
+        for (auto& order : g_order) {
+            for (auto& id : order) {
+                if (id == a_form) id = 0;
+            }
+        }
     }
 
     void ReloadMedallions()
