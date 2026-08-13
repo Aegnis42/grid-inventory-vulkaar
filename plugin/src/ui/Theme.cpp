@@ -96,7 +96,7 @@ namespace FUI::Theme
                 // chosen; only the whole thing sits a step lower.
                 Rgba(189, 174, 147),                    // winBg — cream parchment
                 Rgba(120, 95, 60),                      // glyph  slot silhouettes
-                Rgba(120, 95, 60, 0.18f),               // shade  occupied cell
+                Rgba(120, 95, 60, 0.30f),               // shade  occupied cell
                 Rgba(150, 110, 40),                     // sel
                 Rgba(122, 90, 18),                      // filled
                 4.0f, 3.0f,                             // rounding / titleSpacing
@@ -164,7 +164,7 @@ namespace FUI::Theme
                 // (caching card / centre park / line boost) with Glass Clear.
                 "Glass Dark",
                 Rgba(212, 212, 216), Rgba(240, 240, 244), Rgba(228, 228, 232),
-                Rgba(228, 228, 232, 0.55f), Rgba(12, 12, 14, 0.58f),
+                Rgba(228, 228, 232, 0.55f), Rgba(12, 12, 14, 0.75f),
                 // ★★shade goes UP, not down. On a translucent panel the mark is
                 // alpha*(shade - panel), and a BLACK shade makes that
                 // -alpha*panel — which dies with the panel. In a cave the panel
@@ -193,14 +193,14 @@ namespace FUI::Theme
                 // "this cell is occupied".
                 Rgba(170, 225, 232, 0.35f),  // bagOpen
             },
-            {   // 5 Glass Clear — Glass Dark with the panel FAR more
-                // transparent; everything else identical except the tile
-                // shade (0.50: tiles must stay readable on the much thinner
-                // panel). (MABINOGI GREY was removed by user request; the
+            {   // 5 Glass Clear — Glass Dark with a THINNER panel; everything
+                // else identical except the tile shade, which sits a step
+                // higher because a thinner panel means a brighter ground under
+                // every tile. (MABINOGI GREY was removed by user request; the
                 // bevelChrome grammar stays available for future skins.)
                 "Glass Clear",
                 Rgba(212, 212, 216), Rgba(240, 240, 244), Rgba(228, 228, 232),
-                Rgba(228, 228, 232, 0.55f), Rgba(12, 12, 14, 0.38f),
+                Rgba(228, 228, 232, 0.55f), Rgba(12, 12, 14, 0.60f),
                 // a step higher than Glass Dark: this panel lets more of the
                 // world through, so the ground it sits on is brighter and the
                 // same alpha would buy less separation
@@ -243,7 +243,7 @@ namespace FUI::Theme
                 // one of them. Nothing worked until the fence moved.
                 Rgba(74, 76, 78, 0.68f),               // winBg (translucent board)
                 Rgba(44, 46, 47),                      // glyph
-                Rgba(13, 15, 15),                      // shade (occupied cell)
+                Rgba(13, 15, 15, 0.8f),                // shade (occupied cell)
                 Rgba(81, 83, 85),                      // sel
                 Rgba(81, 83, 85),                      // filled
                 0.0f, 0.0f,                            // rounding / titleSpacing
@@ -252,7 +252,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(27, 29, 29, 0.9775f),             // cellBg
+                Rgba(27, 29, 29, 0.75f),               // cellBg
                 Rgba(20, 21, 22, 0.85f),               // cellGroove
                 Rgba(30, 32, 33),                      // btnFace
                 Rgba(161, 123, 99, 0.5f),              // bagOpen (complement, so it never reads as the panel)
@@ -292,7 +292,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(41, 51, 57, 0.9775f),             // cellBg
+                Rgba(41, 51, 57, 0.75f),               // cellBg
                 Rgba(31, 39, 44, 0.85f),               // cellGroove
                 Rgba(46, 54, 65),                      // btnFace
                 Rgba(177, 143, 114, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -332,7 +332,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(91, 95, 97, 0.9775f),             // cellBg
+                Rgba(91, 95, 97, 0.75f),               // cellBg
                 Rgba(76, 79, 82, 0.85f),               // cellGroove
                 Rgba(96, 100, 104),                    // btnFace
                 Rgba(203, 163, 137, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -372,7 +372,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(40, 58, 40, 0.9775f),             // cellBg
+                Rgba(40, 58, 40, 0.75f),               // cellBg
                 Rgba(27, 46, 31, 0.85f),               // cellGroove
                 Rgba(20, 66, 50),                      // btnFace
                 Rgba(174, 142, 175, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -412,7 +412,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(71, 87, 62, 0.9775f),             // cellBg
+                Rgba(71, 87, 62, 0.75f),               // cellBg
                 Rgba(55, 72, 51, 0.85f),               // cellGroove
                 Rgba(53, 96, 72),                      // btnFace
                 Rgba(182, 158, 194, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -452,7 +452,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(16, 58, 52, 0.9775f),             // cellBg
+                Rgba(16, 58, 52, 0.75f),               // cellBg
                 Rgba(5, 45, 42, 0.85f),                // cellGroove
                 Rgba(0, 63, 67),                       // btnFace
                 Rgba(190, 137, 148, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -492,7 +492,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(30, 60, 71, 0.9775f),             // cellBg
+                Rgba(30, 60, 71, 0.75f),               // cellBg
                 Rgba(21, 47, 57, 0.85f),               // cellGroove
                 Rgba(32, 63, 85),                      // btnFace
                 Rgba(186, 145, 122, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -532,7 +532,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(40, 89, 95, 0.9775f),             // cellBg
+                Rgba(40, 89, 95, 0.75f),               // cellBg
                 Rgba(30, 73, 81, 0.85f),               // cellGroove
                 Rgba(22, 95, 116),                     // btnFace
                 Rgba(206, 154, 145, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -585,11 +585,16 @@ namespace FUI::Theme
                 // ★These carry their OWN alpha now (Grid reads it instead of
                 // forcing 1.0). Grooves and faces never overlap, so what is
                 // written here is what lands on screen.
-                // ★The face now carries what the old stack composited to:
-                // groove .85 under face .85 = .9775 effective, and the colour
-                // that pair landed on. The groove is no longer drawn (the gap
-                // IS the panel), so without this every cell would lighten.
-                Rgba(43, 88, 102, 0.9775f),             // cellBg
+                // ★The COLOUR is what the old two-layer stack composited to
+                // (groove .85 under face .85); the groove is no longer drawn --
+                // the gap IS the panel.
+                // ★The ALPHA no longer follows that arithmetic. Carrying it to
+                // .9775 made the cells a near-solid sheet, which is a
+                // translucent skin that is not translucent anywhere the player
+                // actually looks -- the board is nearly all cells. .75 is
+                // chosen, not derived: the cell keeps its own colour and the
+                // room still shows through it.
+                Rgba(43, 88, 102, 0.75f),               // cellBg
                 Rgba(34, 72, 86, 0.85f),                // cellGroove (inner shadow only)
                 Rgba(42, 92, 122),                      // btnFace
                 Rgba(190, 158, 166, 0.50f),             // bagOpen: pale, half strength
@@ -618,7 +623,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(46, 41, 61, 0.9775f),             // cellBg
+                Rgba(46, 41, 61, 0.75f),               // cellBg
                 Rgba(38, 30, 48, 0.85f),               // cellGroove
                 Rgba(64, 40, 64),                      // btnFace
                 Rgba(135, 151, 113, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -658,7 +663,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(79, 80, 107, 0.9775f),            // cellBg
+                Rgba(79, 80, 107, 0.75f),              // cellBg
                 Rgba(68, 65, 88, 0.85f),               // cellGroove
                 Rgba(102, 79, 113),                    // btnFace
                 Rgba(163, 170, 130, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -698,7 +703,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(63, 84, 109, 0.9775f),            // cellBg
+                Rgba(63, 84, 109, 0.75f),              // cellBg
                 Rgba(54, 68, 91, 0.85f),               // cellGroove
                 Rgba(81, 84, 121),                     // btnFace
                 Rgba(181, 165, 127, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -738,7 +743,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(101, 74, 92, 0.9775f),            // cellBg
+                Rgba(101, 74, 92, 0.75f),              // cellBg
                 Rgba(85, 60, 74, 0.85f),               // cellGroove
                 Rgba(120, 74, 87),                     // btnFace
                 Rgba(130, 176, 152, 0.5f),             // bagOpen (complement, so it never reads as the panel)
@@ -782,7 +787,7 @@ namespace FUI::Theme
                 true, true,                            // translucent + bevelChrome
                 true,                                  // lightPanel
                 true,                                  // engravedCells
-                Rgba(129, 94, 109, 0.9775f),           // cellBg
+                Rgba(129, 94, 109, 0.75f),             // cellBg
                 Rgba(111, 80, 91, 0.85f),              // cellGroove
                 Rgba(147, 95, 101),                    // btnFace
                 Rgba(240, 223, 168, 0.5f),             // bagOpen (the leaf)

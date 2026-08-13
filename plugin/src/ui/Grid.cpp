@@ -6690,10 +6690,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // unpainted, which is the only value that actually equals the
             // panel — painting the panel's own colour there would stack a
             // second coat and come out darker, not identical.
-            // ★The cell face carries the alpha the OLD two-layer stack
-            // composited to (groove .85 under face .85 = .9775). Taking the
-            // groove away without that would have lightened every cell,
-            // and only the divider was meant to change.
+            // ★The cell face carries the COLOUR the old two-layer stack
+            // composited to (groove .85 under face .85). Taking the groove
+            // away without that would have lightened every cell, and only
+            // the divider was meant to change. Its alpha is the skin's own
+            // choice of how much room shows through -- not that arithmetic.
             const float g = Theme::kGrooveW * Theme::Scale();
             const ImU32 face  = Theme::Col(sk.cellBg);
             const ImU32 inner = Theme::Col(sk.cellGroove, sk.cellGroove.w * 0.85f);
@@ -6733,7 +6734,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // Cell edges: the cell's top and left go DARK and its bottom
             // and right go LIGHT, which is the sunken read (light from
             // the top-left, rule 105).
-            const float thin = 1.0f - sk.winBg.w;   // .42 Dark / .62 Clear
+            const float thin = 1.0f - sk.winBg.w;   // .25 Dark / .40 Clear
             // ★Strength follows the panel's own alpha: the line is drawn
             // ON the panel, and the less panel there is the harder it has
             // to work. Derived, so a future translucent skin needs no new
