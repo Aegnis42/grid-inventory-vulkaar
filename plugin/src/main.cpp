@@ -1570,6 +1570,27 @@ namespace
         LoadItemDefs();
         LoadFlatIconDefs();
 
+        // ★★★AND THE UI INI, HERE -- not when a window first asks for its
+        // place. WinManager loads it lazily from ApplyNext, so until the
+        // INVENTORY had been opened once nothing in that file was in effect;
+        // and the wheel does not use ApplyNext at all, because it is a
+        // full-screen overlay with no managed window.
+        //
+        // ★★That made the quick wheel come up in the wrong skin AND with
+        // every icon a category drawing, on a machine whose pak was complete:
+        // `!caplight` is part of every cache KEY, so a wheel drawn before the
+        // ini was read hashed its lookups against the default lamp (0,0) and
+        // missed a pak captured at the player's own angle -- ALL of it, every
+        // time, until a bag was opened. Which is why the file's own comment
+        // ("loaded BEFORE any icon is asked for") read as true and was not:
+        // it describes the order INSIDE Load, and Load itself came late.
+        //
+        // ★A settings file is read once, at load, before anything can ask a
+        // question it answers. Wheeler::LoadSettings already had to reach
+        // past this for `!wheelon` alone (see its comment); that is the same
+        // bug reported once and fixed one key at a time.
+        FUI::WinManager::GetSingleton()->Load();
+
         FUI::UIRoot::SetVisibilityCallbacks(
             []() {   // menu shown
                 LoadCategoryDefs();   // hot-reload category defaults (H7)

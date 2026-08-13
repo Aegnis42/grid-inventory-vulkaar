@@ -98,6 +98,11 @@ namespace FUI::Wheeler
         bool  g_open = false;
         float g_t = 0.0f;
         int   g_dir = 0;
+        // ★Diagnostic only: armed on open, spent by the first fully-open frame
+        // of the medallion pass. Per OPEN rather than per session, because the
+        // question it answers ("did the pak answer this time") can change when
+        // something else reads the settings file behind us.
+        bool  g_diagIcons = false;
         // ★Groups are a LIST now, not a pair. Stage 1 of replacing a separate
         // quick-menu mod: the third group will be item quick-slots, and it has
         // to be able to arrive as one table row rather than as a third branch
@@ -2433,6 +2438,7 @@ namespace FUI::Wheeler
             ResetVisitState();
             ResetSlotAngles();    // every open starts square
             ClearDrops();         // ...and with no trail from last time
+            g_diagIcons = true;   // report where this open's pictures came from
             g_open = true;
             g_dir = 1;
             // ★★Opens on the group it CLOSED on. It used to reset to PRESET
@@ -2970,6 +2976,18 @@ namespace FUI::Wheeler
         // ★Each rides its OWN slot, from slotProgress above -- same stagger on
         // the way in, same keep-the-pick on the way out.
         {
+            // ★★DIAGNOSTIC. "Every icon is a drawing" and "the pak has no
+            // sprite for these items" look identical on screen and identical
+            // in the log -- a key that misses queues a capture, and the queue
+            // only turns while the INVENTORY is open, so neither case ever
+            // prints a capture line. That ambiguity cost a wrong diagnosis
+            // (read as a coverage gap; it was the capture lamp defaulting to
+            // 0,0 because the ui ini had not been read yet), so the two are
+            // told apart here, once per open, by counting what the draw
+            // actually resolved. The LAMP is printed beside the counts because
+            // it is half of every cache key: a whole-wheel miss with a
+            // non-zero pak is that number being wrong.
+            int diagHit = 0, diagMiss = 0;
             for (int i = 0; i < kSlots; ++i) {
                 if (!Filled(shownGroup, i)) continue;
                 const float lt = slotProgress(i);
@@ -3001,6 +3019,9 @@ namespace FUI::Wheeler
                 if (auto* face = G(shownGroup).face(i)) {
                     auto* cache = IconCache::GetSingleton();
                     const auto* icon = face ? cache->Get(face) : nullptr;
+                    // counted BEFORE the fallback, which is the only point at
+                    // which the two answers are still distinguishable
+                    if (icon) ++diagHit; else ++diagMiss;
                     // ★★A miss here is "not loaded YET", not "no icon". The
                     // sprite pak survives a restart; the D3D texture does not,
                     // and nothing uploads an item's sprite until something
@@ -3091,6 +3112,18 @@ namespace FUI::Wheeler
                         ImVec2(0, 0), ImVec2(1, 1),
                         (kRed & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
                 }
+            }
+            // ★Held until the wheel is FULLY open. Slots fade in one at a
+            // time, so an early frame has visited only the first few and would
+            // report a partial wheel as the whole answer -- the same "counted
+            // what happened to be there" mistake this line exists to end.
+            if (g_diagIcons && ge >= 1.0f) {
+                g_diagIcons = false;
+                SKSE::log::info(
+                    "[WHEEL] icons: {} from cache, {} fell back to a drawing "
+                    "(group {}, caplight {:.0f},{:.0f})",
+                    diagHit, diagMiss, G(shownGroup).title,
+                    Theme::CaptureLightAz(), Theme::CaptureLightEl());
             }
         }
 
