@@ -1687,7 +1687,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // be a third stroke there — plus it is the same near-invisible
             // rust the carve was brought in to replace.
             if (a_viewIdx != 0 && !sk.engravedCells && !sk.translucent) {
-                dl->AddRect(base, ImVec2(base.x + gridW, base.y + gridH), Theme::Acc(0.20f));
+                // ★Half a pixel in, for the reason the doll's slot border
+                // carries: AddRect strokes ON the path, so the outer half of
+                // the line sits past base+gridW -- and a board whose right edge
+                // lands on its column's clip loses it.
+                dl->AddRect(ImVec2(base.x + 0.5f, base.y + 0.5f),
+                            ImVec2(base.x + gridW - 0.5f, base.y + gridH - 0.5f),
+                            Theme::Acc(0.20f));
             }
 
             // GI28: the cell the last action aimed to empty, fading out. If the
@@ -1761,9 +1767,24 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the boundary, so it needs 1px clearance on BOTH sides; a groove
             // is carved AFTER the cell, so the leading edge takes none and the
             // trailing edge takes the full groove.
-            const float shadeIn0 = sk.engravedCells ? 0.0f : 1.0f;
+            // ★★The clearance has to MATCH THE DIVIDER, and 1.0 only ever
+            // matched a 1px hairline. An ink skin rules its cells with a ~3px
+            // mark, so the shade covered part of it and left bare paper on
+            // both sides -- a bright seam running through every multi-cell
+            // item, which is the opposite of what the clearance is for. Ask
+            // the skin how wide its line is instead of assuming.
+            // ★★INK CLEARS NOTHING. Its rules are drawn after this pass, on
+            // top, so the ground fills the cell edge to edge -- and the two
+            // stop having to agree on a number. They could not: the mark snaps
+            // to whole pixels and the cell boundary does not, so a clearance of
+            // "half the width" landed a fraction either side and the grid was
+            // covered at some columns and left a bright seam at others. The
+            // fix is not a better fraction, it is not needing one.
+            const float shadeIn0 = sk.engravedCells ? 0.0f
+                                 : Theme::InkChrome() ? 0.0f : 1.0f;
             const float shadeIn1 = sk.engravedCells
-                ? Theme::kGrooveW * Theme::Scale() * 0.5f : 1.0f;
+                ? Theme::kGrooveW * Theme::Scale() * 0.5f
+                : Theme::InkChrome() ? 0.0f : 1.0f;
             // ★★1.0.5 — TRIED AND REVERTED: making a multi-cell item one
             // seamless surface (skip the inset where the neighbour is the same
             // item) and drawing the seam back on top as a black low-alpha line.
@@ -2960,6 +2981,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
             DrawGridChrome(a_view, a_viewIdx, base);      // pass 1
             DrawOccupancyPass(a_view, base);              // pass 2
+            DrawInkLattice(ImGui::GetWindowDrawList(), base,
+                           a_view.cols, a_view.rows);     // pass 2b (ink only)
             // (the old pass 3 — rarity HALO — is gone: rarity is drawn as the
             //  cell's ground inside DrawOccupancyPass now. See Grid.h.)
             DrawItemsPass(a_view, base);                  // pass 4
@@ -6364,7 +6387,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // the figure itself is dark, so the ring merges with it into a smudge
         // — the same trap the title fell into. Skins whose ink is dark get the
         // figure alone; the picture under it is what they contrast against.
-        if (!Theme::S().lightPanel || Theme::InkNeedsOutline()) {
+        // ★★An INK skin takes the outline back, even though its panel is pale
+        // and its ink is dark. The rule above is about the PANEL; this figure
+        // sits on an item picture and, in this skin, is drawn in the clay
+        // accent -- a mid-tone that has neither the panel's lightness nor the
+        // ink's darkness to lean on. The ring is what gives it an edge on a
+        // bright sack and on a black boot alike.
+        if (!Theme::S().lightPanel || Theme::InkNeedsOutline() || Theme::InkChrome()) {
             const ImU32 oc = IM_COL32(0, 0, 0, 255);
             for (int oy = -1; oy <= 1; ++oy) {
                 for (int ox = -1; ox <= 1; ++ox) {
@@ -6375,7 +6404,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
         // the count already carries a full black outline, so the fill can be
         // the plain emphasis colour on any panel — light or dark
-        a_dl->AddText(tp, Theme::Val(), a_text);
+        // ★White on an ink skin, not the clay accent. The figure sits on an
+        // item picture and carries a full black ring, so white is the one fill
+        // that keeps its distance from every sprite underneath -- the clay is a
+        // mid-tone and met the leather bags halfway.
+        a_dl->AddText(tp, Theme::InkChrome() ? IM_COL32(255, 255, 255, 255)
+                                             : Theme::Val(), a_text);
     }
 
     // ★See Grid.h. Drawn immediately before the sprite it belongs to, from the
@@ -6679,12 +6713,47 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // accent hairline on the merchant's — the two halves of the same screen
     // read as different UIs. The lattice is a SKIN decision, so it lives in
     // one function and every board asks for it.
+    // ★★The ink skin's lattice, drawn AFTER the occupied ground instead of
+    // under it. Every other skin draws its divider first and has the ground
+    // step around it, which works because those dividers are one pixel wide on
+    // a boundary the ground can dodge. A brush mark is three pixels and snaps
+    // to the pixel grid; the ground does not, so "dodge half the width" was
+    // right at some columns and wrong at others -- the grid showed through a
+    // few lines and vanished at the rest. Drawing on top is the same answer the
+    // open bag's tint already gives: the cells stay visible through whatever is
+    // laid on them.
+    void DrawInkLattice(ImDrawList* dl, const ImVec2& base, int a_cols, int a_rows)
+    {
+        if (!dl || !Theme::InkChrome()) return;
+        const auto& sk = Theme::S();
+        const float gridW = a_cols * CellPx();
+        const float gridH = a_rows * CellPx();
+        const float ith = Theme::InkRulePx();
+        const float oth = Theme::InkEdgePx();
+        const ImU32 ic = Theme::Col(sk.ink, 0.69f);
+        const ImU32 oc = Theme::Col(sk.ink, 0.85f);
+        for (int c = 1; c < a_cols; ++c) {
+            Theme::InkRule(dl, ImVec2(base.x + c * CellPx(), base.y), gridH, ith, ic, true);
+        }
+        for (int r = 1; r < a_rows; ++r) {
+            Theme::InkRule(dl, ImVec2(base.x, base.y + r * CellPx()), gridW, ith, ic);
+        }
+        Theme::InkStroke(dl, base, gridW, oth, oc);
+        Theme::InkStroke(dl, ImVec2(base.x, base.y + gridH), gridW, oth, oc);
+        Theme::InkStroke(dl, base, gridH, oth, oc, true);
+        Theme::InkStroke(dl, ImVec2(base.x + gridW, base.y), gridH, oth, oc, true);
+    }
+
     void DrawCellLattice(ImDrawList* dl, const ImVec2& base, int a_cols, int a_rows)
     {
         const auto& sk = Theme::S();
         const float gridW = a_cols * CellPx();
         const float gridH = a_rows * CellPx();
-        if (sk.engravedCells) {
+        if (Theme::InkChrome()) {
+            // ★★Drawn LATE, from DrawInkLattice, not here. See its comment:
+            // the marks go OVER the occupied ground rather than being cleared
+            // around by it.
+        } else if (sk.engravedCells) {
             // ★TILES ON THE PANEL, not a carved lattice. The divider is
             // the WINDOW itself: the gap between cells is simply left
             // unpainted, which is the only value that actually equals the

@@ -1,13 +1,19 @@
 #include "ui/Theme.h"
 
+#include <SKSE/SKSE.h>
+
 #include "ui/IconCache.h"   // IconStyleSlot(): which style's values are live
 #include "ui/Lang.h"        // GaugeInputHint(): the typing note is translated
+
+#include <d3d11.h>   // ReloadInkArt releases the sheet's SRV/texture
 
 #include <imgui_internal.h>   // ImTextCharFromUtf8 (TextInkCentered)
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
+#include <unordered_map>
 
 namespace FUI::Theme
 {
@@ -805,6 +811,87 @@ namespace FUI::Theme
                 Rgba(92, 30, 44),                      // lpBtnOnInk
                 Rgba(62, 39, 40),                      // lpRule
             },
+            {   // Sumi — 먹 · 종이 위의 붓
+            // ★★Every value here was MEASURED off the reference design, not
+            // picked. The three colours are all there are -- paper, ink, clay
+            // -- and everything else is one of them at an alpha.
+            // ★shade: the wash behind a worn item measured #ADA9A1, and
+            // reversing that through paper and ink gave 0.346 / 0.349 / 0.352
+            // per channel. It is not a grey someone liked; it is ink at a
+            // third. 0.37 rather than 0.35 because this paper sits 16 luma
+            // below the reference sheet and the mark has to keep its distance.
+                "Sumi",
+                Rgba(35, 29, 21, 0.19f),                // acc — rules, hairlines
+                // ★★hi is NOT sel. The clay accent measures 2.8:1 on this
+                // paper, which is a SURFACE colour -- a tab fill, a button, a
+                // title stroke. Put it on a badge NUMBER and the number cannot
+                // be read. The reference used a far deeper brick for anything
+                // that had to be legible, and so does this.
+                Rgba(83, 49, 42),                       // hi
+                Rgba(35, 29, 21),                       // ink
+                Rgba(35, 29, 21, 0.58f),                // inkDim
+                Rgba(239, 230, 210),                    // winBg — paper
+                Rgba(35, 29, 21, 0.30f),                // glyph
+                Rgba(35, 29, 21, 0.30f),                // shade
+                Rgba(173, 127, 119),                    // sel — clay
+                Rgba(173, 127, 119),                    // filled
+                4.0f, 3.0f,                             // rounding / titleSpacing
+                false, false, false, false,             // no cornerFade/strip/glow/◇
+                false,                                  // ★NOT tornFrame: the
+                                                        // edge is a brush mark,
+                                                        // not a tear
+                false, false,                           // not translucent, no bevel
+                true,                                   // lightPanel
+                false,                                  // engravedCells
+                Rgba(35, 29, 21, 0.06f),                // cellBg — a seat
+                {}, {},                                 // groove / btnFace
+                Rgba(173, 127, 119, 0.55f),             // bagOpen — clay, = sel
+                Rgba(83, 49, 42),                       // goldNum — deep, = hi
+                24.0f,                                  // titleSize
+                Rgba(214, 200, 172),                    // lpBtn
+                Rgba(224, 212, 188),                    // lpBtnHov
+                Rgba(198, 182, 150),                    // lpBtnAct
+                Rgba(35, 29, 21),                       // lpBorder
+                Rgba(173, 127, 119),                    // lpBtnOnFace — clay stamp
+                Rgba(247, 242, 232),                    // lpBtnOnInk
+                Rgba(35, 29, 21),                       // lpRule
+                "paper_sumi.png",                       // paper
+            },
+            {   // Sumi Parchment — 먹 · 낡은 양피지
+            // ★The SAME skin with a darker sheet. Only two values move: the
+            // paper and the shade that has to keep its distance from it. Every
+            // sprite is white+alpha and takes its colour from the tokens, so
+            // the two share one art set entirely.
+                "Sumi Parchment",
+                Rgba(35, 29, 21, 0.19f),
+                Rgba(83, 49, 42),
+                Rgba(35, 29, 21),
+                Rgba(35, 29, 21, 0.58f),
+                Rgba(227, 211, 176),                    // winBg — aged sheet
+                Rgba(35, 29, 21, 0.30f),
+                Rgba(35, 29, 21, 0.34f),                // shade — +0.04, see above
+                Rgba(173, 127, 119),
+                Rgba(173, 127, 119),
+                4.0f, 3.0f,
+                false, false, false, false,
+                false,
+                false, false,
+                true,
+                false,
+                Rgba(35, 29, 21, 0.06f),
+                {}, {},
+                Rgba(173, 127, 119, 0.55f),
+                Rgba(83, 49, 42),
+                24.0f,
+                Rgba(203, 186, 152),
+                Rgba(214, 199, 168),
+                Rgba(186, 168, 132),
+                Rgba(35, 29, 21),
+                Rgba(173, 127, 119),
+                Rgba(247, 242, 232),
+                Rgba(35, 29, 21),
+                "paper_parchment.png",
+            },
         };
 
         // ★Initialised FROM the exported defaults, never from a second copy of
@@ -1094,6 +1181,424 @@ namespace FUI::Theme
         // parchment it is the brown the body text already uses. Each skin
         // already decided what "written on this panel" looks like.
         return sk.lightPanel ? Col(sk.ink, a_alpha) : Col(sk.acc, a_alpha);
+    }
+
+    // ---- ink skins: the paper sheet -----------------------------------------
+    namespace
+    {
+        constexpr const char* kInkDir = "Data/SKSE/Plugins/GridInventory_ink/";
+        // ★Keyed by the FILE NAME, not by a slot or an index. Two skins can
+        // name the same sheet, and a skin inserted above them must not hand
+        // one skin's art to another -- the same reason LightItemShadow()
+        // matches on name.
+        std::unordered_map<std::string, IconCache::Icon> g_paper;
+
+        // The marks. One set serves every ink skin: they are white + alpha and
+        // take their colour from the caller.
+        constexpr const char* kStroke = "stroke_0.png";   // every brush line
+        constexpr const char* kRule   = "rule_2.png";     // the fine ruled line
+        constexpr const char* kCorner = "corner_0.png";   // the frame's corner
+        // ★The WHEEL's title banner, reused. The quick wheel already had a
+        // painted plate behind its group name; making a second one for the
+        // inventory would be two marks that mean the same thing and look
+        // almost alike, which is how a UI stops reading as one hand.
+        constexpr const char* kTitle  = "title.png";
+        // ★A stamped seal. Its RED is its identity -- a 낙관 is vermilion the
+        // way ink is black -- so it is drawn in its own colour rather than the
+        // skin's clay accent, which is a surface tone and would read as a
+        // faded print. Still stored white+alpha: what is baked in is the
+        // CRUMBLE of the pad, not the pigment.
+        constexpr const char* kSeal   = "seal.png";
+        constexpr ImU32       kSealRed = IM_COL32(0xAA, 0x32, 0x19, 255);
+        constexpr int         kWashes = 12;               // wash_0 .. wash_11
+
+        // corner_0's arm geometry, measured off the sprite and expressed as
+        // fractions of its own box so it survives being drawn at any size.
+        // See Theme.h InkFrame for why a constant cannot replace these.
+        constexpr float kArmY  = 0.053f;   // horizontal arm centreline / height
+        constexpr float kArmTH = 0.089f;   // ...and its thickness
+        constexpr float kArmX  = 0.062f;   // vertical arm centreline / width
+        constexpr float kArmTV = 0.099f;
+        constexpr float kArmRun = 0.50f;   // a side starts halfway along the arm
+
+        [[nodiscard]] const IconCache::Icon* InkArt(const std::string& a_name)
+        {
+            auto it = g_paper.find(a_name);
+            if (it == g_paper.end()) {
+                // ★A FAILED load is cached too, as an empty Icon. Without that
+                // a missing file costs a probe every frame -- and the wheel
+                // already learned the other half of this, that a cached
+                // failure must be droppable (see ReloadInkArt).
+                IconCache::Icon ic{};
+                IconCache::LoadPngTexture(kInkDir + a_name, ic);
+                if (!ic.srv) SKSE::log::warn("[THEME] ink art missing: {}{}",
+                                             kInkDir, a_name);
+                it = g_paper.emplace(a_name, ic).first;
+            }
+            return it->second.srv ? &it->second : nullptr;
+        }
+
+        // One sprite, stretched into a rect. Vertical marks reuse the same
+        // horizontal sprite by swapping the uv corners -- a 90 degree turn
+        // costs nothing and keeps one file doing both jobs.
+        // One sprite into a rect. a_u0/a_u1 select how much of its LENGTH is
+        // used; vertical marks reuse the same horizontal sprite by turning the
+        // uv corners, which costs nothing and keeps one file doing both jobs.
+        void Mark(ImDrawList* a_dl, const IconCache::Icon* a_ic,
+                  ImVec2 a_min, ImVec2 a_max, ImU32 a_col, bool a_vert,
+                  float a_u0 = 0.0f, float a_u1 = 1.0f)
+        {
+            if (!a_dl || !a_ic) return;
+            // ★★★SNAP TO A CONSTANT WIDTH, not to the nearest pixel on each
+            // side. Rounding the two edges independently makes the WIDTH
+            // depend on where the line happened to fall: a 2.4px rule at x=100
+            // rounds to 2px and at x=100.5 to 3px. Cells sit at fractional
+            // multiples of the cell size, so each line drew at its own phase
+            // and the grid came out with a few lines visibly heavier than the
+            // rest -- one whole line at a time, which is what gave it away.
+            const float tw = a_max.x - a_min.x, tht = a_max.y - a_min.y;
+            if (tw < 6.0f || tht < 6.0f) {
+                if (tw <= tht) {                       // a vertical mark
+                    const float w = (std::max)(1.0f, std::round(tw));
+                    a_min.x = std::round(a_min.x + (tw - w) * 0.5f);
+                    a_max.x = a_min.x + w;
+                } else {                               // ...a horizontal one
+                    const float h = (std::max)(1.0f, std::round(tht));
+                    a_min.y = std::round(a_min.y + (tht - h) * 0.5f);
+                    a_max.y = a_min.y + h;
+                }
+            }
+            const auto tex = reinterpret_cast<ImTextureID>(a_ic->srv);
+            if (!a_vert) {
+                a_dl->AddImage(tex, a_min, a_max,
+                               ImVec2(a_u0, 0.0f), ImVec2(a_u1, 1.0f), a_col);
+                return;
+            }
+            a_dl->AddImageQuad(tex,
+                ImVec2(a_min.x, a_max.y), ImVec2(a_min.x, a_min.y),
+                ImVec2(a_max.x, a_min.y), ImVec2(a_max.x, a_max.y),
+                ImVec2(a_u0, 0.0f), ImVec2(a_u1, 0.0f),
+                ImVec2(a_u1, 1.0f), ImVec2(a_u0, 1.0f), a_col);
+        }
+
+        // ★★How much of the sprite a mark of this size should USE. Stretching
+        // the whole 25:1 stroke into an 82px slot edge compresses it 16 times,
+        // and every dry gap and swell in it averages out -- what lands is a
+        // flat bar, which is exactly the "too straight, too angular" the doll
+        // came back with. Taking a SECTION instead keeps the brush at its own
+        // proportion; only lines longer than the sprite can carry get stretched.
+        // a_key slides which section, so neighbouring marks are not clones.
+        void MarkSpan(const IconCache::Icon* a_ic, float a_len, float a_th,
+                      unsigned int a_key, float& a_u0, float& a_u1)
+        {
+            a_u0 = 0.0f;
+            a_u1 = 1.0f;
+            if (!a_ic || a_ic->h <= 0 || a_th <= 0.01f) return;
+            const float natural = static_cast<float>(a_ic->w) / a_ic->h * a_th;
+            if (natural <= a_len * 1.02f) return;      // must stretch: use it all
+            const float span = (std::max)(0.12f, a_len / natural);
+            const float slide = static_cast<float>((a_key * 2654435761u >> 8) & 0xFFFF)
+                              / 65535.0f;
+            a_u0 = (1.0f - span) * slide;
+            a_u1 = a_u0 + span;
+        }
+    }
+
+    bool InkChrome()
+    {
+        const char* p = S().paper;
+        return p && *p;
+    }
+
+    // ★★NOT a fraction of GetWindowWidth(). Measured in game: the doll sits in
+    // a 335px child while the board sits in another, so one formula written as
+    // "0.61% of the window" handed each panel a different answer -- the doll's
+    // border came out 2px where the spec meant 6.7, and nothing on screen said
+    // which width had been asked. The weights are a property of the UI's SCALE,
+    // which is the same number everywhere, not of whichever child happens to be
+    // current.
+    float InkRulePx()  { return (std::max)(1.0f, std::round(2.0f * Scale())); }
+    float InkEdgePx()  { return (std::max)(1.0f, std::round(3.0f * Scale())); }
+    // ★2.5, down from 4. And it moves TWO things at once, which is why 4 read
+    // as so heavy: the doll's corner is sized from this (InkCornerFor), so at 4
+    // the corner mark came out 45px on an 82px slot -- more than half the cell
+    // was corner. Thinning the line shrinks the flourish with it.
+    // ★NOT rounded, unlike the two above. This one feeds a corner SIZE as well
+    // as a line, and rounding it to whole pixels quantises the flourish for no
+    // gain -- the line it produces is snapped later, where snapping belongs.
+    float InkHeavyPx() { return (std::max)(1.0f, 2.5f * Scale()); }
+
+    void InkStroke(ImDrawList* a_dl, ImVec2 a_from, float a_len, float a_th,
+                   ImU32 a_col, bool a_vert, bool a_whole)
+    {
+        if (a_len <= 0.5f || a_th <= 0.05f) return;
+        const auto* ic = InkArt(kStroke);
+        // ★Overshoot half a thickness at each end. Four marks butted at a
+        // corner leave a notch; the reference has them CROSS, one running a
+        // little past the other, and half a width is the least that closes it.
+        // ★★NOT when the whole sprite is used. The overshoot exists to close a
+        // join between two CUT ends; a whole mark already ends in its own
+        // taper, so the extra only pushed it outward -- which is how the title
+        // stroke kept escaping the window however carefully its start was
+        // clamped. The clamp was right; something downstream was undoing it.
+        const float over = a_whole ? 0.0f : a_th * 0.5f;
+        const float len = a_len + over * 2.0f;
+        const ImVec2 from(a_vert ? a_from.x : a_from.x - over,
+                          a_vert ? a_from.y - over : a_from.y);
+        const unsigned int key = static_cast<unsigned int>(
+            std::lround(from.x * 7.0f + from.y * 13.0f));
+        float u0 = 0.0f, u1 = 1.0f;
+        if (!a_whole) MarkSpan(ic, len, a_th, key, u0, u1);
+        const float h = a_th * 0.5f;
+        Mark(a_dl, ic,
+             a_vert ? ImVec2(from.x - h, from.y) : ImVec2(from.x, from.y - h),
+             a_vert ? ImVec2(from.x + h, from.y + len)
+                    : ImVec2(from.x + len, from.y + h),
+             a_col, a_vert, u0, u1);
+    }
+
+    void RuleLine(ImDrawList* a_dl, ImVec2 a_from, ImVec2 a_to)
+    {
+        if (!a_dl) return;
+        if (!InkChrome()) {
+            a_dl->AddLine(a_from, a_to, Rule());
+            return;
+        }
+        const bool vert = std::fabs(a_to.y - a_from.y) > std::fabs(a_to.x - a_from.x);
+        const float len = vert ? (a_to.y - a_from.y) : (a_to.x - a_from.x);
+        InkStroke(a_dl, a_from, std::fabs(len), InkRulePx(),
+                  Col(S().ink, 0.55f), vert, /*whole=*/true);
+    }
+
+    void InkRule(ImDrawList* a_dl, ImVec2 a_from, float a_len, float a_th,
+                 ImU32 a_col, bool a_vert)
+    {
+        if (a_len <= 0.5f || a_th <= 0.05f) return;
+        const auto* ic = InkArt(kRule);
+        const unsigned int key = static_cast<unsigned int>(
+            std::lround(a_from.x * 7.0f + a_from.y * 13.0f));
+        float u0 = 0.0f, u1 = 1.0f;
+        MarkSpan(ic, a_len, a_th, key, u0, u1);
+        const float h = a_th * 0.5f;
+        Mark(a_dl, ic,
+             a_vert ? ImVec2(a_from.x - h, a_from.y) : ImVec2(a_from.x, a_from.y - h),
+             a_vert ? ImVec2(a_from.x + h, a_from.y + a_len)
+                    : ImVec2(a_from.x + a_len, a_from.y + h),
+             a_col, a_vert, u0, u1);
+    }
+
+
+    float InkCornerFor(float a_th) { return a_th / kArmTH; }
+
+    void InkFrame(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max, ImU32 a_col,
+                  float a_corner)
+    {
+        const auto* cn = InkArt(kCorner);
+        if (!a_dl || !cn) return;
+        const float w = a_max.x - a_min.x, h = a_max.y - a_min.y;
+        if (w < 6.0f || h < 6.0f) return;
+        // ★★SHRINK THE CORNER, never drop it. The first cut fell back to four
+        // plain strokes when the box was small, and that is where the shape
+        // went wrong: a section of a brush has a CUT at both ends, so four of
+        // them meet at four square notches -- which is the "too angular" the
+        // doll came back with twice. The corner sprite exists precisely to be
+        // the thing that is not square there.
+        const float cs = (std::min)(a_corner, (std::min)(w, h) * 0.58f);
+        const float hy = kArmY * cs, hth = kArmTH * cs;   // top/bottom runs
+        const float vx = kArmX * cs, vth = kArmTV * cs;   // left/right runs
+        const float run = cs * kArmRun;
+        InkStroke(a_dl, ImVec2(a_min.x + run, a_min.y + hy), w - run * 2.0f, hth, a_col);
+        InkStroke(a_dl, ImVec2(a_min.x + run, a_max.y - hy), w - run * 2.0f, hth, a_col);
+        InkStroke(a_dl, ImVec2(a_min.x + vx, a_min.y + run), h - run * 2.0f, vth, a_col, true);
+        InkStroke(a_dl, ImVec2(a_max.x - vx, a_min.y + run), h - run * 2.0f, vth, a_col, true);
+        // ...corners last, over the joins and over the cuts.
+        const auto tex = reinterpret_cast<ImTextureID>(cn->srv);
+        const ImVec2 uv[4] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+        struct Q { ImVec2 o; int a, b, c, d; };   // uv order = flip
+        const Q corners[4] = {
+            { ImVec2(a_min.x, a_min.y),           0, 1, 2, 3 },   // as drawn
+            { ImVec2(a_max.x - cs, a_min.y),      1, 0, 3, 2 },   // mirrored X
+            { ImVec2(a_min.x, a_max.y - cs),      3, 2, 1, 0 },   // mirrored Y
+            { ImVec2(a_max.x - cs, a_max.y - cs), 2, 3, 0, 1 },   // both
+        };
+        for (const auto& q : corners) {
+            a_dl->AddImageQuad(tex, q.o, ImVec2(q.o.x + cs, q.o.y),
+                ImVec2(q.o.x + cs, q.o.y + cs), ImVec2(q.o.x, q.o.y + cs),
+                uv[q.a], uv[q.b], uv[q.c], uv[q.d], a_col);
+        }
+    }
+
+    void InkTitleMark(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max, ImU32 a_col)
+    {
+        const auto* ic = InkArt(kTitle);
+        if (!a_dl || !ic) return;
+        a_dl->AddImage(reinterpret_cast<ImTextureID>(ic->srv), a_min, a_max,
+                       ImVec2(0, 0), ImVec2(1, 1), a_col);
+    }
+
+    void InkSeal(ImDrawList* a_dl, ImVec2 a_centre, float a_size, float a_alpha)
+    {
+        const auto* ic = InkArt(kSeal);
+        if (!a_dl || !ic || a_size < 4.0f) return;
+        const int al = static_cast<int>(255.0f * std::clamp(a_alpha, 0.0f, 1.0f));
+        if (al <= 2) return;
+        const float h = a_size * 0.5f;
+        a_dl->AddImage(reinterpret_cast<ImTextureID>(ic->srv),
+            ImVec2(a_centre.x - h, a_centre.y - h),
+            ImVec2(a_centre.x + h, a_centre.y + h),
+            ImVec2(0, 0), ImVec2(1, 1),
+            (kSealRed & 0x00FFFFFF) | (static_cast<ImU32>(al) << IM_COL32_A_SHIFT));
+    }
+
+    void InkWash(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max, ImU32 a_col,
+                 unsigned int a_key)
+    {
+        if (!a_dl) return;
+        const float w = a_max.x - a_min.x, h = a_max.y - a_min.y;
+        if (w < 4.0f || h < 4.0f) return;
+        // ★A small bleed, not a generous one. The marks already end in a soft
+        // halo; a wide overspill on top of that put ink in the GAP between
+        // slots, which reads as a leak rather than as a wash crossing its cell.
+        const float bx = w * 0.02f, by = h * 0.02f;
+
+        // ★★ONE MARK PER SQUARE, TWO FOR A LONG CELL. These were painted as
+        // square patches, so stretching one down a tall slot pulls its
+        // horizontal strokes into streaks and the ink stops looking laid. Two
+        // marks butted together keep the brushwork at its own proportion, and
+        // the overlap where they meet is a second bleed for free.
+        const float ar = w / h;
+        const int n = (ar > 1.45f || ar < 0.69f) ? 2 : 1;
+        const bool stackY = (ar < 1.0f);
+
+        const auto one = [&](ImVec2 p0, ImVec2 p1, unsigned int k) {
+            const unsigned int m = k * 2654435761u;
+            const auto* ic = InkArt("wash_" + std::to_string((m >> 8) % 12) + ".png");
+            if (!ic) return;
+            const ImVec2 uv[4] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+            // ★A HALF TURN, never a quarter. These marks are laid in horizontal
+            // strokes; turning one on its side makes it obviously the same
+            // picture rotated, where flipping only changes which end is heavy.
+            const int f = static_cast<int>((m >> 20) & 3);
+            const int o[4][4] = { {0,1,2,3}, {1,0,3,2}, {3,2,1,0}, {2,3,0,1} };
+            a_dl->AddImageQuad(reinterpret_cast<ImTextureID>(ic->srv),
+                p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y),
+                uv[o[f][0]], uv[o[f][1]], uv[o[f][2]], uv[o[f][3]], a_col);
+        };
+
+        const ImVec2 q0(a_min.x - bx, a_min.y - by), q1(a_max.x + bx, a_max.y + by);
+        if (n == 1) {
+            one(q0, q1, a_key);
+            return;
+        }
+        // ★The two halves OVERLAP by a tenth. Butted exactly they leave a seam
+        // the eye finds immediately -- one straight edge in a shape that has no
+        // other straight edge anywhere.
+        if (stackY) {
+            const float mid = (q0.y + q1.y) * 0.5f, ov = (q1.y - q0.y) * 0.05f;
+            one(q0, ImVec2(q1.x, mid + ov), a_key);
+            one(ImVec2(q0.x, mid - ov), q1, a_key * 7919u + 13u);
+        } else {
+            const float mid = (q0.x + q1.x) * 0.5f, ov = (q1.x - q0.x) * 0.05f;
+            one(q0, ImVec2(mid + ov, q1.y), a_key);
+            one(ImVec2(mid - ov, q0.y), q1, a_key * 7919u + 13u);
+        }
+    }
+
+    bool PaperTexture(ImTextureID& a_out, ImVec2 a_size, unsigned int a_key,
+                      ImVec2& a_uv0, ImVec2& a_uv1)
+    {
+        const char* nm = S().paper;
+        if (!nm || !*nm) return false;
+        const auto* ic = InkArt(nm);
+        if (!ic) return false;
+        a_out = reinterpret_cast<ImTextureID>(ic->srv);
+
+        // The largest piece of the sheet that has the window's aspect. Working
+        // in uv space means the texture's pixel size never enters the result,
+        // so a sheet swapped for a bigger one needs no numbers changed here.
+        const float tw = static_cast<float>((std::max)(ic->w, 1));
+        const float th = static_cast<float>((std::max)(ic->h, 1));
+        const float want = (a_size.y > 0.5f) ? (a_size.x / a_size.y) : (tw / th);
+        float u = 1.0f, v = 1.0f;
+        if (tw / th > want) {
+            u = (th * want) / tw;      // sheet is wider than the window: trim u
+        } else {
+            v = (tw / want) / th;      // ...taller: trim v
+        }
+        // ★Slide the cut, do not centre it. Centring gives every window the
+        // same square inch, and the bags open in a row -- five identical
+        // sheets side by side is the one thing a paper texture must not be.
+        // Two cheap mixes off the key: enough to decorrelate, and stable, so a
+        // window keeps its own piece while it is open and after it moves.
+        const float fx = static_cast<float>((a_key * 2654435761u) >> 8 & 0xFFFF) / 65535.0f;
+        const float fy = static_cast<float>((a_key * 40503u + 12345u) >> 8 & 0xFFFF) / 65535.0f;
+        a_uv0 = ImVec2((1.0f - u) * fx, (1.0f - v) * fy);
+        a_uv1 = ImVec2(a_uv0.x + u, a_uv0.y + v);
+        return true;
+    }
+
+    bool PaperPanel(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max,
+                    unsigned int a_key, float a_fade)
+    {
+        ImTextureID tex{};
+        ImVec2 uv0, uv1;
+        const ImVec2 size(a_max.x - a_min.x, a_max.y - a_min.y);
+        if (!a_dl || size.x < 4.0f || size.y < 4.0f) return false;
+        if (!PaperTexture(tex, size, a_key, uv0, uv1)) return false;
+
+        // A 3x3 of quads: the middle is the sheet, the ring around it is the
+        // same sheet fading to nothing. Written as a vertex grid rather than
+        // nine AddImage calls because the alpha has to vary ACROSS a quad, and
+        // AddImage carries one colour for the whole thing.
+        const float f = (std::min)({ a_fade, size.x * 0.45f, size.y * 0.45f });
+        const float xs[4] = { a_min.x, a_min.x + f, a_max.x - f, a_max.x };
+        const float ys[4] = { a_min.y, a_min.y + f, a_max.y - f, a_max.y };
+        // uv follows the same stops, so the fade band shows the sheet's own
+        // pixels rather than a stretched copy of the edge row.
+        const float du = (uv1.x - uv0.x), dv = (uv1.y - uv0.y);
+        const float us[4] = { uv0.x, uv0.x + du * (f / size.x),
+                              uv1.x - du * (f / size.x), uv1.x };
+        const float vs[4] = { uv0.y, uv0.y + dv * (f / size.y),
+                              uv1.y - dv * (f / size.y), uv1.y };
+        const int   a[4]  = { 0, 255, 255, 0 };   // transparent at the outside
+
+        a_dl->PushTexture(tex);
+        a_dl->PrimReserve(9 * 6, 16);
+        const unsigned int base = a_dl->_VtxCurrentIdx;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                const unsigned int i = base + static_cast<unsigned int>(r * 4 + c);
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(i));
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(i + 1));
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(i + 5));
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(i));
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(i + 5));
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(i + 4));
+            }
+        }
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                // a corner of the ring is transparent on BOTH axes, so take
+                // the weaker of the two -- otherwise the corners stay opaque
+                // and the sheet keeps its square.
+                const int al = (std::min)(a[c], a[r]);
+                a_dl->PrimWriteVtx(ImVec2(xs[c], ys[r]), ImVec2(us[c], vs[r]),
+                                   IM_COL32(255, 255, 255, al));
+            }
+        }
+        a_dl->PopTexture();
+        return true;
+    }
+
+    void ReloadInkArt()
+    {
+        for (auto& [k, ic] : g_paper) {
+            if (ic.srv) ic.srv->Release();
+            if (ic.tex) ic.tex->Release();
+        }
+        const size_t n = g_paper.size();
+        g_paper.clear();
+        SKSE::log::info("[THEME] ink art dropped ({} sheet(s))", n);
     }
 
     ImU32 OccupiedGround()
@@ -1474,6 +1979,41 @@ namespace FUI::Theme
         if (!a_dl) return;
         const float r = FrameRounding();
         const ImVec2 p1(a_p.x + a_w, a_p.y + a_h);
+        // ★★INK: a laid stroke, not a filled well. Three marks -- the track,
+        // the fill over it, and a thin red rule beneath -- which is what the
+        // reference has and what the rest of this skin is made of. A rounded
+        // rectangle in the middle of a painted window is the one shape that
+        // says "widget" out loud.
+        if (InkChrome()) {
+            const float f = (std::max)(0.0f, (std::min)(1.0f, a_frac));
+            const float th = (std::max)(2.0f, a_h * 0.70f);
+            const float cy = a_p.y + a_h * 0.50f;
+            // ★★THE ARROWS LIVE INSIDE THIS RECT. The rounded well this
+            // replaces spanned the whole width and let its FILL start a step
+            // in; the well was a background, so covering the arrow zone cost
+            // nothing. A brush mark is not a background -- laid across the same
+            // span it paints over the left arrow and buries it. Both the track
+            // and the fill get the inner run, and the two steps stay bare.
+            const float sw = GaugeStepW();
+            const float ix = a_p.x + sw;
+            const float iw = (std::max)(0.0f, a_w - sw * 2.0f);
+            if (iw <= 1.0f) return;
+            // ★★WHOLE, which is also what keeps it inside its own box. A
+            // sectioned mark overshoots half a thickness at each end to close a
+            // corner join -- on a settings slider that overhang reached back
+            // over the row's left arrow and hid it. A whole mark ends in its
+            // own taper and needs no overshoot.
+            InkStroke(a_dl, ImVec2(ix, cy), iw, th, Col(S().ink, 0.26f),
+                      false, /*whole=*/true);
+            if (f > 0.0f) {
+                InkStroke(a_dl, ImVec2(ix, cy), iw * f, th, Col(S().ink, 0.92f),
+                          false, /*whole=*/true);
+            }
+            // ★No red rule under it. That mark belongs to the SPACE bar, where
+            // the reference puts it; repeating it under every slider turned a
+            // one-off accent into the loudest thing on the settings page.
+            return;
+        }
         a_dl->AddRectFilled(a_p, p1, GaugeTrack(), r);
         const float sw = GaugeStepW();
         const float inner = (std::max)(0.0f, a_w - sw * 2.0f);
@@ -1898,7 +2438,10 @@ namespace FUI::Theme
         if (!sk.translucent) win.w = 1.0f;
         // tornFrame: Theme::TornPanel paints the (opaque) fill instead, so the
         // ImGui bg rect must be transparent or it squares off the tears
-        c[ImGuiCol_WindowBg]         = sk.tornFrame ? ImVec4(0, 0, 0, 0) : win;
+        // ★An ink skin paints a SHEET for the same reason a torn one paints a
+        // silhouette: ImGui's own rect would sit on top of it. Same branch,
+        // same reason -- keep them together so neither is fixed alone.
+        c[ImGuiCol_WindowBg]         = (sk.tornFrame || sk.paper) ? ImVec4(0, 0, 0, 0) : win;
         // transparent: children must not paint over the window's frame chrome
         c[ImGuiCol_ChildBg]          = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
         // ★★A popup is a READING surface. `win` carries the skin's own alpha,

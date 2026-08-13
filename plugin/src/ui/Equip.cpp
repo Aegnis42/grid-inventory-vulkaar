@@ -1,4 +1,6 @@
 ﻿#include "ui/Equip.h"
+
+#include <SKSE/SKSE.h>
 #include "ui/Fallback.h"
 #include "game/Costume.h"
 #include "ui/Grid.h"
@@ -370,13 +372,60 @@ namespace FUI::Equip
             const auto it = a_eq.find(a_slot.id);
             const EquipEntry* eq = it != a_eq.end() ? &it->second : nullptr;
 
+            // ★★THE BORDER RECT IS HALF A PIXEL IN, and that is not a nicety.
+            // ImGui strokes a rect ON its path, so a 1px border straddles the
+            // edge: half of it lies OUTSIDE p0..p1. The doll's last column ends
+            // exactly on the panel's clip boundary -- measured in game, slot
+            // 1394.0 and clip 1394.0 -- so that outer half was clipped away and
+            // the right edge of every slot in that column drew at half weight.
+            // ★It was never an ink-skin bug. Every skin draws its slot border
+            // with AddRect, so every skin had it; the ink one only made it
+            // obvious by drawing a border thick enough to notice.
+            // The FILL still uses p0..p1: a cell's ground is the whole cell.
+            const ImVec2 e0(p0.x + 0.5f, p0.y + 0.5f);
+            const ImVec2 e1(p1.x - 0.5f, p1.y - 0.5f);
+
             // frame (v9: border only; filled slots get the skin's filled
             // accent + faint fill)
             // ★engravedCells: every slot wears the SAME heavy frame, worn or
             // not, and "worn" is said by the darker ground alone. A bright rim
             // on the worn ones turned the doll into a scatter of highlights —
             // the reference marks occupancy with ground, never with rim.
-            if (sk.engravedCells) {
+            if (Theme::InkChrome()) {
+                // ★★THE WASH LIVES HERE AND NOWHERE ELSE. The board draws its
+                // occupied ground as a flat rect and that split is deliberate:
+                // a doll slot is one cell standing alone, where an irregular
+                // blob reads; a board item can span 1x4, and a blob either
+                // smears when stretched to that or breaks into four stamps.
+                // See OccupiedGround() for why the two were unified in the
+                // first place -- this is a designed divergence, not the drift
+                // that comment warns about.
+                // ★Keyed by the slot's id, so a slot keeps its own blob for as
+                // long as it exists and its neighbours never match it.
+                if (eq) {
+                    unsigned int key = 2166136261u;
+                    for (const char* p = a_slot.id; p && *p; ++p) {
+                        key = (key ^ static_cast<unsigned char>(*p)) * 16777619u;
+                    }
+                    Theme::InkWash(dl, p0, p1, Theme::OccupiedGround(), key);
+                }
+                // ★A box of four marks, not a rectangle -- and the SAME box
+                // whether or not something is worn. The reference marks a worn
+                // slot with the wash alone; adding a second signal to the
+                // border turned the doll into a scatter of highlights, which
+                // is the note the engraved branch below already carries.
+                // ★★The SAME assembly the window uses, at slot size. Four
+                // separate strokes were the problem: a section of a brush is
+                // cut square at both ends, so a box of four met at four square
+                // notches -- and no amount of overshoot fixes a cut, it only
+                // makes it a longer cut. The corner mark is the piece that is
+                // not square, and it is what the reference has there.
+                const float th = Theme::InkHeavyPx();
+                Theme::InkFrame(dl,
+                    ImVec2(p0.x + 1.0f, p0.y + 1.0f),
+                    ImVec2(p1.x - 1.0f, p1.y - 1.0f),
+                    Theme::Col(sk.ink, 0.80f), Theme::InkCornerFor(th));
+            } else if (sk.engravedCells) {
                 // ★A doll slot IS a grid cell — same face, same carved shadow,
                 // no border and no drop shadow. It used to be a bordered card
                 // floating on the panel while the board next to it was tiles,
@@ -406,12 +455,12 @@ namespace FUI::Equip
                         ? Theme::OccupiedGround()
                         : Theme::Col(sk.filled, 0.05f), sk.rounding);
                 if (sk.cornerFade) {   // v10.4: equipped highlight = corner fade
-                    Theme::CornerFade(dl, p0, p1, Theme::Col(sk.filled, 0.70f));
+                    Theme::CornerFade(dl, e0, e1, Theme::Col(sk.filled, 0.70f));
                 } else {
-                    dl->AddRect(p0, p1, Theme::Col(sk.filled, 0.8f), sk.rounding);
+                    dl->AddRect(e0, e1, Theme::Col(sk.filled, 0.8f), sk.rounding);
                 }
             } else {
-                dl->AddRect(p0, p1, Theme::Acc(sk.cornerFade ? 0.14f : 0.28f), sk.rounding);
+                dl->AddRect(e0, e1, Theme::Acc(sk.cornerFade ? 0.14f : 0.28f), sk.rounding);
             }
 
             if (eq) {
@@ -583,7 +632,12 @@ namespace FUI::Equip
                 }
             } else if (ImGui::IsItemHovered()) {
                 // C6: carried item over a slot — highlight; click = equip try
-                dl->AddRect(p0, p1, Theme::Col(sk.hi, 0.8f), sk.rounding, 0, 2.0f);
+                // ★Same half-pixel rule as the slot border: a 2px stroke on
+                // the path puts 1px outside, and on the last column that 1px
+                // is past the clip.
+                dl->AddRect(ImVec2(p0.x + 1.0f, p0.y + 1.0f),
+                            ImVec2(p1.x - 1.0f, p1.y - 1.0f),
+                            Theme::Col(sk.hi, 0.8f), sk.rounding, 0, 2.0f);
                 Grid::NotifySlotDropTarget(a_slot.id);
             }
         }

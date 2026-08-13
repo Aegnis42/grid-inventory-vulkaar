@@ -265,6 +265,11 @@ namespace FUI::Grid
     // halves of the screen show the same board.
     void DrawCellLattice(ImDrawList* a_dl, const ImVec2& a_base, int a_cols, int a_rows);
 
+    // ★The ink skin's lattice, drawn AFTER the occupied ground rather than
+    // under it -- see the definition for why "the ground steps around the
+    // divider" cannot work for a mark that snaps to whole pixels.
+    void DrawInkLattice(ImDrawList* a_dl, const ImVec2& a_base, int a_cols, int a_rows);
+
     void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count, int a_coinValue = -1,
                          int a_price = -1, bool a_isBuy = false,
                          RE::TESObjectREFR* a_owner = nullptr,

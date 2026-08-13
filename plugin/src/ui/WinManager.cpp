@@ -923,9 +923,20 @@ namespace FUI
         // ★The drawn tearing sticks out past the rect, so the clip has to give
         // it room — otherwise the overhang is cut off square, which is the one
         // shape this whole treatment exists to avoid.
-        const float bleed = sk.tornFrame ? Theme::kTornOut * S : 0.0f;
+        const float bleed = sk.tornFrame  ? Theme::kTornOut * S
+                          : Theme::InkChrome() ? (Theme::kInkBleed + Theme::kInkFade) * S
+                                               : 0.0f;
         dl->PushClipRect(ImVec2(wp.x - bleed, wp.y - bleed),
                          ImVec2(we.x + bleed, we.y + bleed), false);
+
+        // ★The window key, hashed. Both the torn silhouette and the ink
+        // sheet's cut are derived from it, for the same reason: a window keeps
+        // ONE piece of paper for the whole session, and moving or resizing it
+        // must not deal a new one.
+        unsigned int wseed = 2166136261u;
+        for (const char c : a_key) {
+            wseed = (wseed ^ static_cast<unsigned char>(c)) * 16777619u;
+        }
 
         // OATHVEIN TORN: 9-slice torn-paper panel fills the window (opaque
         // centre hides the parked model; ragged edges show the world). Drawn
@@ -937,15 +948,35 @@ namespace FUI
             // walks the border at a fixed 3px and is blind to window size.
             // The seed is the window KEY, so every window keeps one shape for
             // the whole session and moving it changes nothing.
-            unsigned int seed = 2166136261u;
-            for (const char c : a_key) {
-                seed = (seed ^ static_cast<unsigned char>(c)) * 16777619u;
-            }
+            const unsigned int seed = wseed;
             // ★The SHEET is the window rect; only the teeth go past it. Give
             // the sheet the bled rect instead and its teeth land exactly on
             // the clip boundary, which erases them.
             Theme::TornPanel(dl, wp, we, Theme::Col(sk.winBg, 1.0f), seed);
         }
+        // ★★INK: a photographed sheet, stretched to the window. Drawn in the
+        // same slot as the torn panel and for the same reason -- it is the
+        // window's ground, so everything else has to land on top of it.
+        //
+        // ★STRETCHED, never tiled. Measured, the sheet's opposite edges differ
+        // by 8.3/8.5 luma, so a tile would show its seam. Grain does not mind
+        // being stretched, and the vignette arriving at a different ratio on
+        // each window makes every window look like its own piece of paper.
+        //
+        // ★The skin's winBg still tints it. The sheet was baked around that
+        // exact colour, so a white tint is a no-op today -- but it means a
+        // future ink skin can reuse a sheet and shift it, instead of baking a
+        // third 2 MB file to move one hue.
+        // ★The sheet is drawn OVERSIZE, by the same amount the frame overhangs.
+        // Its edge then lands under the brush instead of beside it -- the
+        // window rect is where the CONTENT stops, not where the paper does.
+        // ★And its edge dissolves. Even perfectly covered, a razor-cut sheet
+        // shows through the frame's dry gaps and past its corners, which is
+        // the one thing this whole treatment exists to avoid.
+        Theme::PaperPanel(dl,
+            ImVec2(wp.x - Theme::kInkBleed * S, wp.y - Theme::kInkBleed * S),
+            ImVec2(we.x + Theme::kInkBleed * S, we.y + Theme::kInkBleed * S),
+            wseed, Theme::kInkFade * S);
         // bevelChrome (kept for future skins): grey gradient titlebar + full
         // bevel border (dark
         // outer line, light inner line) — classic beveled chrome. The
@@ -980,6 +1011,18 @@ namespace FUI
         if (sk.topStrip) {
             dl->AddRectFilled(wp, ImVec2(we.x, wp.y + 2.0f), IM_COL32(122, 30, 22, 140));
         }
+        // ★★INK: the window's edge is four brush marks and four corners, and it
+        // REPLACES the light-panel frame below rather than joining it -- a
+        // painted edge with a drawn rectangle behind it reads as a mistake, not
+        // as two layers. Scaled by the UI scale only, never by the window: a
+        // corner is a mark made by a hand, and a hand does not make a bigger
+        // mark on a bigger sheet.
+        if (Theme::InkChrome()) {
+            const float b = Theme::kInkBleed * S;
+            Theme::InkFrame(dl, ImVec2(wp.x - b, wp.y - b),
+                            ImVec2(we.x + b, we.y + b),
+                            Theme::Col(sk.ink, 0.79f), 96.0f * Theme::Scale());
+        }
         // window corner-fade border — suppressed when a torn frame is drawn
         // (the torn texture is the border; slots/items still use cornerFade)
         if (sk.cornerFade && !sk.tornFrame) {
@@ -997,7 +1040,10 @@ namespace FUI
         // ★Not under a TORN frame. That frame's edge is ragged by design and a
         // square stroke around it cuts the corners off the illusion — the
         // texture's own edge is the border there.
-        if (sk.lightPanel && !sk.tornFrame) {
+        // ★...and not under an INK frame either, for the same reason the torn
+        // one is exempt: a painted edge with a ruled rectangle behind it reads
+        // as a mistake rather than as two layers.
+        if (sk.lightPanel && !sk.tornFrame && !Theme::InkChrome()) {
             // ★Draw on the window's OWN rect, with no inset. ImGui fills the
             // background across exactly wp..we; insetting the frame by half a
             // stroke left the outermost half-pixel of that fill uncovered, and
@@ -1048,6 +1094,26 @@ namespace FUI
         const float ty = wp.y + insY * 0.5f + (barH - fontSize) * 0.5f;
         float tx = a_centerTitle ? wp.x + (w.size.x - textW) * 0.5f
                                  : wp.x + 12.0f * S + insX;
+        // ★★INK: a brush mark laid UNDER the name, in the accent at half
+        // strength. The reference marks its title that way and nothing else on
+        // the window is coloured, so this one stroke is where the eye starts.
+        // ★Sized from the TEXT, not from the bar: a mark that ran the bar's
+        // width would be a highlight bar, and the thing it is imitating is a
+        // stroke someone drew across a word.
+        if (Theme::InkChrome() && textW > 1.0f) {
+            // ★Sized from the TEXT and clamped to the window. The plate is a
+            // mark behind a word, not a bar across the bar.
+            const float padL = (std::min)(fontSize * 0.42f, tx - wp.x - 2.0f);
+            const float x0 = tx - (std::max)(0.0f, padL);
+            const float x1 = (std::min)(tx + textW + fontSize * 0.42f,
+                                        wp.x + w.size.x - 4.0f);
+            const float mh = fontSize * 1.62f;
+            const float my = ty + fontSize * 0.50f - mh * 0.5f;
+            if (x1 - x0 > 4.0f) {
+                Theme::InkTitleMark(dl, ImVec2(x0, my), ImVec2(x1, my + mh),
+                                    Theme::Col(sk.sel, 0.60f));
+            }
+        }
         if (sk.titleGlow) {
             // poor-man's bloom: 4 offset passes under the main text.
             // ★1.0.5: the right-fading 1px UNDERLINE that used to follow is

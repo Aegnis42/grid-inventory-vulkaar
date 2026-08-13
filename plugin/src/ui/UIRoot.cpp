@@ -1946,7 +1946,7 @@ namespace FUI::UIRoot
             const ImU32 hi = Theme::Val();
             char buf[48];
 
-            dl->AddLine(ImVec2(cp.x, y), ImVec2(cp.x + a_leftW, y), Theme::Rule());
+            Theme::RuleLine(dl, ImVec2(cp.x, y), ImVec2(cp.x + a_leftW, y));
             y += kStatGap * S;
 
             std::snprintf(buf, sizeof(buf), "%.0f", StatDamageValue());
@@ -1974,7 +1974,7 @@ namespace FUI::UIRoot
 
             // row() already advanced past the last glyph by the row's leading
             y += kStatGap * S - (StatRowH() - StatValuePx());
-            dl->AddLine(ImVec2(cp.x, y), ImVec2(cp.x + a_leftW, y), Theme::Rule());
+            Theme::RuleLine(dl, ImVec2(cp.x, y), ImVec2(cp.x + a_leftW, y));
             y += kStatGap * S;
 
             const bool over = Grid::IsOverloaded();
@@ -1996,11 +1996,35 @@ namespace FUI::UIRoot
                 // ★The capacity bar is a gauge like any other — same well, so
                 // it lightens on a light panel instead of cutting a dark slot
                 // across the stats block.
-                dl->AddRectFilled(b0, b1, Theme::GaugeTrack(), bh * 0.5f);
-                const float f = (std::min)(1.0f, static_cast<float>(used) / static_cast<float>(total));
-                if (f > 0.0f) {
-                    dl->AddRectFilled(b0, ImVec2(b0.x + (b1.x - b0.x) * f, b1.y),
-                                      spaceCol, bh * 0.5f);
+                const float f = (std::min)(1.0f,
+                    static_cast<float>(used) / static_cast<float>(total));
+                // ★★INK: laid marks, not a rounded well. This bar never went
+                // through Theme::Gauge, so teaching the gauge about the ink
+                // skin left it behind -- the one rounded rectangle in a painted
+                // window, which is precisely the shape that reads as a widget.
+                if (Theme::InkChrome()) {
+                    // ★★TWICE the reserved height, and no red rule under it.
+                    // The band is 5px because a rounded well only needs to be
+                    // legible; a laid stroke has to look like something a brush
+                    // could have made, and at 3px it read as a hairline with a
+                    // colour. The second mark that used to sit below it is gone
+                    // and its room went into this one -- one heavy stroke says
+                    // "how full" better than a thin one with an underline.
+                    const float th = (std::max)(3.0f, bh * 2.0f);
+                    const ImVec2 c0(b0.x, b0.y + bh * 0.80f);
+                    Theme::InkStroke(dl, c0, b1.x - b0.x, th,
+                                     Theme::Col(Theme::S().ink, 0.28f));
+                    if (f > 0.0f) {
+                        Theme::InkStroke(dl, c0, (b1.x - b0.x) * f, th,
+                                         (spaceCol & ~IM_COL32_A_MASK)
+                                             | (230u << IM_COL32_A_SHIFT));
+                    }
+                } else {
+                    dl->AddRectFilled(b0, b1, Theme::GaugeTrack(), bh * 0.5f);
+                    if (f > 0.0f) {
+                        dl->AddRectFilled(b0, ImVec2(b0.x + (b1.x - b0.x) * f, b1.y),
+                                          spaceCol, bh * 0.5f);
+                    }
                 }
             }
         }
@@ -2209,7 +2233,7 @@ namespace FUI::UIRoot
             const ImVec2 cp = ImGui::GetWindowPos();
             const float gy = cp.y + BottomStripY(a_bodyH);   // the rule: unmoved
             const float ty = gy + kStatGap * S + GoldStripDrop();
-            dl->AddLine(ImVec2(cp.x, gy), ImVec2(cp.x + a_colW, gy), Theme::Rule());
+            Theme::RuleLine(dl, ImVec2(cp.x, gy), ImVec2(cp.x + a_colW, gy));
             char buf[32];
             std::snprintf(buf, sizeof(buf), "%s", Grouped(Grid::GoldAmount()).c_str());
 
@@ -2254,7 +2278,31 @@ namespace FUI::UIRoot
             const float side = 18.0f * S;
             // top-aligned with the GOLD figure: in compact layout both sit in
             // this same strip, and a 2px offset between them showed
-            const ImVec2 p0(cp.x + a_colW - side - 2.0f,
+            // ★★The SEAL decides where the can sits, not the other way round.
+            // The can was flush to the column's right edge, which is correct
+            // for an 18px glyph and wrong the moment something twice its size
+            // is stamped behind it -- the seal ran off the page. Both move
+            // left together; the button is the thing you aim at, and it has to
+            // stay on its own mark.
+            // ★★The SEAL's right edge is placed, and the can follows it. a_colW
+            // is the grid's exact width, so cp.x + a_colW IS the line the board
+            // ends on -- putting the stamp there lines it up with the column of
+            // cells above instead of with the 18px glyph in front of it.
+            // ★Expressed as one equation rather than two offsets: the can used
+            // to be positioned and the seal drawn around it, so every change to
+            // the seal's size moved it off the grid again.
+            constexpr float kSealMul  = 1.64f;   // seal size, x the can's size
+            // ★NEGATIVE: just INSIDE the line, not over it. cp.x + a_colW is
+            // also where this child's clip ends, so anything lapping past it is
+            // not drawn over the border -- it is cut off. Same boundary the
+            // doll's right column taught, met from the other side.
+            constexpr float kSealBite = -0.08f;  // ...and how far it sits inside
+            float px = cp.x + a_colW - side - 2.0f;
+            if (Theme::InkChrome()) {
+                const float half = side * kSealMul * 0.5f;
+                px = cp.x + a_colW + side * kSealBite - half - side * 0.5f;
+            }
+            const ImVec2 p0(px,
                             cp.y + BottomStripY(a_bodyH) + kStatGap * S + GoldStripDrop());
             ImGui::SetCursorScreenPos(ImVec2(p0.x - 4.0f * S, p0.y - 4.0f * S));
             const bool pressed = ImGui::InvisibleButton("##gi_trashbtn",
@@ -2267,6 +2315,15 @@ namespace FUI::UIRoot
                                     : ImGui::GetColorU32(sk.inkDim);
             const float w = side, h = side;
             const float t = (std::max)(1.0f, 1.2f * S);
+            // ★★A seal UNDER the can, on the ink skins. It is the only stamped
+            // mark in the window and the only place the paper is signed, so it
+            // goes where the page ends -- bottom right, under the one control
+            // that lives there. Drawn first: the can is the button, the seal is
+            // the paper it was pressed onto.
+            if (Theme::InkChrome()) {
+                Theme::InkSeal(dl, ImVec2(p0.x + w * 0.5f, p0.y + h * 0.5f),
+                               side * kSealMul, on ? 0.60f : hov ? 0.48f : 0.34f);
+            }
             // lid + handle
             dl->AddLine(ImVec2(p0.x + 0.10f * w, p0.y + 0.18f * h),
                         ImVec2(p0.x + 0.90f * w, p0.y + 0.18f * h), col, t);
@@ -2699,7 +2756,12 @@ namespace FUI::UIRoot
                 // vertical divider
                 auto* dl = ImGui::GetWindowDrawList();
                 const float dx = bodyTop.x + leftW + pad;
-                dl->AddLine(ImVec2(dx, bodyTop.y), ImVec2(dx, bodyTop.y + bodyH), Theme::Acc(0.18f));
+                // ★This one asked for Acc(0.18), not Rule(), which is why the
+                // first sweep over the dividers missed it: the search was for
+                // the rule COLOUR, and a divider that names a different colour
+                // is still a divider. Ask the skin instead.
+                Theme::RuleLine(dl, ImVec2(dx, bodyTop.y),
+                                ImVec2(dx, bodyTop.y + bodyH));
             }
 
             // ---- right column: ITEMS label + grid (+ GOLD bar when compact) ----
@@ -3661,6 +3723,10 @@ namespace FUI::UIRoot
             // that only emptied the grid's cache left the two surfaces showing
             // different pictures of the same file.
             Wheeler::ReloadMedallions();
+            // ★The ink skins' paper is drawn art too, and it caches its own
+            // failures -- so a sheet dropped in after launch stays invisible
+            // until this runs. Same reason the wheel's medallions are here.
+            Theme::ReloadInkArt();
             Grid::RequestRebuild();
         }
         // ★★OUTSIDE the ImGui frame, which is the whole reason it lives here

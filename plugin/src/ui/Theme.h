@@ -101,6 +101,20 @@ namespace FUI::Theme
         ImVec4 lpBtnOnFace{};  // a toggled-ON button
         ImVec4 lpBtnOnInk{};   // ink on that face
         ImVec4 lpRule{};       // dividers
+
+        // ★★INK SKINS: the panel is a photographed SHEET, so the skin names a
+        // file instead of carrying another colour. Grain and a vignette are
+        // pixels; no token can say them.
+        //
+        // ★This is the only thing the two ink skins do not share. Every mark
+        // that goes on the paper -- the frame, the rules, the washes -- is a
+        // white+alpha sprite tinted from the tokens above, so one sprite set
+        // serves both, and would serve a dark ink skin too. Only the paper had
+        // to be baked twice, because the tint IS the paper.
+        //
+        // Relative to Data/SKSE/Plugins/GridInventory_ink/. Null on every
+        // other skin, which is what keeps them out of this draw path entirely.
+        const char* paper = nullptr;
     };
 
     // Gap between cells (px at scale 1). ★It is no longer a carved groove —
@@ -534,6 +548,141 @@ namespace FUI::Theme
     // silhouette and it never changes as the window moves or resizes.
     void TornPanel(ImDrawList* a_dl, const ImVec2& a_min, const ImVec2& a_max,
                    ImU32 a_col, unsigned int a_seed);
+
+    // ---- ink skins -----------------------------------------------------------
+    // The active skin's paper sheet, or false when it has none. ★A LOOKUP, not
+    // a draw: the caller already owns the window rect and the draw order, and
+    // the two ink skins differ from the torn ones in what they paint, not in
+    // where. Loads on first ask and caches.
+    //
+    // ★★CUT TO FIT, NOT STRETCHED, which is why it hands back uvs. Stretching
+    // one 16:9 sheet over every window distorts the grain by however much the
+    // two aspects differ -- measured, 1.10x on the main window (invisible) but
+    // 2.64x on a tall bag, where the fibres smear into vertical streaks and the
+    // paper stops looking like paper. So the uvs name the largest piece of the
+    // sheet WITH THE WINDOW'S OWN ASPECT, and the grain keeps its true scale at
+    // every size. A tall window is a tall piece cut off the same sheet, which
+    // is also what it physically is.
+    // ★Never tiled: the sheet's opposite edges differ by 8.3/8.5 luma, so a
+    // seam would show.
+    // a_key: offsets which part of the sheet is cut, so two windows open side
+    // by side are not the same square inch of paper. Derive it from the window
+    // key, as TornPanel's seed is.
+    [[nodiscard]] bool PaperTexture(ImTextureID& a_out, ImVec2 a_size,
+                                    unsigned int a_key,
+                                    ImVec2& a_uv0, ImVec2& a_uv1);
+
+    // ★★Paints the sheet AND dissolves its edge. A photographed sheet ends in a
+    // razor-straight cut, and no amount of brushwork on top hides that: the
+    // frame's dry gaps are exactly where a hard edge shows through, and its
+    // corners never cover the sheet's.
+    // ★The fade CANNOT be baked into the file. The sheet is cut to the window's
+    // aspect, so what reaches the screen is an interior slice -- a soft border
+    // painted into the png is cropped away before anyone sees it. It has to be
+    // made at draw time, which is why this is a draw call and PaperTexture is
+    // only a lookup.
+    // Returns false when the skin has no paper, so the caller falls through.
+    bool PaperPanel(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max,
+                    unsigned int a_key, float a_fade);
+
+    // ★How far the sheet and the frame reach PAST the window rect. The window
+    // rect is where the content stops; paper and brush both carry on, or the
+    // frame reads as a mark floating inside a rectangle -- which is exactly
+    // what it looked like on the first pass.
+    inline constexpr float kInkBleed = 7.0f;
+    // ...and how wide the sheet's edge takes to dissolve. Wider than the bleed
+    // on purpose: the fade has to finish OUTSIDE the brush, or its own gradient
+    // becomes the straight edge it was added to remove.
+    inline constexpr float kInkFade = 16.0f;
+
+    // Does this skin draw its chrome with brush marks? Asked as a question
+    // rather than tested as `paper != nullptr` at every call site, so a future
+    // skin can have one without the other.
+    [[nodiscard]] bool InkChrome();
+
+    // The item grid's inside line, in px at the current window. ★Asked for
+    // rather than recomputed: the LATTICE draws it and the occupied ground has
+    // to clear it, and those two living in different files is exactly how a
+    // 1px clearance survived next to a 2.9px line -- the leftover paper read as
+    // a bright gap running through every multi-cell item.
+    // ★All three are px at scale 1, multiplied by the UI scale -- NOT a
+    // fraction of the current window. See the note in the cpp: every panel is
+    // its own ImGui child, so "a fraction of the window" is a different number
+    // in each of them and the same line came out three weights.
+    [[nodiscard]] float InkRulePx();    // the item grid's inside line
+    [[nodiscard]] float InkEdgePx();    // a board's outer border
+    [[nodiscard]] float InkHeavyPx();   // the doll's cells
+
+    // ---- one mark ------------------------------------------------------------
+    // A brush line, stretched along its length. a_th is its thickness in px.
+    // ★The sprite's own aspect is NOT preserved, and must not be: the strokes
+    // chosen for this carry their character ALONG the run (dry split bristles),
+    // which survives stretching. A stroke with a blob or a tip in it would put
+    // that one feature in the middle of the line -- the first assembly failed
+    // exactly that way.
+    // a_whole: use the sprite END TO END instead of a section of it. A section
+    // is cut square at both ends, which is right for a frame side (the corner
+    // covers the cut) and wrong for a mark that stands alone -- a title stroke
+    // has to taper the way a brush leaving the paper does.
+    void InkStroke(ImDrawList* a_dl, ImVec2 a_from, float a_len, float a_th,
+                   ImU32 a_col, bool a_vert = false, bool a_whole = false);
+
+    // ★A DIVIDER, drawn the way the skin draws dividers. Every caller used to
+    // AddLine with Theme::Rule(), which is a colour and cannot answer "is this
+    // skin's divider a hairline or a brush mark" -- so an ink window kept
+    // hairlines everywhere a colour was enough to look right.
+    void RuleLine(ImDrawList* a_dl, ImVec2 a_from, ImVec2 a_to);
+
+    // The fine ruled line. Same call shape as InkStroke on purpose: which of
+    // the two a surface uses IS the rule -- a border is a brush, an inside is
+    // a ruler -- so the difference stays one word at the call site.
+    void InkRule(ImDrawList* a_dl, ImVec2 a_from, float a_len, float a_th,
+                 ImU32 a_col, bool a_vert = false);
+
+    // ---- assemblies ----------------------------------------------------------
+    // The window's frame: four sides and four corners.
+    // ★★The sides take their thickness and centreline FROM THE CORNER'S OWN
+    // ARM. Measured, the corner sprites differ by 4.5x in arm thickness, so a
+    // side drawn at any constant lines up with at most one of them -- which is
+    // how the first comparison came out with a single usable pairing and looked
+    // like a preference.
+    // ★Corners are drawn LAST, over the sides. That covers the join, which in
+    // turn means a side may be cut anywhere and no 9-slice is needed: the frame
+    // fits any window without a stretched middle.
+    // a_corner: the corner mark's drawn size in px. It is CLAMPED to the box
+    // rather than abandoned when the box is small -- a frame without its
+    // corners is four cut brush-ends meeting at four square notches, which is
+    // the one thing this assembly exists to avoid.
+    void InkFrame(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max, ImU32 a_col,
+                  float a_corner);
+
+    // The corner size a mark of thickness a_th needs, so the sides it meets
+    // come out at that thickness. ★Derived from the sprite's own arm, never
+    // guessed: the six corners differ by 4.5x in arm thickness.
+    [[nodiscard]] float InkCornerFor(float a_th);
+
+    // The plate behind a window title -- the QUICK WHEEL's own banner sprite,
+    // tinted. ★Reused rather than remade: the wheel already paints a plate
+    // behind its group name, and a second mark meaning the same thing is how a
+    // UI stops looking like one hand made it.
+    void InkTitleMark(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max, ImU32 a_col);
+
+    // A stamped seal, centred on a_centre and a_size across. ★Drawn in its own
+    // vermilion, not the skin's accent: on this paper the accent is a clay
+    // SURFACE tone, and a seal printed in it reads as a faded copy of itself.
+    void InkSeal(ImDrawList* a_dl, ImVec2 a_centre, float a_size, float a_alpha);
+
+    // The wash behind a worn item. a_key chooses the blob and its rotation, so
+    // a slot keeps one across frames while its neighbours differ.
+    // ★Drawn PAST the cell on every side. The bleed is what stops a column of
+    // slots reading as a column of stamps.
+    void InkWash(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max, ImU32 a_col,
+                 unsigned int a_key);
+
+    // Drop the ink art cache so a repainted sheet is picked up without a
+    // restart. Releases SRVs -> call from UIRoot::Tick only, beside
+    // Fallback::ReloadAssets and Wheeler::ReloadMedallions.
+    void ReloadInkArt();
 
     // Design-pass A: the ONE quantity-slider look (settings track chrome —
     // black .2 ground, acc .20 fill, acc .25 border, centred hi value) shared
