@@ -62,7 +62,13 @@ namespace FUI::Wheeler
         constexpr float kWheelPx = 560.0f;   // design px the square is drawn at
         constexpr float kDesignH = 1080.0f;
 
-        constexpr float kOpenMs = 300.0f;
+        // ★400, not 300. The open is a hand travelling once round the ring --
+        // laying the ground and dropping the slots onto it -- and at 300 that
+        // journey was over before it read as a journey. Nothing here is waited
+        // on: the wheel is usable from the first frame and the aim is what
+        // gates acting, so the only thing a longer open costs is time the
+        // player was going to spend looking anyway.
+        constexpr float kOpenMs = 400.0f;
         // ★★420, not 220. "Keep the pick" is the whole point of the close --
         // the others leave, the chosen one stays a moment longer -- and at 220
         // the unchosen slots were gone in about 120ms. There was nothing to
@@ -74,7 +80,14 @@ namespace FUI::Wheeler
         // down. ★Same grammar as the open on purpose -- a second kind of motion
         // for "the same ten slots, different contents" would read as a
         // different wheel rather than the same one turning over.
-        constexpr float kGroupMs = 300.0f;
+        // ★★DERIVED, not a second 400. The two were written as equal numbers
+        // and immediately drifted the first time one of them was tuned: the
+        // open went to 400 and the switch stayed at 300, which is the same
+        // stagger played at two speeds -- exactly the "different wheel" the
+        // line above exists to prevent. If the switch ever needs its own pace
+        // it can have its own constant, and that will then be a decision
+        // someone made rather than one that happened.
+        constexpr float kGroupMs = kOpenMs;
         // ★340, not 170. At 170 the stroke was over before the eye caught it
         // moving -- the mark read as appearing rather than being drawn, which
         // is the same as having no animation at all. The stroke is the one
@@ -103,6 +116,10 @@ namespace FUI::Wheeler
         // question it answers ("did the pak answer this time") can change when
         // something else reads the settings file behind us.
         bool  g_diagIcons = false;
+        // ★How much of the ring the open actually drew. Written while opening,
+        // READ while closing -- the close contracts whatever is on screen, and
+        // a wheel released mid-sweep has less than a full circle of it.
+        float g_ringP = 0.0f;
         // ★Groups are a LIST now, not a pair. Stage 1 of replacing a separate
         // quick-menu mod: the third group will be item quick-slots, and it has
         // to be able to arrive as one table row rather than as a third branch
@@ -1560,7 +1577,16 @@ namespace FUI::Wheeler
             if (!g_open) return;
             g_open = false;
             g_dir = -1;
-            g_pick = g_pickGroup = -1;
+            // ★★AND IT DOES NOT TOUCH THE PICK. The release path latches
+            // g_pick one line before calling this, precisely so the close
+            // knows which slot to hold on to -- and this used to wipe it on
+            // the very next statement. `shown` then read -1 for the whole
+            // close, no slot ever matched, and every one of them took the
+            // leave-early ramp: "keep the pick" was dead code that looked
+            // present in both the constant and the comment.
+            // ★Clearing belongs where the close ENDS (Tick) and where state is
+            // deliberately forgotten (ResetOnLoad) -- not in the middle of a
+            // sequence that just finished writing it.
             ResetVisitState();
             LeaveSlowMotion();
         }
@@ -1772,6 +1798,62 @@ namespace FUI::Wheeler
             dl->AddImageQuad(reinterpret_cast<ImTextureID>(t.srv),
                 p[0], p[1], p[2], p[3],
                 ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1), col);
+        }
+
+        // The same texture, but REVEALED clockwise from twelve -- a wedge at a
+        // time, the way the slots arrive.
+        //
+        // ★★The ring used to simply fade in, over e 0.35..0.70. That window
+        // sounds generous and is not: `e` is already eased, so it lands at
+        // roughly 40..99ms of a 300ms open -- a 60ms blip beside ten slots
+        // taking the full 300 to come round. It read as the ring being there
+        // from the start, because to the eye it was.
+        //
+        // ★A WEDGE FAN, not a clip. Clipping is rectangles only in ImGui, and
+        // even given an arbitrary one it would leave a guillotine edge across
+        // the bristles -- the same reason DrawArc lays its stroke down in
+        // columns instead. So the leading edge is a RAMP over kRingFeather
+        // degrees, and the ring arrives drawn rather than switched on.
+        //
+        // ★Each wedge reaches the texture's own SQUARE boundary, not a circle,
+        // so the uv mapping is exact and needs no correction. The corners cost
+        // nothing to carry: measured, the ring's ink stops at r=117 of a 512
+        // square, so nothing lives out there to be clipped by the chords.
+        void DrawRingSweep(ImDrawList* dl, ImVec2 c, float side, float p, int alpha)
+        {
+            if (!g_ring.srv || alpha <= 2 || p <= 0.0f) return;
+            constexpr float kRingStepDeg = 2.0f;
+            constexpr float kRingFeather = 16.0f;
+            const float h = side * 0.5f;
+            const float sweep = (std::min)(p, 1.0f) * 360.0f;
+            struct Edge { ImVec2 pos, uv; };
+            const auto edge = [&](float deg) {
+                const float r = deg * 0.01745329f;
+                float dx = std::cos(r), dy = std::sin(r);
+                // push the point out to the square's edge along its own ray
+                const float s = 1.0f / (std::max)(std::fabs(dx), std::fabs(dy));
+                dx *= s;
+                dy *= s;
+                return Edge{ ImVec2(c.x + dx * h, c.y + dy * h),
+                             ImVec2(0.5f + dx * 0.5f, 0.5f + dy * 0.5f) };
+            };
+            const ImVec2 uvc(0.5f, 0.5f);
+            const int n = (std::max)(1,
+                static_cast<int>(std::ceil(sweep / kRingStepDeg)));
+            for (int i = 0; i < n; ++i) {
+                const float d0 = sweep * i / n;
+                const float d1 = sweep * (i + 1) / n;
+                // how far this wedge sits BEHIND the leading edge
+                const float m = std::clamp((sweep - d1) / kRingFeather, 0.0f, 1.0f);
+                const int a = static_cast<int>(alpha * m);
+                if (a <= 2) continue;
+                const Edge e0 = edge(-90.0f + d0);
+                const Edge e1 = edge(-90.0f + d1);
+                dl->AddImageQuad(reinterpret_cast<ImTextureID>(g_ring.srv),
+                    c, e0.pos, e1.pos, e1.pos,
+                    uvc, e0.uv, e1.uv, e1.uv,
+                    (kInk & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
+            }
         }
 
         // The hover stroke, laid down left to right.
@@ -2175,6 +2257,11 @@ namespace FUI::Wheeler
         CloseWheel();
         g_t = 0.0f;
         g_dir = 0;
+        // ★A load forgets the pick outright. CloseWheel deliberately keeps it
+        // (the close animation is still holding that slot), but there is no
+        // close here -- g_t goes straight to 0 -- so nobody would ever come
+        // back to clear it.
+        g_pick = g_pickGroup = -1;
         // ★And the queued spell: it is a raw form pointer from the outgoing
         // save, and casting it after the load would use whatever now lives at
         // that address (§4-3 rule 2).
@@ -2887,10 +2974,52 @@ namespace FUI::Wheeler
                 (kLift & 0x00FFFFFF) | (static_cast<ImU32>(carriedA) << 24));
         }
 
-        if (e > 0.35f) {
-            const int a = static_cast<int>(245 * (std::min)(1.0f, (e - 0.35f) / 0.35f));
-            DrawWheelTex(dl, g_ring, c, side, 0.0f,
-                (kInk & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
+        // ★The ring's leading edge IS the slot-start front. A slot begins at
+        // g_t = (i/9) * (1 - kStaggerSpan), so the front reaches the last slot
+        // at 1 - kStaggerSpan and the ring closes its circle on the same beat:
+        // one clockwise motion that lays the ground and drops the slots onto
+        // it, rather than two things starting at once.
+        // ★Raw g_t, not the eased e, because the stagger it is matching is on
+        // raw g_t as well -- easing only this one would make the ring drift
+        // ahead of the slots in the middle of the sweep and catch up at the end.
+        if (g_dir >= 0) {
+            // ★Kept, not recomputed, once the close begins -- see below.
+            g_ringP = std::clamp(g_t / (1.0f - kStaggerSpan), 0.0f, 1.0f);
+            if (g_ringP >= 0.999f) {
+                DrawWheelTex(dl, g_ring, c, side, 0.0f,
+                    (kInk & 0x00FFFFFF) | (static_cast<ImU32>(245) << 24));
+            } else {
+                DrawRingSweep(dl, c, side, g_ringP, 245);
+            }
+        } else {
+            // ★★Closing DRAWS IN, toward the hub. Not backwards along its own
+            // sweep: the hand in this wheel only ever travels clockwise -- the
+            // slots ink that way and the brush stroke was deliberately flipped
+            // to match -- so an anticlockwise un-draw would be the one motion
+            // on screen running against everything else.
+            // ★Scale is the SAME easing the open uses, read at the closing
+            // value. That gives the shape for free: near-full for the first
+            // half of the close, while the unchosen slots clear, then in
+            // quickly -- so the contraction happens against the one slot left
+            // standing rather than competing with nine that are leaving.
+            const float sc = e;
+            // ★Fade only once it is already small. Shrinking alone would end
+            // on a hard dot; fading from the start would make the shape
+            // pointless because there would be nothing left to see move.
+            const int a = static_cast<int>(
+                245 * std::clamp(e / 0.25f, 0.0f, 1.0f));
+            if (a > 2 && sc > 0.002f) {
+                // ★A wheel let go of DURING the open never finished its sweep,
+                // and must contract as the partial ring it actually is. This
+                // is why g_ringP is latched: recomputing it here would shrink
+                // with one hand and un-draw anticlockwise with the other.
+                if (g_ringP >= 0.999f) {
+                    DrawWheelTex(dl, g_ring, c, side * sc, 0.0f,
+                        (kInk & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
+                } else {
+                    DrawRingSweep(dl, c, side * sc, g_ringP, a);
+                }
+            }
         }
 
         // ---- the cursor's trail ----------------------------------------------
