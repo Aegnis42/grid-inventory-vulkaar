@@ -1304,10 +1304,16 @@ namespace FUI::Theme
                 // failure must be droppable (see ReloadInkArt).
                 InkSheet sh{};
                 IconCache::LoadPngTexture(kInkDir + a_name, sh.ic, false, sh.mean);
-                if (!sh.ic.srv) SKSE::log::warn("[THEME] ink art missing: {}{}",
-                                                kInkDir, a_name);
-                else SKSE::log::info("[THEME] ink art {} — mean rgb {:.1f} {:.1f} {:.1f}",
-                                     a_name, sh.mean[0], sh.mean[1], sh.mean[2]);
+                if (!sh.ic.srv) {
+                    SKSE::log::warn("[THEME] ink art missing: {}{}", kInkDir, a_name);
+                } else if (a_name.rfind("paper", 0) == 0) {
+                    // ★Only the SHEETS. Their average is PaperTint's divisor, so
+                    // it is worth having when a new one is photographed; the
+                    // brush sprites are white by construction and printing 255
+                    // 255 255 seventeen times a load says nothing.
+                    SKSE::log::info("[THEME] {} — mean rgb {:.1f} {:.1f} {:.1f}",
+                                    a_name, sh.mean[0], sh.mean[1], sh.mean[2]);
+                }
                 it = g_paper.emplace(a_name, sh).first;
             }
             return it->second.ic.srv ? &it->second : nullptr;

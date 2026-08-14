@@ -167,6 +167,9 @@ namespace FUI::Wheeler
         FavItem g_mag[kSlots]{};
         int     g_magN = 0;
 
+        // defined with UseFav, needed by the snapshot above it
+        [[nodiscard]] bool UsesVoiceSlot(RE::TESForm* a_form);
+
         // ★★The player's own order, kept as FormIDs rather than slot numbers.
         // The list is rebuilt from the game's favourites several times a second
         // and its length changes as stars come and go, so "slot 3" means
@@ -510,6 +513,10 @@ namespace FUI::Wheeler
         }
         RE::TESForm* g_castForm = nullptr;   // spell/shout waiting for the game thread
         bool         g_castLeft = false;
+        // ★"...and take it OFF instead", decided at click time off the snapshot
+        // rather than re-derived on the game thread, so the two cannot disagree
+        // about what was on screen when the player pressed.
+        bool         g_castOff = false;
         // ★★MILLISECONDS, not frames. Every one of these was a frame count
         // written for 60fps -- at 144Hz the inventory re-scan ran seven
         // times a second instead of three, and the "once a second" key poll
@@ -589,6 +596,148 @@ namespace FUI::Wheeler
             SKSE::log::info("[WHEEL] textures {} (ring={} arc={} slots={}/{})",
                 g_texOk ? "loaded" : "MISSING", g_ring.srv != nullptr,
                 g_arc.srv != nullptr, n, kSlots);
+        }
+
+        // ---- magic symbols: school sigils and the dragon alphabet --------------
+        // ★★Loaded on demand and kept, like the weapon medallions -- but from
+        // the WHEEL's own folder and as white+alpha, so they take the wheel's
+        // paper colour the way every other mark on it does. The weapon
+        // medallions are painted art on a torn disc and are drawn as-is; these
+        // are marks, not pictures, and a mark that ignored the palette would be
+        // the one thing on the wheel wearing its own colour.
+        std::unordered_map<std::string, IconCache::Icon> g_symbols;
+
+        [[nodiscard]] const IconCache::Icon* Symbol(const std::string& a_file)
+        {
+            auto it = g_symbols.find(a_file);
+            if (it == g_symbols.end()) {
+                IconCache::Icon ic{};
+                IconCache::LoadPngTexture(kDir + a_file + ".png", ic);
+                if (!ic.srv) SKSE::log::warn("[WHEEL] symbol missing: {}{}.png",
+                                             kDir, a_file);
+                it = g_symbols.emplace(a_file, ic).first;
+            }
+            return it->second.srv ? &it->second : nullptr;
+        }
+
+        // A spell's school, straight off the engine — MagicItem::GetAssociatedSkill.
+        [[nodiscard]] const char* SchoolOf(RE::TESForm* a_form)
+        {
+            auto* spell = a_form ? a_form->As<RE::SpellItem>() : nullptr;
+            if (!spell) return nullptr;
+            switch (spell->GetAssociatedSkill()) {
+            case RE::ActorValue::kIllusion:   return "sym_illusion";
+            case RE::ActorValue::kConjuration:return "sym_conjuration";
+            case RE::ActorValue::kDestruction:return "sym_destruction";
+            case RE::ActorValue::kRestoration:return "sym_restoration";
+            case RE::ActorValue::kAlteration: return "sym_alteration";
+            default: return nullptr;   // powers, abilities -> the old medallion
+            }
+        }
+
+        // ★★The dragon alphabet is NOT one letter per roman letter: nine of its
+        // 34 signs stand for a pair (aa ah ei ey ii ir oo ur uu). Matching the
+        // two-letter ones FIRST is the whole rule -- read left to right taking
+        // the longest sign that fits, "Feim" is f+ei+m and not f+e+i+m.
+        // Longest-first also has to be a LIST, not a length test: "ir" is a sign
+        // and "ib" is not, so only these nine may consume two letters.
+        [[nodiscard]] std::vector<std::string> Transliterate(std::string_view a_word)
+        {
+            static constexpr const char* kPairs[] = {
+                "aa", "ah", "ei", "ey", "ii", "ir", "oo", "ur", "uu"
+            };
+            std::vector<std::string> out;
+            std::string w;
+            w.reserve(a_word.size());
+            for (const char ch : a_word) {
+                w.push_back(static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(ch))));
+            }
+            for (std::size_t i = 0; i < w.size();) {
+                bool pair = false;
+                if (i + 1 < w.size()) {
+                    const std::string two = w.substr(i, 2);
+                    for (const char* p : kPairs) {
+                        if (two == p) { out.push_back(two); i += 2; pair = true; break; }
+                    }
+                }
+                if (!pair) {
+                    if (std::isalpha(static_cast<unsigned char>(w[i]))) {
+                        out.emplace_back(1, w[i]);
+                    }
+                    ++i;
+                }
+            }
+            return out;
+        }
+
+        // A shout's FIRST word, in dragon script. Its name is the dragon word
+        // itself ("Fus"); `translation` carries the English ("Force").
+        [[nodiscard]] std::vector<std::string> ShoutWord(RE::TESForm* a_form)
+        {
+            auto* shout = a_form ? a_form->As<RE::TESShout>() : nullptr;
+            if (!shout) return {};
+            auto* word = shout->variations[RE::TESShout::VariationIDs::kOne].word;
+            const char* nm = word ? word->GetName() : nullptr;
+            if (!nm || !*nm) return {};
+            return Transliterate(nm);
+        }
+
+        // Draws a magic slot's mark. false = this slot has none, use the
+        // medallion. Colour is the wheel's paper, like every other mark here.
+        [[nodiscard]] bool DrawMagicMark(ImDrawList* a_dl, ImVec2 a_c, float a_sz,
+                                         int a_group, int a_slot, int a_alpha,
+                                         float a_sigilScale, float a_wordScale)
+        {
+            if (a_group != kMagic || a_slot < 0 || a_slot >= kSlots) return false;
+            if (a_alpha <= 2) return false;
+            const auto& fav = g_mag[a_slot];
+            if (!fav.form) return false;
+            const ImU32 col = (kPaper & 0x00FFFFFFu) |
+                              (static_cast<ImU32>(a_alpha) << IM_COL32_A_SHIFT);
+
+            if (fav.kind == FavKind::kSpell) {
+                const char* key = SchoolOf(fav.form);
+                const auto* ic = key ? Symbol(key) : nullptr;
+                if (!ic) return false;
+                const float h = a_sz * a_sigilScale;
+                a_dl->AddImage(reinterpret_cast<ImTextureID>(ic->srv),
+                    ImVec2(a_c.x - h, a_c.y - h), ImVec2(a_c.x + h, a_c.y + h),
+                    ImVec2(0, 0), ImVec2(1, 1), col);
+                return true;
+            }
+            if (fav.kind != FavKind::kShout) return false;
+
+            // ★The signs are stored at a COMMON HEIGHT and their own widths, so
+            // laying them out is a running x — no per-sign metrics table, and a
+            // redrawn alphabet needs nothing changed here.
+            const auto signs = ShoutWord(fav.form);
+            if (signs.empty()) return false;
+            float total = 0.0f;
+            int   n = 0;
+            for (const auto& s : signs) {
+                if (const auto* ic = Symbol("glyph_" + s)) {
+                    total += static_cast<float>(ic->w) / static_cast<float>((std::max)(ic->h, 1));
+                    ++n;
+                }
+            }
+            if (n == 0) return false;
+            constexpr float kGap = 0.14f;      // of a sign's height
+            total += kGap * static_cast<float>(n - 1);
+            // fit the WHOLE word across the medallion's width
+            const float hh = (a_sz * a_wordScale) / (total * 0.5f) * 0.5f;
+            float x = a_c.x - total * hh;
+            for (const auto& s : signs) {
+                const auto* ic = Symbol("glyph_" + s);
+                if (!ic) continue;
+                const float w = static_cast<float>(ic->w) /
+                                static_cast<float>((std::max)(ic->h, 1)) * hh * 2.0f;
+                a_dl->AddImage(reinterpret_cast<ImTextureID>(ic->srv),
+                    ImVec2(x, a_c.y - hh), ImVec2(x + w, a_c.y + hh),
+                    ImVec2(0, 0), ImVec2(1, 1), col);
+                x += w + kGap * hh * 2.0f;
+            }
+            return true;
         }
 
         // ---- what each slot holds ---------------------------------------------
@@ -996,7 +1145,7 @@ namespace FUI::Wheeler
                     // and which hand is the player's business.
                     bool on = false;
                     auto& rt = player->GetActorRuntimeData();
-                    if (k == FavKind::kShout) {
+                    if (UsesVoiceSlot(form)) {
                         on = rt.selectedPower == form;
                     } else {
                         for (auto* sel : rt.selectedSpells) {
@@ -1597,6 +1746,25 @@ namespace FUI::Wheeler
         // ★One body for both lists: a starred thing is used the same way
         // wherever it was starred from. The caller passes the list because the
         // groups own separate ones, not because they behave differently.
+        // ★★"Does this live in the VOICE slot rather than a hand?" -- and the
+        // answer is not the form type. A shout does, obviously; so does a
+        // POWER, and a power is a FormType::Spell, so the wheel filed modded
+        // shouts under kSpell and then looked for them in selectedSpells[],
+        // where they never are. They equipped and unequipped correctly and
+        // simply never showed the tick that says "this one is on".
+        // Greater, lesser and voice powers all land in selectedPower.
+        [[nodiscard]] bool UsesVoiceSlot(RE::TESForm* a_form)
+        {
+            if (!a_form) return false;
+            if (a_form->Is(RE::FormType::Shout)) return true;
+            if (auto* sp = a_form->As<RE::SpellItem>()) {
+                using T = RE::MagicSystem::SpellType;
+                const auto t = sp->GetSpellType();
+                return t == T::kPower || t == T::kLesserPower || t == T::kVoicePower;
+            }
+            return false;
+        }
+
         void UseFav(const FavItem* a_list, int a_n, int a_slot, bool a_leftHand)
         {
             // ★A place, not an index into a packed list -- and an empty place
@@ -1604,6 +1772,12 @@ namespace FUI::Wheeler
             (void)a_n;
             if (a_slot < 0 || a_slot >= kSlots || !a_list[a_slot].form) return;
             g_itemActed = true;   // the release must not fire on top of this
+            // ★The gear tick comes off a 330ms snapshot, because the LIST comes
+            // off the inventory and that is what costs (see Items::current) --
+            // so an equip made from the wheel could sit a third of a second
+            // before it showed. A click is the one moment worth re-reading for,
+            // and this asks Tick to do it next frame instead of at leisure.
+            g_favMs = kFavRefreshMs;
             // ★★Magic goes through a queue of our own. Equip's queue speaks in
             // TESBoundObject and a spell is not one; EquipSpell/EquipShout are
             // engine calls that belong on the game thread, and this runs in the
@@ -1611,6 +1785,31 @@ namespace FUI::Wheeler
             if (a_list[a_slot].kind != FavKind::kItem) {
                 g_castForm = a_list[a_slot].form;
                 g_castLeft = a_leftHand;
+                // ★★Same rule as the gear below: clicking what is ALREADY OUT
+                // puts it away. Magic had no way back at all -- a spell taken
+                // in hand could only be dropped by opening the magic menu, and
+                // the wheel exists so that menu does not have to be opened.
+                //
+                // ★★★PER HAND, not "is it out anywhere". `worn` is true when the
+                // spell is in EITHER hand, which is right for the tick that
+                // marks it as active and wrong for this: with Flames in the
+                // right hand, right-clicking to put it in the LEFT hand read as
+                // "already out" and took it off instead. One spell in both
+                // hands -- what dual casting is -- became unreachable.
+                // Read at the click rather than off the snapshot: the snapshot
+                // refreshes on a timer, and a second click can easily land
+                // inside that window.
+                g_castOff = false;
+                if (auto* pc = RE::PlayerCharacter::GetSingleton()) {
+                    auto& rt = pc->GetActorRuntimeData();
+                    if (UsesVoiceSlot(a_list[a_slot].form)) {
+                        g_castOff = (rt.selectedPower == a_list[a_slot].form);
+                    } else {
+                        const int hand = a_leftHand ? RE::Actor::SlotTypes::kLeftHand
+                                                    : RE::Actor::SlotTypes::kRightHand;
+                        g_castOff = (rt.selectedSpells[hand] == a_list[a_slot].form);
+                    }
+                }
                 return;
             }
             auto* obj = a_list[a_slot].obj;
@@ -1718,7 +1917,27 @@ namespace FUI::Wheeler
             if (g_itemActed) return;
             UseFav(g_mag, g_magN, slot, /*leftHand*/ false);
         }
-        bool Magic::current(int s) { return filled(s) && g_mag[s].worn; }
+        // ★★Asked LIVE, unlike the gear beside it. Items::current reads the
+        // snapshot because "am I wearing this" costs a walk of the whole pack,
+        // and ten slots at sixty frames is six hundred walks a second -- so it
+        // is refreshed on a 330ms timer and the tick can lag a third of a
+        // second behind. Magic has no such cost: what is in a hand or the voice
+        // is three pointers, and comparing them every frame is free. Paying the
+        // snapshot's latency for it bought nothing and showed as a visible
+        // delay before the tick appeared on a spell that was already out.
+        bool Magic::current(int s)
+        {
+            if (!filled(s)) return false;
+            auto* pc = RE::PlayerCharacter::GetSingleton();
+            if (!pc || !pc->Is3DLoaded()) return g_mag[s].worn;
+            auto* form = g_mag[s].form;
+            auto& rt = pc->GetActorRuntimeData();
+            if (UsesVoiceSlot(form)) return rt.selectedPower == form;
+            for (auto* sel : rt.selectedSpells) {
+                if (sel == form) return true;
+            }
+            return false;
+        }
         bool Items::reorder(int from, int to) { return MoveSlot(g_fav, g_favN, 0, from, to); }
         bool Magic::reorder(int from, int to) { return MoveSlot(g_mag, g_magN, 1, from, to); }
 
@@ -1819,14 +2038,73 @@ namespace FUI::Wheeler
         // so the uv mapping is exact and needs no correction. The corners cost
         // nothing to carry: measured, the ring's ink stops at r=117 of a 512
         // square, so nothing lives out there to be clipped by the chords.
+        // ★★...and the leading edge TAPERS, because a wedge that only fades is
+        // still a straight cut across the bristles -- the exact thing this
+        // function exists to avoid, moved from the alpha channel into the
+        // shape. Fading alone gave a pale but perfectly square end, and square
+        // is what the eye reads first.
+        // The fix is to fade the ring's OUTER and INNER edges sooner than its
+        // middle, so the stroke narrows to its centre line before it stops.
+        // That needs the wedge split ACROSS the ring as well as along it --
+        // hence a band loop inside the angle loop, `edgeness` being 0 on the
+        // centre line and 1 at either rim.
         void DrawRingSweep(ImDrawList* dl, ImVec2 c, float side, float p, int alpha)
         {
             if (!g_ring.srv || alpha <= 2 || p <= 0.0f) return;
             constexpr float kRingStepDeg = 2.0f;
-            constexpr float kRingFeather = 16.0f;
+            // ★16 degrees was 4% of the circumference — a brush leaves a tail
+            // an order of magnitude longer than that, and at 16 the taper had
+            // no room to be seen as one.
+            constexpr float kRingFeather = 42.0f;   // the centre line's tail
+            constexpr float kRimLead     = 2.4f;    // the rims' tail, x the above
+            // ★12, not 5. Each band is ONE flat alpha across its whole width
+            // (AddImageQuad carries a single colour), so the band count is the
+            // number of steps the taper is drawn in -- at 5 the rendered tail
+            // came out in visible vertical stripes. 12 puts the step below what
+            // the eye picks out at this size. The cost is quads, not draw
+            // calls: consecutive ones share the texture and ImGui merges them.
+            constexpr int   kBands       = 12;      // across the ring
+            // ★★MEASURED off ring.png: its ink lives between r=79 and r=117 of
+            // a 256 half-square, i.e. RADIUS 0.31..0.46 of h (see `at`, which
+            // takes a radius — these are not fractions of the way to a corner).
+            // The bands have to span THAT, not the whole square -- spread from
+            // the centre to the corner instead, four of the five would sit on
+            // empty texture and the ring's real centre line would land on a
+            // band BOUNDARY, which is the one place the taper cannot act.
+            // Padded a little either way so a redrawn ring with a wider stroke
+            // or a few flecks does not get its edges clipped off.
+            constexpr float kInkIn  = 0.26f;
+            constexpr float kInkOut = 0.52f;
+            // ★★THE STROKE RUNS PAST ITS OWN START. Drawing exactly 360 degrees
+            // means the two tails meet nose to nose at twelve o'clock, and two
+            // tapers meeting is a notch -- the ring reads as cut there however
+            // softly each end is drawn. Which is why the first fix (fading the
+            // start tail back in as the circle closed) never looked right: it
+            // was hiding a seam instead of not making one.
+            // A brush closing a circle does not stop where it started; it
+            // carries on over the opening stroke and lifts. So the sweep is
+            // longer than the circle, and the last stretch lies on top of the
+            // first -- which is also why the overlap has to be longer than the
+            // start's tail, or the tail would still be showing underneath.
+            // ★The length is not a taste: at angle x inside the overlap the
+            // second pass is `kOverlap - x` behind its own front, so it is
+            // solid only while that exceeds the front's tail. To bury a start
+            // tail of 30 degrees under a front tail of 42, the overlap has to
+            // clear 72 -- measured at 52 the seam still sat at 0.70 of a solid
+            // ring, which is a visible pale band exactly where the seam is.
+            constexpr float kOverlap = 80.0f;
             const float h = side * 0.5f;
-            const float sweep = (std::min)(p, 1.0f) * 360.0f;
-            struct Edge { ImVec2 pos, uv; };
+            // ★p carries the overlap as its second unit: 1 = the circle closed,
+            // 2 = the stroke lifted. Keeping 1.0 meaning "360 degrees" is what
+            // holds the ring's front on the slot-start front (see the caller);
+            // the overlap then runs in the stagger's own tail, which is time
+            // the ring already had spare.
+            const float sweep = (std::min)(p, 1.0f) * 360.0f
+                              + std::clamp(p - 1.0f, 0.0f, 1.0f) * kOverlap;
+            const ImVec2 uvc(0.5f, 0.5f);
+            // ★`stretch` is how much further the SQUARE's edge is than the
+            // circle's along this ray: 1 at the axes, 1.414 into a corner.
+            struct Edge { ImVec2 pos, uv; float stretch; };
             const auto edge = [&](float deg) {
                 const float r = deg * 0.01745329f;
                 float dx = std::cos(r), dy = std::sin(r);
@@ -1835,24 +2113,67 @@ namespace FUI::Wheeler
                 dx *= s;
                 dy *= s;
                 return Edge{ ImVec2(c.x + dx * h, c.y + dy * h),
-                             ImVec2(0.5f + dx * 0.5f, 0.5f + dy * 0.5f) };
+                             ImVec2(0.5f + dx * 0.5f, 0.5f + dy * 0.5f), s };
             };
-            const ImVec2 uvc(0.5f, 0.5f);
+            // ★★A point at RADIUS t (of h), not at fraction t of the way to the
+            // square's edge. The distinction is the whole bug: interpolating
+            // straight to that edge makes a band boundary trace a SQUARE, so
+            // the inner boundary bulged out into the corners -- at 45 degrees a
+            // t of 0.26 lands at 0.368h against ink that starts at 0.309h, and
+            // the band cut the ring open along a diagonal. On screen it read as
+            // a transparent rectangle sitting inside the circle, with its
+            // corners slicing the stroke.
+            // Dividing by `stretch` cancels the square: radius is then t*h in
+            // every direction, and the uv follows the same point, so the
+            // texture still lines up exactly.
+            const auto at = [&](const Edge& e, float tRadius) {
+                const float t = tRadius / e.stretch;
+                return Edge{ ImVec2(c.x + (e.pos.x - c.x) * t, c.y + (e.pos.y - c.y) * t),
+                             ImVec2(uvc.x + (e.uv.x - uvc.x) * t,
+                                    uvc.y + (e.uv.y - uvc.y) * t), e.stretch };
+            };
             const int n = (std::max)(1,
                 static_cast<int>(std::ceil(sweep / kRingStepDeg)));
+            // ★★BOTH ENDS taper. The front is the one that moves, but the START
+            // sits still at twelve o'clock for the whole sweep -- a square cut
+            // there is on screen far longer than one on the front ever is, and
+            // it is the end the eye has time to find. A brush entering the
+            // paper leaves a tail exactly as it leaves one on the way out.
+            // ★It is capped against the sweep. A fixed 30 degrees is a third of
+            // the stroke while the stroke is still 90 long, so the opening
+            // frames were more tail than mark; a brush's entry tail scales with
+            // the stroke it starts.
+            constexpr float kStartFeather = 30.0f;
+            const float startFeather = (std::min)(kStartFeather, sweep * 0.35f);
             for (int i = 0; i < n; ++i) {
                 const float d0 = sweep * i / n;
                 const float d1 = sweep * (i + 1) / n;
-                // how far this wedge sits BEHIND the leading edge
-                const float m = std::clamp((sweep - d1) / kRingFeather, 0.0f, 1.0f);
-                const int a = static_cast<int>(alpha * m);
-                if (a <= 2) continue;
+                const float behind = sweep - d1;   // how far behind the front
                 const Edge e0 = edge(-90.0f + d0);
                 const Edge e1 = edge(-90.0f + d1);
-                dl->AddImageQuad(reinterpret_cast<ImTextureID>(g_ring.srv),
-                    c, e0.pos, e1.pos, e1.pos,
-                    uvc, e0.uv, e1.uv, e1.uv,
-                    (kInk & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
+                for (int b = 0; b < kBands; ++b) {
+                    const float f0 = static_cast<float>(b) / kBands;
+                    const float f1 = static_cast<float>(b + 1) / kBands;
+                    const float t0 = kInkIn + (kInkOut - kInkIn) * f0;
+                    const float t1 = kInkIn + (kInkOut - kInkIn) * f1;
+                    // 0 on the ring's centre line, 1 at either rim
+                    const float edgeness = std::fabs((f0 + f1) - 1.0f);
+                    const float feather = kRingFeather * (1.0f + kRimLead * edgeness);
+                    float m = std::clamp(behind / feather, 0.0f, 1.0f);
+                    const float sf = startFeather * (1.0f + kRimLead * edgeness);
+                    m = (std::min)(m, std::clamp(d0 / sf, 0.0f, 1.0f));
+                    // ★Squared, not linear: a brush tail thins fast at the tip
+                    // and holds its weight at the root. Linear read as a long
+                    // grey smear rather than a stroke running out of ink.
+                    const int a = static_cast<int>(alpha * m * m);
+                    if (a <= 2) continue;
+                    const Edge a0 = at(e0, t0), a1 = at(e1, t0);
+                    const Edge b0 = at(e0, t1), b1 = at(e1, t1);
+                    dl->AddImageQuad(reinterpret_cast<ImTextureID>(g_ring.srv),
+                        a0.pos, a1.pos, b1.pos, b0.pos,
+                        a0.uv, a1.uv, b1.uv, b0.uv,
+                        (kInk & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
+                }
             }
         }
 
@@ -1881,7 +2202,6 @@ namespace FUI::Wheeler
             const float x0 = kTexHalf - 96.0f, x1 = kTexHalf + 96.0f;
             const float y0 = 8.0f, y1 = 70.0f;
             const float head = t * (1.0f + kFeather);
-            int drawn = 0;
 
             for (int L = 0; L < kLanes; ++L) {
                 const float v0 = y0 + (y1 - y0) * L / kLanes;
@@ -1909,14 +2229,7 @@ namespace FUI::Wheeler
                         ImVec2(tx1 / (kTexHalf * 2), v1 / (kTexHalf * 2)),
                         ImVec2(tx0 / (kTexHalf * 2), v1 / (kTexHalf * 2)),
                         (kRed & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
-                    ++drawn;
                 }
-            }
-            static bool said = false;
-            if (!said) {
-                said = true;
-                SKSE::log::info("[WHEEL] arc first draw: slot deg={} t={:.2f} "
-                                "alpha={} quads={}", deg, t, alpha, drawn);
             }
         }
 
@@ -2266,6 +2579,7 @@ namespace FUI::Wheeler
         // save, and casting it after the load would use whatever now lives at
         // that address (§4-3 rule 2).
         g_castForm = nullptr;
+        g_castOff = false;   // ...and the flag that rides with it
         // ★The starred lists are pointers into the OTHER character's inventory.
         // Clearing the counts left the entries themselves behind.
         for (auto& f : g_fav) f = {};
@@ -2626,26 +2940,99 @@ namespace FUI::Wheeler
         return true;
     }
 
+    // ---- the engine's own unequip, for magic ---------------------------------
+    // ★★★THE CALLS THE FAVOURITES MENU USES. CommonLibSSE-NG wraps EquipSpell
+    // (37939) and EquipShout (37941) and stops there, so the two that take
+    // magic back OFF are invisible from the headers -- which is why three
+    // attempts at this went through the wrong door:
+    //   · Actor::DeselectSpell cleared the selection and told the animation
+    //     graph nothing, leaving the player in a casting idle holding nothing;
+    //   · ActorEquipManager::UnequipObject is the WEAPON path, and given one
+    //     hand it empties BOTH when the same spell is in each -- measured
+    //     against vanilla, which empties exactly the hand you clicked.
+    // The ids come from D7ry's Wheeler (github.com/D7ry/wheeler), whose
+    // Utils.cpp declares both; its call sites also pin the hand argument --
+    // it passes 0 before equipping the LEFT hand and 1 before the RIGHT, which
+    // is RE::Actor::SlotTypes (kLeftHand = 0, kRightHand = 1).
+    // ★No addresses, only ids: this stays version-independent like everything
+    // else here (CLAUDE.md rule 4-1.2).
+    void EngineUnequipSpell(RE::ActorEquipManager* a_em, RE::Actor* a_actor,
+                            RE::SpellItem* a_spell, int a_hand)
+    {
+        if (!a_em || !a_actor || !a_spell) return;
+        using func_t = void (RE::ActorEquipManager::*)(RE::Actor*, RE::SpellItem*, int);
+        REL::Relocation<func_t> func{ RELOCATION_ID(37947, 38903) };
+        func(a_em, a_actor, a_spell, a_hand);
+    }
+    void EngineUnequipShout(RE::ActorEquipManager* a_em, RE::Actor* a_actor,
+                            RE::TESShout* a_shout)
+    {
+        if (!a_em || !a_actor || !a_shout) return;
+        using func_t = void (RE::ActorEquipManager::*)(RE::Actor*, RE::TESShout*);
+        REL::Relocation<func_t> func{ RELOCATION_ID(37948, 38904) };
+        func(a_em, a_actor, a_shout);
+    }
+
     // ---- frame ----------------------------------------------------------------
     // ★Perform a queued spell or shout. Game thread only -- see UseFav.
     void ProcessCast()
     {
         if (!g_castForm) return;
         auto* form = g_castForm;
+        const bool off = g_castOff;
         g_castForm = nullptr;
+        g_castOff = false;
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* em = RE::ActorEquipManager::GetSingleton();
         // ★Not merely non-null: a player without 3D is one mid-load or in the
         // main menu, and equipping onto that is asking the engine to dress a
         // body that is not there (CLAUDE.md rule 4).
         if (!player || !em || !player->Is3DLoaded()) return;
+        // ★A POWER is a Spell that lives in the voice slot, so putting one away
+        // is the shout's operation and not the hand's -- there is no hand to
+        // take it out of. Handled before the SpellItem branch below, which
+        // would otherwise go looking for it in selectedSpells[].
+        if (off && UsesVoiceSlot(form) && !form->Is(RE::FormType::Shout)) {
+            // ★★A POWER is not taken off by naming the voice slot. Passing
+            // kPowerOrShout (3) did nothing at all -- modded shouts, which are
+            // powers, equipped fine and would not come back off. Wheeler walks
+            // 2, 1, 0 instead and that is what works: the engine files a power
+            // under a hand slot even though it reads back from selectedPower,
+            // and which one is not something the caller gets to know. Sweeping
+            // all three is the same answer the favourites menu arrives at.
+            auto* sp = form->As<RE::SpellItem>();
+            constexpr int kSweep[3] = { RE::Actor::SlotTypes::kUnknown,
+                                        RE::Actor::SlotTypes::kRightHand,
+                                        RE::Actor::SlotTypes::kLeftHand };
+            for (const int hand : kSweep) EngineUnequipSpell(em, player, sp, hand);
+            return;
+        }
         if (auto* shout = form->As<RE::TESShout>()) {
             // ★A shout has no hand. It goes to the voice, and asking for a
             // left-hand shout is asking a question the game has no answer to.
+            // ★Taking one off has its own engine call, next door to EquipShout
+            // -- see EngineUnequipShout. This used to blank selectedPower by
+            // hand, which is the same mistake DeselectSpell made for spells:
+            // the slot empties and nothing else is told.
+            if (off) {
+                EngineUnequipShout(em, player, shout);
+                return;
+            }
             em->EquipShout(player, shout);
             return;
         }
         if (auto* spell = form->As<RE::SpellItem>()) {
+            // ★★ONE HAND -- the one that was clicked, and the engine's own
+            // unequip is what makes that possible (EngineUnequipSpell). The
+            // weapon path emptied both hands when the same spell was in each,
+            // so a dual cast could not be undone by halves; this takes the hand
+            // it is given, which is what the favourites menu does.
+            if (off) {
+                EngineUnequipSpell(em, player, spell,
+                                   g_castLeft ? RE::Actor::SlotTypes::kLeftHand
+                                              : RE::Actor::SlotTypes::kRightHand);
+                return;
+            }
             const RE::FormID slotId = g_castLeft ? 0x13F43 : 0x13F42;   // Left / Right hand
             auto* slot = RE::TESForm::LookupByID<RE::BGSEquipSlot>(slotId);
             em->EquipSpell(player, spell, slot);
@@ -2984,8 +3371,25 @@ namespace FUI::Wheeler
         // ahead of the slots in the middle of the sweep and catch up at the end.
         if (g_dir >= 0) {
             // ★Kept, not recomputed, once the close begins -- see below.
-            g_ringP = std::clamp(g_t / (1.0f - kStaggerSpan), 0.0f, 1.0f);
-            if (g_ringP >= 0.999f) {
+            // ★★Runs to 2, not 1. 1 is the closed circle -- the beat the slot
+            // stagger is tied to -- and the second unit is the overlap the
+            // stroke lays over its own start (DrawRingSweep). It fits in the
+            // time the ring already had spare: the front reaches the last slot
+            // at 1 - kStaggerSpan, and the stagger's own tail is still running.
+            g_ringP = std::clamp(g_t / (1.0f - kStaggerSpan) , 0.0f, 2.0f);
+            // ★★A list switch re-inks the RING as well, on the same rule the
+            // slots use (slotProgress): run the sweep again and take the LOWER
+            // of the two. The ring's leading edge is the slot-start front, so
+            // leaving it whole while the slots re-staggered underneath broke
+            // the one thing this animation is built on -- the front laying
+            // ground and the slots dropping onto it. Lower, not replaced,
+            // because a switch mid-open must not push the ring further round
+            // than the open has actually got.
+            if (g_groupT < 1.0f) {
+                g_ringP = (std::min)(g_ringP,
+                    std::clamp(g_groupT / (1.0f - kStaggerSpan), 0.0f, 2.0f));
+            }
+            if (g_ringP >= 1.999f) {
                 DrawWheelTex(dl, g_ring, c, side, 0.0f,
                     (kInk & 0x00FFFFFF) | (static_cast<ImU32>(245) << 24));
             } else {
@@ -3013,7 +3417,7 @@ namespace FUI::Wheeler
                 // and must contract as the partial ring it actually is. This
                 // is why g_ringP is latched: recomputing it here would shrink
                 // with one hand and un-draw anticlockwise with the other.
-                if (g_ringP >= 0.999f) {
+                if (g_ringP >= 1.999f) {
                     DrawWheelTex(dl, g_ring, c, side * sc, 0.0f,
                         (kInk & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
                 } else {
@@ -3144,6 +3548,14 @@ namespace FUI::Wheeler
                 // the open, and a picture too small to recognise is worse than
                 // one that is merely early.
                 const float sz = 26.0f * S * (0.80f + 0.20f * ie) * lift;
+                // ★★A spell reads SMALLER than a shout at the same nominal size,
+                // and deliberately. A sigil is a solid shape filling its square;
+                // a shout's word is two to five thin signs strung out sideways,
+                // so the same box holds far less ink. Matching the boxes made
+                // the sigils shout over the words -- these are the numbers that
+                // make the two weigh the same on the ring.
+                constexpr float kSigilScale = 0.80f;   // spell, of the medallion box
+                constexpr float kWordScale  = 1.00f;   // shout, ...along its length
                 // Which of the two the group wants is the table's answer now.
                 if (auto* face = G(shownGroup).face(i)) {
                     auto* cache = IconCache::GetSingleton();
@@ -3220,6 +3632,9 @@ namespace FUI::Wheeler
                         dl->AddImage(tex, q0, q1, ImVec2(0, 0), ImVec2(1, 1),
                             IM_COL32(255, 255, 255, a));
                     }
+                } else if (DrawMagicMark(dl, m, sz, shownGroup, i, a,
+                                         kSigilScale, kWordScale)) {
+                    // a spell's school sigil, or a shout's word in dragon script
                 } else if (const auto* med = Medallion(G(shownGroup).medallion(i))) {
                     dl->AddImage(reinterpret_cast<ImTextureID>(med->srv),
                         ImVec2(m.x - sz, m.y - sz), ImVec2(m.x + sz, m.y + sz),
@@ -3246,13 +3661,19 @@ namespace FUI::Wheeler
             // time, so an early frame has visited only the first few and would
             // report a partial wheel as the whole answer -- the same "counted
             // what happened to be there" mistake this line exists to end.
+            // ★Only when something MISSED. It used to report every open, which
+            // is a line per wheel for a number that is almost always "all of
+            // them" -- the counts existed to catch a pak keyed on the wrong
+            // lamp, and that is a fault, not a status. Silence means correct.
             if (g_diagIcons && ge >= 1.0f) {
                 g_diagIcons = false;
-                SKSE::log::info(
-                    "[WHEEL] icons: {} from cache, {} fell back to a drawing "
-                    "(group {}, caplight {:.0f},{:.0f})",
-                    diagHit, diagMiss, G(shownGroup).title,
-                    Theme::CaptureLightAz(), Theme::CaptureLightEl());
+                if (diagMiss > 0) {
+                    SKSE::log::warn(
+                        "[WHEEL] icons: {} from cache, {} fell back to a drawing "
+                        "(group {}, caplight {:.0f},{:.0f})",
+                        diagHit, diagMiss, G(shownGroup).title,
+                        Theme::CaptureLightAz(), Theme::CaptureLightEl());
+                }
             }
         }
 
