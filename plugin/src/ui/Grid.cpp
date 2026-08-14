@@ -100,6 +100,19 @@ namespace FUI::Grid
             // follows the item into a container because the drop hint carries it,
             // and it dies when the spot dies (dropped to the world, equipped).
             int         rot = 0;
+            // ★★G6: a COIN tile's amount, kept on the SLOT. -1 = not a coin.
+            // It used to be derived from the tile's ordinal, and the ordinal
+            // was re-assigned by grid position on every rebuild -- so a 1000 G
+            // tile carried to the back of the board became the last ordinal and
+            // came up as the remainder, while the 660 that had been there
+            // turned into a thousand. The amount followed the CELL instead of
+            // the tile the player was holding.
+            // Keeping it here is the same answer `rot` already gave: the engine
+            // has nowhere to hang per-instance data, and the slot is what "this
+            // spot on the board" means. The ordinal still decides how many
+            // tiles exist -- that comes from the walking total -- but no longer
+            // decides which one is worth what.
+            int         coin = -1;
         };
 
         // one grid: main (""), a bag (bag item key), or the trash.
@@ -1330,7 +1343,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         //     instance keys (every unit reads as plain, uid 0). A v2 save's
         //     gear therefore keeps its saved cells; only units the engine had
         //     uid'd get re-seated once, on the first rebuild.
-        constexpr std::uint32_t kCosaveVersion = 7;   // v7: GI65 seen-counts baseline
+        constexpr std::uint32_t kCosaveVersion = 8;   // v8: G6 per-slot coin amount
         constexpr std::uint32_t kMaxStr = 512;
         constexpr std::uint32_t kMaxEntries = 65536;
 
@@ -4178,6 +4191,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             it.row = pos->row;
                             it.inBag = pos->bag;
                             g_layout[key] = *pos;
+                            // ★Write the amount back onto the slot, so the next
+                            // rebuild can recognise it. Without this the field
+                            // would only ever be -1 and every tile would take
+                            // whatever the position order handed it -- the very
+                            // behaviour this replaces.
+                            g_layout[key].coin = value;
                         }
                         g_items.push_back(std::move(it));
                     };
@@ -4191,6 +4210,46 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // Re-key #0.. by position, skipping keys owned by a pin, so the
                     // ordinal (= value index) stays dense while pins keep their key.
                     const int coinTiles = GoldCoins::CoinTileCount(cfid);
+                    // ★★The walking total decides WHICH AMOUNTS exist; the slots
+                    // decide who holds them. Those were one decision before,
+                    // taken by grid position, and that is what moved a tile's
+                    // worth out from under it.
+                    // Every slot that already holds an amount still on the list
+                    // keeps it -- carrying a thousand across the board changes
+                    // where it is and nothing else. Only what is left over gets
+                    // handed out, in position order, which is what a fresh tile
+                    // or a changed remainder needs.
+                    std::vector<int> want;
+                    want.reserve(static_cast<std::size_t>(coinTiles));
+                    for (int r = 0; r < coinTiles; ++r) {
+                        want.push_back(GoldCoins::InstanceValue(cfid, r));
+                    }
+                    // Each amount finds its slot: first the one already holding
+                    // that amount, then whatever is left over, in position
+                    // order. Walking the AMOUNTS (not the slots) is what keeps
+                    // each one handed out exactly once -- matching slot-first
+                    // and falling back to InstanceValue for the leftovers
+                    // could pay the same remainder twice when there were fewer
+                    // slots than tiles.
+                    std::vector<const LayoutEntry*> place(want.size(), nullptr);
+                    std::vector<bool> used(autoSlots.size(), false);
+                    for (std::size_t w = 0; w < want.size(); ++w) {
+                        for (std::size_t s = 0; s < autoSlots.size(); ++s) {
+                            if (used[s] || autoSlots[s].coin != want[w]) continue;
+                            used[s] = true;
+                            place[w] = &autoSlots[s];
+                            break;
+                        }
+                    }
+                    std::size_t freeSlot = 0;
+                    for (std::size_t w = 0; w < want.size(); ++w) {
+                        if (place[w]) continue;
+                        while (freeSlot < autoSlots.size() && used[freeSlot]) ++freeSlot;
+                        if (freeSlot >= autoSlots.size()) break;   // a brand new tile
+                        used[freeSlot] = true;
+                        place[w] = &autoSlots[freeSlot];
+                    }
+
                     int probe = 0;
                     for (int rank = 0; rank < coinTiles; ++rank) {
                         std::string key;
@@ -4199,9 +4258,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             ++probe;
                             if (GoldCoins::PinnedValue(key) < 0) break;
                         }
-                        const int value = GoldCoins::InstanceValue(cfid, rank);
-                        emitCoin(key, value, rank < static_cast<int>(autoSlots.size())
-                                                 ? &autoSlots[rank] : nullptr);
+                        emitCoin(key, want[static_cast<std::size_t>(rank)],
+                                 place[static_cast<std::size_t>(rank)]);
                     }
                     continue;   // coins handled — skip the generic tile loop
                 }
@@ -9225,6 +9283,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             WriteStr(a_intfc, out->bag);
             a_intfc->WriteRecordData(static_cast<std::int32_t>(out->count));   // v2
             a_intfc->WriteRecordData(static_cast<std::int32_t>(out->rot));     // v6
+            a_intfc->WriteRecordData(static_cast<std::int32_t>(out->coin));    // v8
         }
         // v7: the "already seen" baseline. Without it, loading a save would make
         // the entire inventory read as new the first time the menu opens.
@@ -9299,6 +9358,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 std::int32_t rot = 0;
                 if (!a_intfc->ReadRecordData(rot)) return;
                 le.rot = rot & 3;
+            }
+            // ★v8: the coin amount this slot holds. An older save carries none,
+            // and -1 is exactly right for that -- the rebuild hands amounts to
+            // unmarked slots in position order, which is what every save did
+            // before this field existed.
+            if (a_version >= 8) {
+                std::int32_t coin = 0;
+                if (!a_intfc->ReadRecordData(coin)) return;
+                le.coin = coin;
             }
             // Saves written before the filter above carry dynamic keys; drop
             // them on the way in so an existing playthrough gets cleaned too.
