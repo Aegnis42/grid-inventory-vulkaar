@@ -39,10 +39,30 @@ namespace FUI
             for (int s = 1; s <= Theme::SkinCount(); ++s) a_fn(s);
         }
 
+        // ★★"!disp3" or "!disp[Simple Pine]" -> the skin it means, 0 for none.
+        // A BARE NUMBER is an old file speaking positions, so it goes through
+        // Theme::MigrateSkin2Index; a bracketed NAME is current and is looked
+        // up directly. Both live here rather than at the three call sites,
+        // because the previous arrangement -- the same parse copied into Load
+        // and ImportPreset -- is exactly how ImportPreset came to have no case
+        // for !shad at all and dropped every shared preset's shadows.
+        [[nodiscard]] int SkinFromKey(const std::string& a_key, size_t a_prefixLen)
+        {
+            const std::string tail = a_key.substr(a_prefixLen);
+            if (tail.size() >= 2 && tail.front() == '[' && tail.back() == ']') {
+                return Theme::SkinIndexByName(tail.substr(1, tail.size() - 2).c_str());
+            }
+            try { return Theme::MigrateSkin2Index(std::stoi(tail)); } catch (...) { return 0; }
+        }
+
         // one skin's whole DISPLAY block, the way Load parses it back
         void WriteDispLine(std::ostream& a_out, int a_skin)
         {
-            a_out << "!disp" << a_skin << " = " << Theme::IconStyleOf(a_skin);
+            // ★Keyed by NAME. A position is only readable by the build that
+            // wrote it -- see Theme.h (SkinIndexByName). Presets travel between
+            // installs, so this one matters twice over.
+            const std::string id = std::string("[") + Theme::SkinNameAt(a_skin) + "]";
+            a_out << "!disp" << id << " = " << Theme::IconStyleOf(a_skin);
             for (int t = 0; t < 3; ++t) a_out << ", " << Theme::GlowStyleOf(a_skin, t);
             for (int t = 0; t < 3; ++t) {
                 a_out << ", " << Theme::GlowGainAt(a_skin, t, 0)
@@ -57,7 +77,7 @@ namespace FUI
             // format change, because it fails quietly. A key that simply is not
             // present is unambiguous: the defaults stand.
             //   !shadN = [dist, blur, opacity] x 3 icon styles
-            a_out << "!shad" << a_skin;
+            a_out << "!shad" << id;
             for (int t = 0; t < 3; ++t) {
                 a_out << (t == 0 ? " = " : ", ")
                       << Theme::ShadowAt(a_skin, t, 0) << ", "
@@ -213,12 +233,26 @@ namespace FUI
             if (key.empty()) continue;
 
             std::string rest = trim(line.substr(eq + 1));
-            if (key == "!uiscale") {   // H′: global UI scale
-                try { Theme::SetScale(std::stof(rest)); } catch (...) {}
+            // ★"!uiscale" is READ BY NOTHING now — the UI-scale slider is gone
+            // and Theme::Scale() is fixed at 1.0 (see Theme.h). Left as an
+            // explicit skip rather than falling through to the window-layout
+            // parser at the bottom of this loop, which would take "!uiscale"
+            // for a window key and file a phantom window at 1,0,0,0.
+            if (key == "!uiscale") continue;
+            // ★★"!cellscale" stored the BOARD MULTIPLIER; "!scale" stores the
+            // SETTING, which is that divided by kScaleBase. Same board size,
+            // different number for it — 0.90 became 1.00 — so an old file has
+            // to be converted or every player's window would shrink by 10% on
+            // the launch after updating. Key renamed for exactly that reason;
+            // see !skin / !skin2 / !skin3 for the same mechanism.
+            if (key == "!cellscale") {
+                try {
+                    Theme::SetScaleSetting(std::stof(rest) / Theme::kScaleBase);
+                } catch (...) {}
                 continue;
             }
-            if (key == "!cellscale") {   // the board's own scale
-                try { Theme::SetCellScale(std::stof(rest)); } catch (...) {}
+            if (key == "!scale") {
+                try { Theme::SetScaleSetting(std::stof(rest)); } catch (...) {}
                 continue;
             }
             // ★1.0.5: global capture-lamp offset, "az, el" in degrees. Loaded
@@ -235,17 +269,22 @@ namespace FUI
                 if (n == 2) Theme::SetCaptureLight(v[0], v[1]);
                 continue;
             }
-            // ★"!skin" = written before "Fable Amber" was removed, so the
-            // number needs converting; "!skin2" is already in the new
-            // numbering. Renaming the key is what makes the two tellable
-            // apart — converting on every load would walk a player's skin
-            // down by one each launch.
+            // ★★THE KEY NAMES THE ERA, and that is the whole mechanism —
+            // converting on every load would walk a player's skin down by one
+            // each launch. Three eras now:
+            //   !skin  a position, before "Fable Amber" was removed
+            //   !skin2 a position, before the Glass pair went and Sumi moved up
+            //   !skin3 a NAME, which no reorder can invalidate
             if (key == "!skin") {
                 try { Theme::SetSkinLegacy(std::stoi(rest)); } catch (...) {}
                 continue;
             }
             if (key == "!skin2") {
-                try { Theme::SetSkin(std::stoi(rest)); } catch (...) {}
+                try { Theme::SetSkinLegacy2(std::stoi(rest)); } catch (...) {}
+                continue;
+            }
+            if (key == "!skin3") {
+                Theme::SetSkinByName(rest.c_str());
                 continue;
             }
             if (key == "!lang") {
@@ -281,8 +320,8 @@ namespace FUI
             // ini nobody could read. Order:
             //   iconStyle, glowStyle[3], glowGain[3][2], iconGain[3]
             if (key.rfind("!disp", 0) == 0) {
-                int skin = 0;
-                try { skin = std::stoi(key.substr(5)); } catch (...) { continue; }
+                const int skin = SkinFromKey(key, 5);
+                if (skin <= 0) continue;   // a skin that no longer exists
                 std::vector<float> v;
                 std::istringstream vs(rest);
                 for (std::string tok; std::getline(vs, tok, ','); ) {
@@ -304,8 +343,8 @@ namespace FUI
             // Absent in anything written before 1.0.5, and that is fine — the
             // seeded defaults are already in place when this runs.
             if (key.rfind("!shad", 0) == 0) {
-                int skin = 0;
-                try { skin = std::stoi(key.substr(5)); } catch (...) { continue; }
+                const int skin = SkinFromKey(key, 5);
+                if (skin <= 0) continue;
                 std::vector<float> v;
                 std::istringstream vs(rest);
                 for (std::string tok; std::getline(vs, tok, ','); ) {
@@ -464,9 +503,8 @@ namespace FUI
         out << "; (창 위치와 언어는 담기지 않습니다 / window layout & language never travel)\n";
         out << "; 상인 옵션(무한 골드·전 품목 매입)은 함께 저장됩니다.\n";
         out << "; Merchant options (unlimited gold / buys anything) DO travel.\n";
-        out << "!uiscale = " << Theme::Scale() << "\n";
-        out << "!cellscale = " << Theme::CellScale() << "\n";
-        out << "!skin2 = " << Theme::SkinIndex() << "\n";
+        out << "!scale = " << Theme::ScaleSetting() << "\n";
+        out << "!skin3 = " << Theme::SkinNameAt(Theme::SkinIndex()) << "\n";
         // ★★The capture light MUST travel with a preset, and not because it is
         // part of the look: the preset ships the author's icon pak, and every
         // key in that pak was hashed with this angle. A reader whose global
@@ -537,10 +575,13 @@ namespace FUI
             // ExportPreset.
             if (key[0] == '!') {
                 try {
-                    if (key == "!uiscale")        Theme::SetScale(std::stof(rest));
-                    else if (key == "!cellscale") Theme::SetCellScale(std::stof(rest));
+                    if (key == "!uiscale")        { /* dropped — see Load */ }
+                    else if (key == "!cellscale") Theme::SetScaleSetting(   // old units
+                                                      std::stof(rest) / Theme::kScaleBase);
+                    else if (key == "!scale")     Theme::SetScaleSetting(std::stof(rest));
                     else if (key == "!skin")      Theme::SetSkinLegacy(std::stoi(rest));
-                    else if (key == "!skin2")     Theme::SetSkin(std::stoi(rest));
+                    else if (key == "!skin2")     Theme::SetSkinLegacy2(std::stoi(rest));
+                    else if (key == "!skin3")     Theme::SetSkinByName(rest.c_str());
                     // ★Must be applied BEFORE the preset's pak is adopted —
                     // see ExportPreset: the pak's keys were hashed with it.
                     else if (key == "!caplight") {
@@ -554,7 +595,8 @@ namespace FUI
                     }
                     // ★1.0.5 presets carry one block per skin
                     else if (key.rfind("!disp", 0) == 0) {
-                        const int skin = std::stoi(key.substr(5));
+                        const int skin = SkinFromKey(key, 5);
+                        if (skin <= 0) continue;
                         std::vector<float> v;
                         std::istringstream vs(rest);
                         for (std::string tok; std::getline(vs, tok, ','); ) {
@@ -582,7 +624,8 @@ namespace FUI
                     // distance/blur/opacity are exactly these three numbers.
                     // Same field order and same tolerance as Load.
                     else if (key.rfind("!shad", 0) == 0) {
-                        const int skin = std::stoi(key.substr(5));
+                        const int skin = SkinFromKey(key, 5);
+                        if (skin <= 0) continue;
                         std::vector<float> v;
                         std::istringstream vs(rest);
                         for (std::string tok; std::getline(vs, tok, ','); ) {
@@ -673,9 +716,8 @@ namespace FUI
         }
         out << "; GridInventory window layout (auto-generated)\n";
         out << "; key = x,y,w,h[,parent:<key>]\n";
-        out << "!uiscale = " << Theme::Scale() << "\n";
-        out << "!cellscale = " << Theme::CellScale() << "\n";
-        out << "!skin2 = " << Theme::SkinIndex() << "\n";
+        out << "!scale = " << Theme::ScaleSetting() << "\n";
+        out << "!skin3 = " << Theme::SkinNameAt(Theme::SkinIndex()) << "\n";
         out << "!lang = " << Lang::Id(Lang::Get()) << "\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
         out << "!caplight = " << Theme::CaptureLightAz()
@@ -683,8 +725,8 @@ namespace FUI
         // ★1.0.5: one DISPLAY block per skin. Slot-named, never the
         // active-style getters — see Theme.h (GI59).
         //   iconStyle, glowStyle[3], glowGain[3][2], iconGain[3]
-        out << "; !dispN = iconStyle, glowStyle x3, glowGain x6, iconGain x3\n";
-        out << "; !shadN = [shadow dist, blur, opacity] x3 icon styles\n";
+        out << "; !disp[skin] = iconStyle, glowStyle x3, glowGain x6, iconGain x3\n";
+        out << "; !shad[skin] = [shadow dist, blur, opacity] x3 icon styles\n";
         EachSkin([&](int s) { WriteDispLine(out, s); });
         out << "!wheelon = " << (Wheeler::Enabled() ? 1 : 0) << "\n";
         out << "!merchgoldinf = " << (LootBarter::MerchantGoldInfinite() ? 1 : 0) << "\n";

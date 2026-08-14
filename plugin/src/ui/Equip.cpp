@@ -110,18 +110,36 @@ namespace FUI::Equip
         // silhouettes: loaded once, kept for the process lifetime
         std::unordered_map<std::string, IconCache::Icon> g_silhouettes;
 
+        // ★★TWO SETS, chosen by the skin. The ink skins get brush-drawn
+        // silhouettes ("_ink"); everything else gets the flat ones. Both are
+        // white + alpha and Equip tints them with a single colour, so the wash
+        // sheet's TONE survives in the alpha channel -- that is the whole
+        // reason a painted set can work here at all.
+        // ★The suffix is part of the CACHE KEY, not just the path. Keying on
+        // the slot name alone would serve whichever set was asked for first
+        // for the rest of the session, and the skin can change at any time.
         const IconCache::Icon* Silhouette(const char* a_name)
         {
-            const auto it = g_silhouettes.find(a_name);
+            std::string key = a_name;
+            if (Theme::InkChrome()) key += "_ink";
+            const auto it = g_silhouettes.find(key);
             if (it != g_silhouettes.end()) {
                 return it->second.srv ? &it->second : nullptr;
             }
             IconCache::Icon icon;
             const std::string path =
-                std::string("Data/SKSE/Plugins/GridInventory_slots/slot_") + a_name + ".fic";
+                "Data/SKSE/Plugins/GridInventory_slots/slot_" + key + ".fic";
             IconCache::LoadFicTexture(path, icon);   // leaves srv null on failure
-            g_silhouettes[a_name] = icon;
-            return icon.srv ? &g_silhouettes[a_name] : nullptr;
+            // ★A missing "_ink" file falls back to the plain one rather than
+            // leaving the slot blank: a set that is incomplete should look
+            // unstyled, never empty.
+            if (!icon.srv && key != a_name) {
+                IconCache::LoadFicTexture(
+                    std::string("Data/SKSE/Plugins/GridInventory_slots/slot_") + a_name + ".fic",
+                    icon);
+            }
+            g_silhouettes[key] = icon;
+            return icon.srv ? &g_silhouettes[key] : nullptr;
         }
 
         const char* SlotForArmor(RE::TESObjectARMO* a_armo)
@@ -562,9 +580,26 @@ namespace FUI::Equip
                 // unit, not the tall height — v9 keeps tall-slot icons modest)
                 const float unit = SlotPx();
                 const float target = unit * 0.46f;
-                const float ms = static_cast<float>((std::max)(sil->w, sil->h));
-                const float dw = sil->w / ms * target;
-                const float dh = sil->h / ms * target;
+                // ★★Sized by the GEOMETRIC MEAN, not the long side. Fitting the
+                // long side makes apparent size depend on shape: measured over
+                // the twelve sprites, a near-square sword filled 0.94 of its
+                // square while a wide shallow circlet filled 0.48 -- half the
+                // area at the same nominal size, and the eye reads area. Half
+                // the set looked small and no number in the file said why.
+                // sqrt(w*h) holds AREA constant instead, so a long thin shape
+                // grows along its length and a squat one along its width.
+                // ★Costs nothing on a padded square sprite (w == h makes this
+                // the old formula exactly), so older art still draws as it did.
+                const float ms = std::sqrt(static_cast<float>(sil->w) *
+                                           static_cast<float>(sil->h));
+                float dw = sil->w / ms * target;
+                float dh = sil->h / ms * target;
+                // ...but an extreme aspect must not run out of its slot.
+                const float cap = unit * 0.72f;
+                if (const float over = (std::max)(dw, dh) / cap; over > 1.0f) {
+                    dw /= over;
+                    dh /= over;
+                }
                 const ImVec2 c((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
                 // ★The silhouette art is white. Tinting it with the ACCENT is
                 // right over a dark panel and wrong over a light one — navy at
@@ -572,8 +607,16 @@ namespace FUI::Equip
                 // and just holds it back with alpha, so it stays a hint rather
                 // than competing with the item that will sit there.
                 const auto& sk2 = Theme::S();
-                const ImU32 silCol = sk2.lightPanel ? Theme::Col(sk2.ink, 0.50f)
-                                                    : Theme::Acc(0.35f);
+                // ★★The ink set is PAINTED, so it is thinner than the flat one
+                // at the same size: measured over the twelve slots, its alpha
+                // sums to 0.766 of the silhouettes' (brush tone is partial
+                // coverage, the flat art is solid). At a shared 0.50 the two
+                // sets are the same SHAPE and the same SIZE and still do not
+                // weigh the same on the panel. 0.50 / 0.766 restores that.
+                const ImU32 silCol =
+                    Theme::InkChrome() ? Theme::Col(sk2.ink, 0.65f)
+                  : sk2.lightPanel    ? Theme::Col(sk2.ink, 0.50f)
+                                      : Theme::Acc(0.35f);
                 dl->AddImage(reinterpret_cast<ImTextureID>(sil->srv),
                     ImVec2(c.x - dw * 0.5f, c.y - dh * 0.5f),
                     ImVec2(c.x + dw * 0.5f, c.y + dh * 0.5f),

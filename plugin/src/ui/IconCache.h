@@ -60,8 +60,14 @@ namespace FUI
         // drops into the fallback folder comes through here, so it must fail
         // QUIETLY on a missing or malformed file: the caller treats "no" as
         // "this key has no drawing", which is a normal answer.
+        // ★a_meanRgb: optional out, THREE floats, 0..255, alpha-weighted. A
+        // caller that has to reach a stated colour needs to know what the file
+        // already is -- a tint multiplies, so "make this sheet average #E1D7C2"
+        // is only answerable against the sheet's own average. Weighted by
+        // alpha because a cut-out's transparent margin is not part of it.
         static bool LoadPngTexture(const std::string& a_path, Icon& a_out,
-                                   bool a_makeGlow = false);
+                                   bool a_makeGlow = false,
+                                   float* a_meanRgb = nullptr);
 
         // main.cpp installs this: item -> capture orientation (category preset
         // + user ini override). The def is part of the cache key, so editing a

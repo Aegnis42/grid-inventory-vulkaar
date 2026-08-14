@@ -871,40 +871,21 @@ namespace FUI::UIRoot
         // per-frame resizing of every managed window read as a ghosted /
         // doubled image (user-reported), and the font rebake was deferred to
         // release anyway. Scale, save and rebake all land on release.
-        void RowScale(const SettingsCtx& a_c)
+        // SCALE — the board's scale, and the only one left. ★It used to be the
+        // second of two rows: a SCALE that moved type/buttons/spacing and a
+        // CELL that moved the board. The grid and the doll are 97% of the
+        // window's width, so CELL was what "make it smaller" actually meant,
+        // and the other one mostly set the chrome against itself. The UI-scale
+        // row and its !uiscale key are gone; this took over the name.
+        void RowCellScale(const SettingsCtx& a_c)
         {
             SettingLabel(a_c, Lang::Str::ScaleLabel);
             RightAlign(a_c.trackW);
-            static float s_pending = -1.0f;
-            float sc = s_pending > 0.0f ? s_pending : Theme::Scale();
-            if (SettingSlider("##uiscale", &sc, 0.5f, 1.6f, a_c.trackW, Theme::kDefScale)) {
-                s_pending = sc;
-            }
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                if (s_pending > 0.0f) {
-                    Theme::SetScale(s_pending);
-                    s_pending = -1.0f;
-                }
-                WinManager::GetSingleton()->Save();
-                g_fontsDirty.store(true);   // rebake the atlas at the new scale
-            } else if (!ImGui::IsItemActive()) {
-                s_pending = -1.0f;   // stale pending (menu closed mid-drag)
-            }
-        }
-
-        // CELL — the BOARD's scale. ★Its own row because it answers a
-        // different question from SCALE: that one is "how big is the text",
-        // this one is "how much screen does the window take". The grid and the
-        // equipment doll are 97% of the window's width and both are built from
-        // cells, so this is the only control that actually shrinks it.
-        void RowCellScale(const SettingsCtx& a_c)
-        {
-            SettingLabel(a_c, Lang::Str::CellScaleLabel);
-            RightAlign(a_c.trackW);
-            float cs = Theme::CellScale();
-            if (SettingSlider("##cellscale", &cs, 0.6f, 1.2f, a_c.trackW,
+            float cs = Theme::ScaleSetting();   // the shown value, 1.00 default
+            if (SettingSlider("##cellscale", &cs,
+                              Theme::kMinCellScale, Theme::kMaxCellScale, a_c.trackW,
                               Theme::kDefCellScale)) {
-                Theme::SetCellScale(cs);
+                Theme::SetScaleSetting(cs);
             }
             if (ImGui::IsItemDeactivatedAfterEdit()) {
                 WinManager::GetSingleton()->Save();
@@ -943,15 +924,19 @@ namespace FUI::UIRoot
                 ImU32 wedge;
                 int   alpha;   // panel alpha, 0-255, only when base == 0
             };
-            // ★Only the first five need listing. Their chip is deliberately
-            // NOT their panel — the glass pair is a hatch showing its own
-            // transparency, the parchment ones invert — so no rule derives it.
-            static constexpr Sw kSw[5] = {
-                { kBlack, kRed,   0 },    // 1 Fable Crimson
-                { kGold,  kBrown, 0 },    // 2 Parchment Amber
-                { kBlack, kWhite, 0 },    // 3 Parchment Crimson
-                { 0,      kRed,   148 },  // 4 Glass Dark    (0.58)
-                { 0,      kRed,   97 },   // 5 Glass Clear   (0.38)
+            // ★Only these need listing. Their chip is deliberately NOT their
+            // panel — the parchment ones invert — so no rule derives it.
+            // ★★Keyed by NAME. This table was positional and held the two Glass
+            // entries at 4 and 5; when the ink pair moved to the front, every
+            // row pointed at the wrong skin and Fable Crimson would have been
+            // painted with the parchment gold. A chip is the only place a
+            // player sees a skin before clicking it, so a wrong one here is a
+            // wrong choice made on its behalf.
+            struct NamedSw { const char* skin; Sw sw; };
+            static const NamedSw kSw[] = {
+                { "Fable Crimson",     { kBlack, kRed,   0 } },
+                { "Parchment Amber",   { kGold,  kBrown, 0 } },
+                { "Parchment Crimson", { kBlack, kWhite, 0 } },
             };
             // ★★From SIMPLE on, the chip IS the panel, so it is READ from the
             // skin rather than copied here. The old table proved the point by
@@ -961,10 +946,13 @@ namespace FUI::UIRoot
             // previous one's colours, and the chip is the only place a player
             // sees the difference before clicking.
             const auto swatchOf = [](int a_idx) -> Sw {
-                if (a_idx <= static_cast<int>(std::size(kSw))) {
-                    return kSw[a_idx - 1];
-                }
                 const Theme::Skin& sk2 = Theme::SkinAt(a_idx);
+                for (const auto& n : kSw) {
+                    if (sk2.name && std::strcmp(n.skin, sk2.name) == 0) return n.sw;
+                }
+                // ★The ink skins land here and that is CORRECT, not a gap:
+                // winBg is literally their paper now (Theme::PaperTint), so a
+                // derived chip and the window it opens are the same value.
                 return { Theme::Col(sk2.winBg, 1.0f),
                          Theme::Col(sk2.acc, 1.0f), 0 };
             };
@@ -976,16 +964,29 @@ namespace FUI::UIRoot
             // says so once and both loops read it.
             struct Fam { const char* name; int first, count; };
             // ★Fable lost its amber half (it was Parchment Amber's twin in
-            // everything but the frame), so that family is down to one chip.
-            const Fam kFam[4] = {
-                { "FABLE", 1, 1 }, { "PARCHMENT", 2, 2 }, { "GLASS", 4, 2 },
+            // everything but the frame), so that family is down to one chip;
+            // GLASS lost both of its.
+            // ★★Each family ASKS WHERE ITS FIRST MEMBER IS rather than stating
+            // a number. The literals here were 1 / 2 / 4 / 6 and every one of
+            // them was wrong the moment the ink pair moved to the front — a
+            // caption over somebody else's chips, and no way for the build to
+            // notice. The families are still contiguous ranges, which is a
+            // property of the kSkins order, so only the START has to be found.
+            const auto at = [](const char* n) { return Theme::SkinIndexByName(n); };
+            const int  simpleFirst = at("Simple Charcoal");
+            const Fam  kFam[4] = {
+                // ★"INK WASH" — 수묵화, the English name of the technique, not
+                // the Japanese word the skins are named for. The caption says
+                // what the family IS to someone who has never heard "sumi";
+                // the skins keep their own names.
+                { "INK WASH",  at("Sumi Parchment"),   2 },
+                { "FABLE",     at("Fable Crimson"),    1 },
+                { "PARCHMENT", at("Parchment Amber"),  2 },
                 // ★The count comes from the TABLE. SIMPLE absorbs every skin
-                // added after it — nineteen in all as of 1.0.5, and that number
-                // moved twice during the cull, which is the point — a literal here is
-                // one more place to forget, with the same failure as the
-                // swatch table above: chips that stop at the old count simply
-                // never show the new skins.
-                { "SIMPLE", 6, Theme::SkinCount() - 5 }
+                // added after it — a literal here is one more place to forget,
+                // with the same failure as the swatch table above: chips that
+                // stop at the old count simply never show the new skins.
+                { "SIMPLE",    simpleFirst, Theme::SkinCount() - simpleFirst + 1 }
             };
             // ★Families wrap: a row of every chip would push the settings
             // window far wider than any other control needs.
@@ -1003,9 +1004,25 @@ namespace FUI::UIRoot
 
             SettingLabel(a_c, Lang::Str::SkinLabel);
             const ImVec2 origin = ImGui::GetCursorScreenPos();
+            // ★The gap BETWEEN chips, side to side. Hoisted because the line
+            // spacing below is the same number — see wrapH.
+            const float chipGap = 8.0f * a_c.S;
+            // A line that carries a family CAPTION: caption, chips, breathing room.
             const float rowH = capH + side + 9.0f * a_c.S;
+            // ★★A line that does NOT. A family wrapping inside itself puts its
+            // caption on the first line only, so the lines after it were being
+            // spaced as though they had one — chips 24px apart vertically and
+            // 8px apart horizontally, which read as two loose rows rather than
+            // one block. `y` is the caption baseline and chips hang at y+capH,
+            // so leaving capH out of the step is exactly what closes it.
+            const float wrapH = side + chipGap;
             float        x = origin.x;
             float        y = origin.y;
+            // ...and if a family ever wrapped and another followed it, the next
+            // caption would land on top of those chips. SIMPLE absorbs every
+            // skin so it is structurally last and this cannot happen today;
+            // it is one line to make that not matter.
+            bool innerWrapped = false;
             float        rowW = 0.0f;   // widest line, for the hit area
             // ★★The hit test reads the rects the DRAW produced instead of
             // recomputing the layout. The two used to be separate walks with a
@@ -1020,7 +1037,11 @@ namespace FUI::UIRoot
             Chip chips[64] = {};
             int  nChips = 0;
             for (const auto& f : kFam) {
-                const float famW = f.count * (side + 8.0f * a_c.S) + famGap;
+                if (innerWrapped) {   // give this family's caption its line back
+                    y += capH;
+                    innerWrapped = false;
+                }
+                const float famW = f.count * (side + chipGap) + famGap;
                 if (x > origin.x && (x - origin.x) + famW > kRowMax) {
                     rowW = (std::max)(rowW, x - origin.x);
                     x = origin.x;
@@ -1040,7 +1061,8 @@ namespace FUI::UIRoot
                     if (x > origin.x && (x - origin.x) + side > kRowMax) {
                         rowW = (std::max)(rowW, x - origin.x);
                         x = origin.x;
-                        y += rowH;
+                        y += wrapH;          // no caption on this line
+                        innerWrapped = true;
                     }
                     const int idx = f.first + i;
                     const ImVec2 p0(x, y + capH);
@@ -1093,7 +1115,7 @@ namespace FUI::UIRoot
                     if (nChips < static_cast<int>(std::size(chips))) {
                         chips[nChips++] = { p0, idx };
                     }
-                    x += side + 8.0f * a_c.S;
+                    x += side + chipGap;
                 }
                 x += famGap;
             }
@@ -1629,7 +1651,7 @@ namespace FUI::UIRoot
         // Favorites binding now, so the place to change it is the game's
         // controls -- a second, private binding for the same key would be a
         // setting that can disagree with the one the player already trusts.
-        constexpr SettingsRowFn kRowsGeneral[] = { RowScale, RowCellScale, RowLanguage,
+        constexpr SettingsRowFn kRowsGeneral[] = { RowCellScale, RowLanguage,
                                                    RowWheelEnable,
                                                    RowPreset, RowPresetExport };
         // ★SKIN leads DISPLAY rather than sitting in GENERAL: every row under
@@ -1690,7 +1712,6 @@ namespace FUI::UIRoot
             };
             const float labelW = (std::max)(84.0f * S, 32.0f * S + (std::max)({
                 lw(Lang::Str::ScaleLabel),
-                lw(Lang::Str::CellScaleLabel),
                 lw(Lang::Str::SkinLabel),
                 lw(Lang::Str::LanguageLabel),
                 lw(Lang::Str::PresetLabel),
@@ -2371,13 +2392,23 @@ namespace FUI::UIRoot
             if (a_bits.empty() || a_fade <= 0.01f) return;
             const auto& io = ImGui::GetIO();
             auto* fg = ImGui::GetForegroundDrawList();
-            // ★★PINNED to Glass Dark, not the active skin. This bar is not part
-            // of any window — it floats on the WORLD at the bottom of the
-            // screen, so the thing it has to stand against is the game, never
-            // the panel. Following the skin gave a pale skin pale keycaps over
-            // a bright room, where they vanished. Glass Dark is the one
-            // palette in the table that was designed to sit on the world.
-            const auto& sk = Theme::SkinAt(4);   // 4 = Glass Dark
+            // ★★PINNED, and pinned to VALUES rather than to a skin. This bar is
+            // not part of any window — it floats on the WORLD at the bottom of
+            // the screen, so what it has to stand against is the game, never
+            // the panel. Following the active skin gave a pale skin pale
+            // keycaps over a bright room, where they vanished.
+            // ★★It used to read Theme::SkinAt(4), "Glass Dark", the one palette
+            // in the table built to sit on the world. Then Glass was removed
+            // and index 4 became Parchment Amber — a pale sheet — and the bar
+            // silently went back to the exact failure the pinning existed to
+            // prevent. Nothing warned: an index is always a valid skin. So the
+            // three colours it actually used are written out here. Borrowing
+            // from a table it does not belong to was the coupling.
+            const struct { ImVec4 acc, sel, inkDim; } sk = {
+                ImVec4(212 / 255.0f, 212 / 255.0f, 216 / 255.0f, 1.00f),   // silver hairline
+                ImVec4(134 / 255.0f,  38 / 255.0f,  28 / 255.0f, 1.00f),   // rust, for a warning
+                ImVec4(228 / 255.0f, 228 / 255.0f, 232 / 255.0f, 0.55f),   // the lettering
+            };
             const float S = Theme::Scale();
             const float gap = 6.0f * S;      // between a key and its label
             const float wide = 13.0f * S;    // between groups
@@ -2468,10 +2499,10 @@ namespace FUI::UIRoot
             // separator called Theme::Acc, which reads the ACTIVE skin — so
             // the bar was half pinned and the caps went on changing colour
             // underneath fixed lettering.
-            // Glass Dark is translucent and not light-panelled, so Acc gives
-            // it the x1.9 line boost; applying it in the same order (alpha
+            // Glass Dark was translucent and not light-panelled, so Theme::Acc
+            // gave it the x1.9 line boost; applying it in the same order (alpha
             // first, then boost, then clamp) keeps the bar pixel-identical to
-            // what it looked like while Glass Dark was the active skin.
+            // what it always looked like, now that the skin itself is gone.
             auto acc = [&](float a) {
                 ImVec4 c = sk.acc;
                 c.w = (std::min)(1.0f, a * 1.9f);

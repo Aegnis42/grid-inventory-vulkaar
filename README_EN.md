@@ -163,7 +163,7 @@ everything the game measures still comes from what you are really wearing.
   wearing the same thing twice).
 
 ### Settings (SETTINGS in the title bar)
-- UI scale, 19 skins, languages (live switch), glow style/brightness, icon
+- Scale, 19 skins (two of them brush-and-ink), languages (live switch), icon
   brightness/style, item shadow (distance/blur/opacity), capture light, icon
   cache reset, precache all, **quick wheel on/off**, trade options (unlimited
   merchant gold / merchant buys anything).
@@ -291,6 +291,5 @@ The same notes are in that folder's `_README.txt`.
 ## Credits / licence
 
 See [CREDITS.md](CREDITS.md) — plugin source under **GPL-3.0** (with the Modding
-Exception). Thanks to ModExplorerMenu (patchulidev), game-icons.net (Lorc,
-Delapouite), Address Library (meh321), CommonLibSSE-NG, Dear ImGui, and the
-SKSE team.
+Exception). Thanks to ModExplorerMenu (patchulidev), Address Library (meh321),
+CommonLibSSE-NG, Dear ImGui, and the SKSE team.

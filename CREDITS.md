@@ -21,15 +21,6 @@ The plugin source is therefore distributed under **GPL-3.0** (see
   - Individual files carry their own attribution headers.
     각 파일 상단에 출처 주석이 명기되어 있습니다.
 
-## Art / 아트
-
-- **Slot silhouettes / 장비 슬롯 실루엣** — from [game-icons.net](https://game-icons.net),
-  licensed **CC BY 3.0** (https://creativecommons.org/licenses/by/3.0/)
-  - Authors / 작가: **Lorc**, **Delapouite**
-  - Icons rasterised to white sprites (`GridInventory_slots/slot_*.fic`)
-    and tinted at runtime by the active skin.
-    아이콘은 흰색 스프라이트로 래스터화 후 스킨 색으로 틴트되어 사용됩니다.
-
 ## Libraries / 라이브러리
 
 - **CommonLibSSE-NG** (CharmedBaryon) — MIT

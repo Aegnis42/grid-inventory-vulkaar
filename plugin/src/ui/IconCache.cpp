@@ -824,7 +824,8 @@ namespace FUI
         }
     }
 
-    bool IconCache::LoadPngTexture(const std::string& a_path, Icon& a_out, bool a_makeGlow)
+    bool IconCache::LoadPngTexture(const std::string& a_path, Icon& a_out, bool a_makeGlow,
+                                   float* a_meanRgb)
     {
         auto* factory = WicFactory();
         if (!factory) return false;
@@ -859,6 +860,24 @@ namespace FUI
                     std::vector<std::uint8_t> px(static_cast<size_t>(w) * h * 4);
                     if (SUCCEEDED(conv->CopyPixels(nullptr, w * 4,
                             static_cast<UINT>(px.size()), px.data()))) {
+                        // ★Measured HERE, off the straight-RGBA buffer, before
+                        // CreateIconTexture may premultiply or mip it. Reading
+                        // it back off the GPU later would be answering the same
+                        // question from a copy that has been through more.
+                        if (a_meanRgb) {
+                            double sr = 0.0, sg = 0.0, sb = 0.0, sa = 0.0;
+                            for (size_t i = 0; i + 3 < px.size(); i += 4) {
+                                const double al = px[i + 3] / 255.0;
+                                sr += px[i] * al;
+                                sg += px[i + 1] * al;
+                                sb += px[i + 2] * al;
+                                sa += al;
+                            }
+                            const double n = (sa > 1.0) ? sa : 1.0;
+                            a_meanRgb[0] = static_cast<float>(sr / n);
+                            a_meanRgb[1] = static_cast<float>(sg / n);
+                            a_meanRgb[2] = static_cast<float>(sb / n);
+                        }
                         ok = CreateIconTexture(px.data(), static_cast<int>(w),
                             static_cast<int>(h), 28 /*R8G8B8A8_UNORM*/, a_makeGlow, a_out);
                     }

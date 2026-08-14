@@ -147,7 +147,7 @@ meshes/, textures/, Sound/  (코인 모델·효과음)
 - 현재 입고 있는 세트는 코스튬으로 고를 수 없습니다(같은 것을 겹쳐 입는 셈).
 
 ### 설정 (타이틀바 SETTINGS)
-- UI 크기, 스킨 19종, 언어(실시간 전환), 후광 스타일/밝기, 아이콘 밝기·
+- 크기, 스킨 19종(먹선 2종 포함), 언어(실시간 전환), 아이콘 밝기·
   스타일, 아이템 그림자(거리·흐림·진하기), 캡처 조명, 아이콘 캐시 초기화,
   전체 사전 캐싱, **퀵 휠 켜기/끄기**, 거래 옵션 (상인 소지금 무제한 /
   모든 품목 매입).
@@ -270,6 +270,5 @@ Inventory = EKWIPUNEK            왼쪽 키 이름은 그대로, 오른쪽만 �
 ## 크레딧 / 라이선스
 
 [CREDITS.md](CREDITS.md) 참조 — 플러그인 소스는 **GPL-3.0**(Modding Exception
-포함)으로 배포됩니다. ModExplorerMenu(patchulidev), game-icons.net(Lorc,
-Delapouite), Address Library(meh321), CommonLibSSE-NG, Dear ImGui,
-SKSE 팀에 감사드립니다.
+포함)으로 배포됩니다. ModExplorerMenu(patchulidev), Address Library(meh321),
+CommonLibSSE-NG, Dear ImGui, SKSE 팀에 감사드립니다.

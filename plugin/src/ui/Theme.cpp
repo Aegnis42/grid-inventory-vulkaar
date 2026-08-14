@@ -50,17 +50,120 @@ namespace FUI::Theme
         // 1.0.5 and a literal here is one more place to forget. SkinCount()
         // reads std::size of this table, and everything else reads SkinCount().
         const Skin kSkins[] = {
-            // ★GI73: named by CHROME FAMILY first, colour second — Fable /
-            // Parchment / Glass. The old names were grouped the other way
-            // round, by colour, which hid the fact that Parchment is Fable
-            // with a torn frame and that the two Glass skins differ only in
-            // transparency. The frame is what the eye actually picks out; the
+            // ★★ORDER IS PRESENTATION ONLY. Nothing outside this array may
+            // identify a skin by its position: a saved setting names it
+            // (WinManager writes !skin3/!disp[name]/!shad[name]), and
+            // LightItemShadow matches on the name for the same reason. Two
+            // reorders have already happened -- "Fable Amber" removed, then
+            // the ink pair moved to the front and the Glass pair dropped --
+            // and each one silently handed every skin's saved icon gain and
+            // shadow to its neighbour until the file stopped counting.
+            // ★No number in the comments either. They used to carry one and it
+            // was already wrong: "Simple" sat at 14 wearing a "// 6".
+            // ★Named by CHROME FAMILY first, colour second -- Sumi / Fable /
+            // Parchment / Simple. The frame is what the eye picks out; the
             // accent colour is the sub-choice inside it.
-            // ★1.0.5: "Fable Amber" was removed at the author's request. It
-            // and Parchment Amber carried IDENTICAL colours — only the frame
-            // differed — so the amber look is not gone, it simply lives in one
-            // place now. Saved numbers are migrated (SetSkinLegacy).
-            {   // 1 Fable Crimson (v10.4) — 순흑 워밍 패널 + 코너-페이드
+            // ★Removed at the author's request, and the reason each is gone:
+            //   Fable Amber   -- identical colours to Parchment Amber, only the
+            //                    frame differed, so the look still exists.
+            //   Glass Dark    -- the translucent pair. The `translucent` token
+            //   Glass Clear      and its machinery STAY: they cost nothing
+            //                    unused and a future glass skin needs no new
+            //                    code. Saved settings migrate to Simple
+            //                    Charcoal, the nearest dark board.
+            {   // Sumi Parchment — 먹 · 낡은 양피지
+            // ★The SAME skin with a darker sheet. Only two values move: the
+            // paper and the shade that has to keep its distance from it. Every
+            // sprite is white+alpha and takes its colour from the tokens, so
+            // the two share one art set entirely.
+                "Sumi Parchment",
+                Rgba(35, 29, 21, 0.19f),
+                Rgba(83, 49, 42),
+                Rgba(35, 29, 21),
+                Rgba(35, 29, 21, 0.58f),
+                // sheet measures 225.6 / 208.5 / 173.4 — this asks for barely
+                // under it, both to leave the tint headroom and because this
+                // one was never the problem.
+                Rgba(222, 205, 171),                    // winBg — aged sheet
+                Rgba(35, 29, 21, 0.30f),
+                Rgba(35, 29, 21, 0.34f),                // shade — +0.04, see above
+                Rgba(173, 127, 119),
+                Rgba(173, 127, 119),
+                4.0f, 3.0f,
+                false, false, false, false,
+                false,
+                false, false,
+                true,
+                false,
+                Rgba(35, 29, 21, 0.06f),
+                {}, {},
+                Rgba(173, 127, 119, 0.55f),
+                Rgba(83, 49, 42),
+                24.0f,
+                Rgba(203, 186, 152),
+                Rgba(214, 199, 168),
+                Rgba(186, 168, 132),
+                Rgba(35, 29, 21),
+                Rgba(173, 127, 119),
+                Rgba(247, 242, 232),
+                Rgba(35, 29, 21),
+                "paper_parchment.png",
+            },
+            {   // Sumi — 먹 · 종이 위의 붓
+            // ★★Every value here was MEASURED off the reference design, not
+            // picked. The three colours are all there are -- paper, ink, clay
+            // -- and everything else is one of them at an alpha.
+            // ★shade: the wash behind a worn item measured #ADA9A1, and
+            // reversing that through paper and ink gave 0.346 / 0.349 / 0.352
+            // per channel. It is not a grey someone liked; it is ink at a
+            // third. 0.37 rather than 0.35 because this paper sits 16 luma
+            // below the reference sheet and the mark has to keep its distance.
+                "Sumi",
+                Rgba(35, 29, 21, 0.19f),                // acc — rules, hairlines
+                // ★★hi is NOT sel. The clay accent measures 2.8:1 on this
+                // paper, which is a SURFACE colour -- a tab fill, a button, a
+                // title stroke. Put it on a badge NUMBER and the number cannot
+                // be read. The reference used a far deeper brick for anything
+                // that had to be legible, and so does this.
+                Rgba(83, 49, 42),                       // hi
+                Rgba(35, 29, 21),                       // ink
+                Rgba(35, 29, 21, 0.58f),                // inkDim
+                // ★winBg is the paper ITSELF now — the colour the sheet is
+                // tinted to read as (Theme::PaperTint). paper_sumi.png measures
+                // 237.4 / 227.2 / 206.8, luma 227.9, and beside the parchment
+                // sheet that was 8.7% brighter with 40% less colour in it: two
+                // axes moving the same way, which is why it read as far more
+                // than 8.7%. Pulled to luma 215.6 while keeping R-B at 31, so
+                // the pair still says white paper / aged paper without the
+                // white one going incandescent on a bright exterior.
+                Rgba(225, 215, 194),                    // winBg — paper
+                Rgba(35, 29, 21, 0.30f),                // glyph
+                Rgba(35, 29, 21, 0.30f),                // shade
+                Rgba(173, 127, 119),                    // sel — clay
+                Rgba(173, 127, 119),                    // filled
+                4.0f, 3.0f,                             // rounding / titleSpacing
+                false, false, false, false,             // no cornerFade/strip/glow/◇
+                false,                                  // ★NOT tornFrame: the
+                                                        // edge is a brush mark,
+                                                        // not a tear
+                false, false,                           // not translucent, no bevel
+                true,                                   // lightPanel
+                false,                                  // engravedCells
+                Rgba(35, 29, 21, 0.06f),                // cellBg — a seat
+                {}, {},                                 // groove / btnFace
+                Rgba(173, 127, 119, 0.55f),             // bagOpen — clay, = sel
+                Rgba(83, 49, 42),                       // goldNum — deep, = hi
+                24.0f,                                  // titleSize
+                Rgba(214, 200, 172),                    // lpBtn
+                Rgba(224, 212, 188),                    // lpBtnHov
+                Rgba(198, 182, 150),                    // lpBtnAct
+                Rgba(35, 29, 21),                       // lpBorder
+                Rgba(173, 127, 119),                    // lpBtnOnFace — clay stamp
+                Rgba(247, 242, 232),                    // lpBtnOnInk
+                Rgba(35, 29, 21),                       // lpRule
+                "paper_sumi.png",                       // paper
+            },
+            {   // Fable Crimson (v10.4) — 순흑 워밍 패널 + 코너-페이드
                 // 테두리 + 상단 크림슨 스트립 + 글로우 타이틀 + ◇ 크림슨 라벨
                 "Fable Crimson",
                 Rgba(230, 226, 216), Rgba(245, 242, 234), Rgba(220, 216, 206),
@@ -70,7 +173,7 @@ namespace FUI::Theme
                 0.0f, 5.0f,
                 true, true, true, true,   // cornerFade / topStrip / titleGlow / diamondLabels
             },
-            {   // 2 Parchment Amber — REAL parchment: a pale sheet in a torn
+            {   // Parchment Amber — REAL parchment: a pale sheet in a torn
                 // frame, dark ink on it.
                 // ★★The frame was always parchment; the panel behind it was
                 // near-black, which read as a parchment mount with black paper
@@ -145,7 +248,7 @@ namespace FUI::Theme
                 Rgba(245, 235, 216),                    // lpBtnOnInk  — paper on ink
                 Rgba(90, 70, 45),                       // lpRule
             },
-            {   // 3 Parchment Crimson — 크림슨 + 찢긴 프레임 + 글로우 타이틀
+            {   // Parchment Crimson — 크림슨 + 찢긴 프레임 + 글로우 타이틀
                 // + ◇ 크림슨 라벨. (텍스처 시절의 소프트 글로우 변형은 사라짐 —
                 // 찢김은 이제 그려지고 변형이 하나뿐이다.)
                 // ★winBg: this used to be the SAME value as Parchment Amber,
@@ -163,73 +266,6 @@ namespace FUI::Theme
                 0.0f, 5.0f,
                 true, false, true, true,   // cornerFade + titleGlow + diamondLabels
                 true,                      // tornFrame
-            },
-            {   // 4 Glass Dark — QuickLoot IE-style near-black translucent
-                // panel: white ink, silver hairlines (corner-fade chrome),
-                // rust-red selection bar. Shares the translucent machinery
-                // (caching card / centre park / line boost) with Glass Clear.
-                "Glass Dark",
-                Rgba(212, 212, 216), Rgba(240, 240, 244), Rgba(228, 228, 232),
-                Rgba(228, 228, 232, 0.55f), Rgba(12, 12, 14, 0.75f),
-                // ★★shade goes UP, not down. On a translucent panel the mark is
-                // alpha*(shade - panel), and a BLACK shade makes that
-                // -alpha*panel — which dies with the panel. In a cave the panel
-                // is already near black, so no alpha rescues it (0.85 still
-                // measured -9), while on snow the same value punches a -120
-                // hole. A light shade inverts the term: the darker the room,
-                // the STRONGER the mark. Silver keeps it in the acc family.
-                Rgba(200, 200, 204), Rgba(212, 212, 216, 0.16f),
-                Rgba(134, 38, 28), Rgba(212, 212, 216),
-                0.0f, 2.0f,
-                true, false, false, false,   // cornerFade (silver hairlines)
-                false,                       // no torn frame
-                true, false,                 // translucent (no bevel chrome)
-                false,                       // lightPanel
-                false,                       // engravedCells
-                {}, {}, {},                  // cellBg / groove / btnFace
-                // ★★The default sage was tuned when an occupied tile was DARK.
-                // Turning that ground silver moved the floor out from under it:
-                // sage and the new tile meet in the middle, and on snow the
-                // difference goes NEGATIVE (-2.7) — the mark inverts and
-                // vanishes. Same lesson as the parchment skin: a mark that sits
-                // at mid brightness gets overtaken whenever the room changes.
-                // Pale cyan clears the tile by +20 at the worst background and
-                // still reads as a different COLOUR (dE 10) rather than "more
-                // silver", which is what separates "this bag is open" from
-                // "this cell is occupied".
-                Rgba(170, 225, 232, 0.35f),  // bagOpen
-            },
-            {   // 5 Glass Clear — Glass Dark with a THINNER panel; everything
-                // else identical except the tile shade, which sits a step
-                // higher because a thinner panel means a brighter ground under
-                // every tile. (MABINOGI GREY was removed by user request; the
-                // bevelChrome grammar stays available for future skins.)
-                "Glass Clear",
-                Rgba(212, 212, 216), Rgba(240, 240, 244), Rgba(228, 228, 232),
-                Rgba(228, 228, 232, 0.55f), Rgba(12, 12, 14, 0.60f),
-                // a step higher than Glass Dark: this panel lets more of the
-                // world through, so the ground it sits on is brighter and the
-                // same alpha would buy less separation
-                Rgba(200, 200, 204), Rgba(212, 212, 216, 0.20f),
-                Rgba(134, 38, 28), Rgba(212, 212, 216),
-                0.0f, 2.0f,
-                true, false, false, false,   // cornerFade (silver hairlines)
-                false,                       // no torn frame
-                true, false,                 // translucent (no bevel chrome)
-                false,                       // lightPanel
-                false,                       // engravedCells
-                {}, {}, {},                  // cellBg / groove / btnFace
-                // ★★The default sage was tuned when an occupied tile was DARK.
-                // Turning that ground silver moved the floor out from under it:
-                // sage and the new tile meet in the middle, and on snow the
-                // difference goes NEGATIVE (-2.7) — the mark inverts and
-                // vanishes. Same lesson as the parchment skin: a mark that sits
-                // at mid brightness gets overtaken whenever the room changes.
-                // Pale cyan clears the tile by +20 at the worst background and
-                // still reads as a different COLOUR (dE 10) rather than "more
-                // silver", which is what separates "this bag is open" from
-                // "this cell is occupied".
-                Rgba(170, 225, 232, 0.35f),  // bagOpen
             },
             {   // Simple Charcoal — 숯 · 진짜 중성 차콜 (신규)
             // ★Derived from Simple in CIELAB: the hue is rotated while L* and C*
@@ -556,7 +592,7 @@ namespace FUI::Theme
                 Rgba(13, 49, 51),                      // lpBtnOnInk
                 Rgba(5, 33, 44),                       // lpRule
             },
-            {   // 6 Simple — a plain blue windowed panel. Two things carry it
+            {   // Simple — a plain blue windowed panel. Two things carry it
                 // and neither is a colour: the border is TWO lines (dark outer
                 // + bright inner, via bevelChrome), and the cell grid is CARVED
                 // rather than drawn (engravedCells). Buttons are recessed for
@@ -811,97 +847,25 @@ namespace FUI::Theme
                 Rgba(92, 30, 44),                      // lpBtnOnInk
                 Rgba(62, 39, 40),                      // lpRule
             },
-            {   // Sumi — 먹 · 종이 위의 붓
-            // ★★Every value here was MEASURED off the reference design, not
-            // picked. The three colours are all there are -- paper, ink, clay
-            // -- and everything else is one of them at an alpha.
-            // ★shade: the wash behind a worn item measured #ADA9A1, and
-            // reversing that through paper and ink gave 0.346 / 0.349 / 0.352
-            // per channel. It is not a grey someone liked; it is ink at a
-            // third. 0.37 rather than 0.35 because this paper sits 16 luma
-            // below the reference sheet and the mark has to keep its distance.
-                "Sumi",
-                Rgba(35, 29, 21, 0.19f),                // acc — rules, hairlines
-                // ★★hi is NOT sel. The clay accent measures 2.8:1 on this
-                // paper, which is a SURFACE colour -- a tab fill, a button, a
-                // title stroke. Put it on a badge NUMBER and the number cannot
-                // be read. The reference used a far deeper brick for anything
-                // that had to be legible, and so does this.
-                Rgba(83, 49, 42),                       // hi
-                Rgba(35, 29, 21),                       // ink
-                Rgba(35, 29, 21, 0.58f),                // inkDim
-                Rgba(239, 230, 210),                    // winBg — paper
-                Rgba(35, 29, 21, 0.30f),                // glyph
-                Rgba(35, 29, 21, 0.30f),                // shade
-                Rgba(173, 127, 119),                    // sel — clay
-                Rgba(173, 127, 119),                    // filled
-                4.0f, 3.0f,                             // rounding / titleSpacing
-                false, false, false, false,             // no cornerFade/strip/glow/◇
-                false,                                  // ★NOT tornFrame: the
-                                                        // edge is a brush mark,
-                                                        // not a tear
-                false, false,                           // not translucent, no bevel
-                true,                                   // lightPanel
-                false,                                  // engravedCells
-                Rgba(35, 29, 21, 0.06f),                // cellBg — a seat
-                {}, {},                                 // groove / btnFace
-                Rgba(173, 127, 119, 0.55f),             // bagOpen — clay, = sel
-                Rgba(83, 49, 42),                       // goldNum — deep, = hi
-                24.0f,                                  // titleSize
-                Rgba(214, 200, 172),                    // lpBtn
-                Rgba(224, 212, 188),                    // lpBtnHov
-                Rgba(198, 182, 150),                    // lpBtnAct
-                Rgba(35, 29, 21),                       // lpBorder
-                Rgba(173, 127, 119),                    // lpBtnOnFace — clay stamp
-                Rgba(247, 242, 232),                    // lpBtnOnInk
-                Rgba(35, 29, 21),                       // lpRule
-                "paper_sumi.png",                       // paper
-            },
-            {   // Sumi Parchment — 먹 · 낡은 양피지
-            // ★The SAME skin with a darker sheet. Only two values move: the
-            // paper and the shade that has to keep its distance from it. Every
-            // sprite is white+alpha and takes its colour from the tokens, so
-            // the two share one art set entirely.
-                "Sumi Parchment",
-                Rgba(35, 29, 21, 0.19f),
-                Rgba(83, 49, 42),
-                Rgba(35, 29, 21),
-                Rgba(35, 29, 21, 0.58f),
-                Rgba(227, 211, 176),                    // winBg — aged sheet
-                Rgba(35, 29, 21, 0.30f),
-                Rgba(35, 29, 21, 0.34f),                // shade — +0.04, see above
-                Rgba(173, 127, 119),
-                Rgba(173, 127, 119),
-                4.0f, 3.0f,
-                false, false, false, false,
-                false,
-                false, false,
-                true,
-                false,
-                Rgba(35, 29, 21, 0.06f),
-                {}, {},
-                Rgba(173, 127, 119, 0.55f),
-                Rgba(83, 49, 42),
-                24.0f,
-                Rgba(203, 186, 152),
-                Rgba(214, 199, 168),
-                Rgba(186, 168, 132),
-                Rgba(35, 29, 21),
-                Rgba(173, 127, 119),
-                Rgba(247, 242, 232),
-                Rgba(35, 29, 21),
-                "paper_parchment.png",
-            },
         };
 
         // ★Initialised FROM the exported defaults, never from a second copy of
         // the number — the reset gesture reads the same constants.
-        float g_scale = kDefScale;
-        // ★Default 0.80, not 1.0. At 1.0 the window is 912x818 — a third of a
-        // 1440p screen — and the only way to shrink it used to be the UI
-        // scale, which took the text down with it.
+        // ★const now: the UI-scale slider is gone (see Theme.h). Kept as a
+        // named constant rather than inlined so Scale() still has one home.
+        const float g_scale = kDefScale;
+        // ★The SETTING, not the board multiplier — 1.00 by default, and
+        // kScaleBase (0.90) is what that 1.00 draws at. See Theme.h.
         float g_cellScale = kDefCellScale;
-        int   g_skin = 3;   // 1-based (release default = Parchment Crimson)
+        // ★★The shipped default, NAMED. It was `= 3`, with a comment saying
+        // "Parchment Crimson" -- and by then 3 was Fable Crimson. A number
+        // cannot state which skin it means, so it stops being true the first
+        // time the table moves and nothing anywhere says so.
+        // 0 means "not resolved yet"; EnsureSkin turns the name into an index
+        // the first time anything asks, because kSkins is not comparable at
+        // static-init time.
+        constexpr const char* kDefaultSkin = "Sumi Parchment";
+        int   g_skin = 0;   // 1-based once resolved
         // ★Capture-lamp offset shared by every icon. Deliberately NOT in the
         // per-skin block below — see Theme.h.
         float g_capLightAz = kDefCapLightAz;
@@ -1085,22 +1049,39 @@ namespace FUI::Theme
     // ---- scale ---------------------------------------------------------------
     float Scale() { return g_scale; }
 
-    void SetScale(float a_scale)
-    {
-        g_scale = (std::max)(0.5f, (std::min)(1.6f, a_scale));
-    }
+    float ScaleSetting() { return g_cellScale; }
 
-    float CellScale() { return g_cellScale; }
+    // the board's actual multiplier — the setting against what 1.00 means
+    float CellScale() { return g_cellScale * kScaleBase; }
 
-    void SetCellScale(float a_scale)
+    void SetScaleSetting(float a_scale)
     {
-        g_cellScale = (std::max)(0.5f, (std::min)(1.4f, a_scale));
+        // ★Clamped to the SAME numbers the slider draws (Theme.h). They used
+        // to differ -- slider 0.6~1.2, clamp 0.5~1.4 -- which meant a value
+        // typed into the box, or arriving from an older ini, could sit outside
+        // what the control could ever show or take back.
+        g_cellScale = (std::max)(kMinCellScale, (std::min)(kMaxCellScale, a_scale));
     }
 
     // ---- skin ----------------------------------------------------------------
-    int SkinIndex() { return g_skin; }
-
     int SkinCount() { return static_cast<int>(std::size(kSkins)); }
+
+    namespace
+    {
+        // resolves kDefaultSkin once. Safe to call from anything that reads
+        // g_skin; takes an index, so it cannot recurse through SkinAt.
+        void EnsureSkin()
+        {
+            if (g_skin != 0) return;
+            g_skin = 1;
+            for (int i = 1; i <= SkinCount(); ++i) {
+                const char* n = kSkins[i - 1].name;
+                if (n && std::strcmp(n, kDefaultSkin) == 0) { g_skin = i; break; }
+            }
+        }
+    }
+
+    int SkinIndex() { EnsureSkin(); return g_skin; }
 
     const Skin& SkinAt(int a_index)
     {
@@ -1111,7 +1092,7 @@ namespace FUI::Theme
         return kSkins[i - 1];
     }
 
-    const Skin& S() { return SkinAt(g_skin); }
+    const Skin& S() { EnsureSkin(); return SkinAt(g_skin); }
 
     void SetSkin(int a_index)
     {
@@ -1120,15 +1101,94 @@ namespace FUI::Theme
         ApplyIconStyle();
     }
 
+    int SkinIndexByName(const char* a_name)
+    {
+        if (!a_name || !*a_name) return 0;
+        for (int i = 1; i <= SkinCount(); ++i) {
+            const char* n = SkinAt(i).name;
+            if (n && std::strcmp(n, a_name) == 0) return i;
+        }
+        return 0;
+    }
+
+    const char* SkinNameAt(int a_index)
+    {
+        if (a_index < 1 || a_index > SkinCount()) return "";
+        const char* n = SkinAt(a_index).name;
+        return n ? n : "";
+    }
+
+    bool SetSkinByName(const char* a_name)
+    {
+        const int i = SkinIndexByName(a_name);
+        if (i <= 0) {
+            SKSE::log::warn("[THEME] saved skin \"{}\" no longer exists — keeping {}",
+                            a_name ? a_name : "", SkinNameAt(g_skin));
+            return false;
+        }
+        SetSkin(i);
+        return true;
+    }
+
+    // ★★The one table that maps a "!skin2"-era POSITION onto a name. Written
+    // out in full rather than as arithmetic on the index: two removals and a
+    // move do not compose into an offset, and the next edit to kSkins must not
+    // be able to quietly change what an old file means. A removed skin names
+    // the skin its settings should land on instead.
+    namespace
+    {
+        constexpr const char* kSkin2Order[] = {
+            "Fable Crimson",                    //  1
+            "Parchment Amber",                  //  2
+            "Parchment Crimson",                //  3
+            "Simple Charcoal",                  //  4  was Glass Dark  — nearest dark board
+            "Simple Charcoal",                  //  5  was Glass Clear —   "
+            "Simple Charcoal",                  //  6
+            "Simple Graphite",                  //  7
+            "Simple Silver",                    //  8
+            "Simple Pine",                      //  9
+            "Simple Forest",                    // 10
+            "Simple Petrol",                    // 11
+            "Simple Steel",                     // 12
+            "Simple Sky",                       // 13
+            "Simple",                           // 14
+            "Simple Plum",                      // 15
+            "Simple Violet",                    // 16
+            "Simple Indigo",                    // 17
+            "Simple Wine",                      // 18
+            "Simple Strawberry Milk",           // 19
+            "Sumi",                             // 20
+            "Sumi Parchment",                   // 21
+        };
+    }
+
+    int MigrateSkin2Index(int a_oldIndex)
+    {
+        constexpr int n = static_cast<int>(std::size(kSkin2Order));
+        if (a_oldIndex < 1 || a_oldIndex > n) return 0;
+        // ★Glass 4 and 5 both migrate onto Simple Charcoal, so two old blocks
+        // can land on one skin. Last one wins, which is the only answer that
+        // does not need a merge rule -- and either is better than a block
+        // silently landing on whoever now sits at 4.
+        return SkinIndexByName(kSkin2Order[a_oldIndex - 1]);
+    }
+
+    void SetSkinLegacy2(int a_oldIndex)
+    {
+        const int i = MigrateSkin2Index(a_oldIndex);
+        if (i > 0) SetSkin(i);
+    }
+
     void SetSkinLegacy(int a_oldIndex)
     {
         // ★"Fable Amber" sat at index 2 and was removed; everything above it
-        // shifted down by one. A file that says "!skin" was written in the old
+        // shifted down by one. A file that says "!skin" was written in that
         // numbering, so 1 stays 1, 2 (the removed one) becomes Parchment
-        // Amber's 2, and everything past it drops.
+        // Amber's 2, and everything past it drops — landing in the "!skin2"
+        // numbering, which then needs the second conversion too.
         const int i = a_oldIndex <= 2 ? (std::max)(1, a_oldIndex)
                                       : a_oldIndex - 1;
-        SetSkin(i);
+        SetSkinLegacy2(i);
     }
 
     // ---- colour helpers ------------------------------------------------------
@@ -1191,7 +1251,20 @@ namespace FUI::Theme
         // name the same sheet, and a skin inserted above them must not hand
         // one skin's art to another -- the same reason LightItemShadow()
         // matches on name.
-        std::unordered_map<std::string, IconCache::Icon> g_paper;
+        // ★A sheet carries its own average colour. It is the divisor in
+        // PaperTint(): a skin states the colour its paper should READ as, and
+        // reaching that by multiplication is only possible against what the
+        // file already is. Kept in the same entry as the texture so the two
+        // cannot be dropped or reloaded apart.
+        struct InkSheet
+        {
+            IconCache::Icon ic{};
+            float           mean[3] = { 255.0f, 255.0f, 255.0f };
+        };
+        std::unordered_map<std::string, InkSheet> g_paper;
+        // bumped by ReloadInkArt — anything caching a value DERIVED from a
+        // sheet (PaperTint) has to notice the sheet was swapped under it
+        int g_inkGen = 0;
 
         // The marks. One set serves every ink skin: they are white + alpha and
         // take their colour from the caller.
@@ -1221,7 +1294,7 @@ namespace FUI::Theme
         constexpr float kArmTV = 0.099f;
         constexpr float kArmRun = 0.50f;   // a side starts halfway along the arm
 
-        [[nodiscard]] const IconCache::Icon* InkArt(const std::string& a_name)
+        [[nodiscard]] const InkSheet* InkSheetFor(const std::string& a_name)
         {
             auto it = g_paper.find(a_name);
             if (it == g_paper.end()) {
@@ -1229,13 +1302,21 @@ namespace FUI::Theme
                 // a missing file costs a probe every frame -- and the wheel
                 // already learned the other half of this, that a cached
                 // failure must be droppable (see ReloadInkArt).
-                IconCache::Icon ic{};
-                IconCache::LoadPngTexture(kInkDir + a_name, ic);
-                if (!ic.srv) SKSE::log::warn("[THEME] ink art missing: {}{}",
-                                             kInkDir, a_name);
-                it = g_paper.emplace(a_name, ic).first;
+                InkSheet sh{};
+                IconCache::LoadPngTexture(kInkDir + a_name, sh.ic, false, sh.mean);
+                if (!sh.ic.srv) SKSE::log::warn("[THEME] ink art missing: {}{}",
+                                                kInkDir, a_name);
+                else SKSE::log::info("[THEME] ink art {} — mean rgb {:.1f} {:.1f} {:.1f}",
+                                     a_name, sh.mean[0], sh.mean[1], sh.mean[2]);
+                it = g_paper.emplace(a_name, sh).first;
             }
-            return it->second.srv ? &it->second : nullptr;
+            return it->second.ic.srv ? &it->second : nullptr;
+        }
+
+        [[nodiscard]] const IconCache::Icon* InkArt(const std::string& a_name)
+        {
+            const auto* sh = InkSheetFor(a_name);
+            return sh ? &sh->ic : nullptr;
         }
 
         // One sprite, stretched into a rect. Vertical marks reuse the same
@@ -1504,6 +1585,63 @@ namespace FUI::Theme
         }
     }
 
+    // ★★winBg IS the paper. Not a colour behind it -- the sheet is opaque and
+    // Apply() hands ImGui a transparent WindowBg on any paper skin, so a value
+    // that merely sat behind would be dead. It states what the sheet must READ
+    // as on screen, and the tint that gets there is winBg / the file's own
+    // average. Two things follow, and both are the point:
+    //   · the SETTINGS chip and the window now come from one number, so they
+    //     cannot drift apart the way a chip painted from a token and a window
+    //     painted from a file always could;
+    //   · swapping the sheet for a lighter or darker photograph leaves the skin
+    //     unchanged -- the divisor moves with the file.
+    // ★A tint only multiplies: asking for a paper BRIGHTER than the file is
+    // unanswerable and clamps. Said out loud once per sheet rather than
+    // silently, because the symptom is a token you can edit with no effect.
+    ImU32 PaperTint()
+    {
+        // ★Asked once per window per frame, and the answer only moves when the
+        // skin changes or the art is reloaded — so it is resolved on those two
+        // events, not on the map's string hash every time. Same shape as
+        // LightItemShadow's cache, plus the reload generation, because a sheet
+        // swapped under a live skin changes the divisor.
+        static int   s_skin = -1;
+        static int   s_gen  = -1;
+        static ImU32 s_tint = IM_COL32_WHITE;
+        // SkinIndex(), not g_skin — the default may not be resolved yet, and
+        // caching against 0 would key this on a skin that never renders.
+        const int skin = SkinIndex();
+        if (s_skin == skin && s_gen == g_inkGen) return s_tint;
+        s_skin = skin;
+        s_gen  = g_inkGen;
+        s_tint = IM_COL32_WHITE;
+
+        const Skin& sk = S();
+        if (!sk.paper || !*sk.paper) return s_tint;
+        const auto* sh = InkSheetFor(sk.paper);
+        if (!sh) return s_tint;
+
+        const float want[3] = { sk.winBg.x * 255.0f, sk.winBg.y * 255.0f,
+                                sk.winBg.z * 255.0f };
+        int   out[3]{};
+        bool  clamped = false;
+        for (int i = 0; i < 3; ++i) {
+            const float m = (sh->mean[i] > 1.0f) ? sh->mean[i] : 1.0f;
+            float t = want[i] / m;
+            if (t > 1.0f) { t = 1.0f; clamped = true; }
+            out[i] = static_cast<int>(t * 255.0f + 0.5f);
+        }
+        if (clamped) {
+            SKSE::log::warn("[THEME] {} asks for paper brighter than {} "
+                            "(want {:.0f} {:.0f} {:.0f}, sheet {:.1f} {:.1f} {:.1f}) "
+                            "— a tint cannot add light, so winBg is capped",
+                            sk.name, sk.paper, want[0], want[1], want[2],
+                            sh->mean[0], sh->mean[1], sh->mean[2]);
+        }
+        s_tint = IM_COL32(out[0], out[1], out[2], 255);
+        return s_tint;
+    }
+
     bool PaperTexture(ImTextureID& a_out, ImVec2 a_size, unsigned int a_key,
                       ImVec2& a_uv0, ImVec2& a_uv1)
     {
@@ -1561,6 +1699,8 @@ namespace FUI::Theme
         const float vs[4] = { uv0.y, uv0.y + dv * (f / size.y),
                               uv1.y - dv * (f / size.y), uv1.y };
         const int   a[4]  = { 0, 255, 255, 0 };   // transparent at the outside
+        // the skin's own paper colour, reached by multiplying the sheet
+        const ImU32 tint  = PaperTint() & 0x00FFFFFFu;
 
         a_dl->PushTexture(tex);
         a_dl->PrimReserve(9 * 6, 16);
@@ -1583,7 +1723,7 @@ namespace FUI::Theme
                 // and the sheet keeps its square.
                 const int al = (std::min)(a[c], a[r]);
                 a_dl->PrimWriteVtx(ImVec2(xs[c], ys[r]), ImVec2(us[c], vs[r]),
-                                   IM_COL32(255, 255, 255, al));
+                                   tint | (static_cast<ImU32>(al) << IM_COL32_A_SHIFT));
             }
         }
         a_dl->PopTexture();
@@ -1592,12 +1732,13 @@ namespace FUI::Theme
 
     void ReloadInkArt()
     {
-        for (auto& [k, ic] : g_paper) {
-            if (ic.srv) ic.srv->Release();
-            if (ic.tex) ic.tex->Release();
+        for (auto& [k, sh] : g_paper) {
+            if (sh.ic.srv) sh.ic.srv->Release();
+            if (sh.ic.tex) sh.ic.tex->Release();
         }
         const size_t n = g_paper.size();
         g_paper.clear();
+        ++g_inkGen;
         SKSE::log::info("[THEME] ink art dropped ({} sheet(s))", n);
     }
 
@@ -1665,8 +1806,8 @@ namespace FUI::Theme
         // asked per sprite, so answer it once per skin change
         static int  s_for = -1;
         static bool s_val = false;
-        if (s_for != g_skin) {
-            s_for = g_skin;
+        if (s_for != SkinIndex()) {   // resolves the default first — see EnsureSkin
+            s_for = SkinIndex();
             s_val = false;
             const char* nm = S().name;
             for (const char* n : kLight) {

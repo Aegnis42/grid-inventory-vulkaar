@@ -25,7 +25,6 @@ namespace FUI::Lang
         X(Edit, "EDIT")                                                                                     \
         X(Settings, "SETTINGS")                                                                             \
         X(ScaleLabel, "SCALE")                                                                        \
-        X(CellScaleLabel, "CELL")                                                                     \
         X(SkinLabel, "SKIN")                                                                                \
         X(LanguageLabel, "LANGUAGE")                                                                        \
         X(Gold, "GOLD")                                                                                     \

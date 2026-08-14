@@ -152,21 +152,36 @@ namespace FUI::Theme
     // supposed to escape.
     inline constexpr float kTornOut = 14.0f;
 
-    // H′: global UI scale (0.5~1.6), persisted as "!uiscale".
+    // ★★FIXED AT 1.0, and no longer a setting. It was a 0.5~1.6 slider called
+    // SCALE that moved type, buttons and spacing while CellScale moved the
+    // board — two scales for one question, and the board is 97% of the window,
+    // so the type one mostly made the chrome disagree with itself. The
+    // remaining ~57 call sites keep going through here rather than dropping a
+    // "* 1.0" each: the multiply costs nothing, and this stays the one place a
+    // DPI factor could be reintroduced if it is ever wanted.
+    // The old "!uiscale" key is no longer read or written.
     [[nodiscard]] float Scale();
-    void SetScale(float a_scale);
 
-    // ★★The BOARD's own scale, on top of Scale() — persisted as "!cellscale".
+    // ★★THE scale — what the SCALE slider moves, persisted as "!scale".
     // Measured on the main window: the item grid and the equipment doll are
     // both built out of cell-sized blocks (10x14 cells; every slot is 2x2 of
     // them, weapons 2x4), and together they are 97% of the window's width.
-    // Padding is 4%. So "make the window smaller without shrinking the text"
-    // has exactly one lever, and this is it — Scale() moves type, buttons and
-    // spacing, CellScale() moves the board and the doll.
-    // ★It multiplies Scale(), so the two compose: a player who wants
-    // everything smaller still just moves the UI scale.
+    // Padding is 4%. So "make the window smaller" has exactly one lever and
+    // this is it — which is why it inherited the name.
+    //
+    // ★★TWO NUMBERS, deliberately. The board's shipped size was 0.90 of the
+    // cell constants, and a slider that reads 0.90 at the default invites the
+    // question "0.90 of WHAT" — the answer being an internal constant nobody
+    // outside this file can see. So the SETTING is 1.00 at the shipped size
+    // and the 0.90 moved here, where it is the definition of 1.00 rather than
+    // a number the player has to interpret.
+    //   ScaleSetting()  what the slider shows and the ini stores — 1.00 default
+    //   CellScale()     what the board is drawn at — ScaleSetting() * kScaleBase
+    // Render code wants the second; settings and persistence want the first.
+    inline constexpr float kScaleBase = 0.90f;   // the board size "1.00" means
     [[nodiscard]] float CellScale();
-    void SetCellScale(float a_scale);
+    [[nodiscard]] float ScaleSetting();
+    void SetScaleSetting(float a_scale);
 
     // ── GI59: glow + icon light are stored PER ICON STYLE ──────────────────
     // Slot 0 = realistic (3D captures), 1 = drawn (flat art). They need
@@ -258,16 +273,32 @@ namespace FUI::Theme
     void SetIconStyleOf(int a_skin, int a_style);
     void SetIconStyle(int a_style);   // the live skin
 
-    // active skin (1-based), persisted as "!skin2"
+    // active skin (1-based), persisted BY NAME as "!skin3"
     [[nodiscard]] int  SkinIndex();
     void SetSkin(int a_index);            // re-applies the ImGui style
-    // ★A number saved before "Fable Amber" was removed. Files written by an
-    // older build say "!skin"; every skin after the removed one shifted down
-    // by one, so reading such a file raw would hand the player a DIFFERENT
-    // skin — silently, and on the very first launch after updating. The key
-    // was renamed for exactly this reason: "!skin" means "needs converting",
-    // "!skin2" means "already in the new numbering".
+
+    // ★★A saved POSITION is only readable by the build that wrote it. Twice now
+    // the array has been reordered — "Fable Amber" removed, then the ink pair
+    // moved to the front and the Glass pair dropped — and each time every
+    // saved number pointed at a different skin. That is not a visible break: a
+    // player sees their own skin and their own icon gain, just belonging to
+    // somebody else. So a name is what gets written, and a name is what these
+    // take. Position survives nothing; a name survives everything except a
+    // rename, which is a thing we can choose not to do.
+    [[nodiscard]] int  SkinIndexByName(const char* a_name);   // 0 = no such skin
+    [[nodiscard]] const char* SkinNameAt(int a_index);        // "" out of range
+    bool SetSkinByName(const char* a_name);                   // false = unknown
+
+    // The two legacy numberings, oldest first. Both convert a position written
+    // by an older build into a NAME in this one, which is why the removed
+    // skins have to name a substitute (see kSkins' header).
+    //   "!skin"  — before Fable Amber was removed
+    //   "!skin2" — after that, before the Glass pair went and Sumi moved up
     void SetSkinLegacy(int a_oldIndex);
+    void SetSkinLegacy2(int a_oldIndex);
+    // ...and the same conversion for a bare index, so !dispN / !shadN written
+    // under the old numbering land on the right skin. 0 = that skin is gone.
+    [[nodiscard]] int  MigrateSkin2Index(int a_oldIndex);
     [[nodiscard]] const Skin& S();        // active skin tokens
     [[nodiscard]] int  SkinCount();
     [[nodiscard]] const Skin& SkinAt(int a_index);   // 1-based
@@ -572,6 +603,17 @@ namespace FUI::Theme
                                     unsigned int a_key,
                                     ImVec2& a_uv0, ImVec2& a_uv1);
 
+    // ★★The multiplier that turns the sheet on disk into the skin's paper:
+    // Skin::winBg divided by the file's own average. So winBg is not a colour
+    // behind the sheet -- on a paper skin ImGui's WindowBg is transparent and
+    // nothing is behind it -- it is the colour the sheet must READ as, and the
+    // SETTINGS chip is painted from that same value. Before this, the chip came
+    // from the token and the window came from the file, and the only thing
+    // keeping them together was that nobody had changed either one.
+    // Returns white when the skin has no paper. Cannot brighten (a tint
+    // multiplies); a winBg above the sheet's average clamps and says so once.
+    [[nodiscard]] ImU32 PaperTint();
+
     // ★★Paints the sheet AND dissolves its edge. A photographed sheet ends in a
     // razor-straight cut, and no amount of brushwork on top hides that: the
     // frame's dry gaps are exactly where a hard edge shows through, and its
@@ -706,8 +748,18 @@ namespace FUI::Theme
     // them, so "restore the default" and "what a fresh install had" cannot
     // drift apart. Glow and icon gain differ per style/slot, which is exactly
     // why a hard-coded 1.0 in the reset path would have been wrong.
-    inline constexpr float kDefScale     = 1.00f;
-    inline constexpr float kDefCellScale = 0.80f;
+    inline constexpr float kDefScale     = 1.00f;   // fixed; Scale() returns it
+    // ★★The SCALE slider's three numbers, in one place. A right-click reset,
+    // the slider's own ends and a fresh install all read from here, so they
+    // cannot say different things.
+    // ★These are SETTING values (kScaleBase multiplies them). The ends were
+    // asked for as 0.75~1.10 while the default still read 0.90; carried across
+    // at the same BOARD SIZE — which is what the numbers were chosen by eye
+    // against — that span is 0.83~1.22, rounded here to slider-friendly ends.
+    // Board size still runs 0.765~1.08 against the old 0.75~1.10.
+    inline constexpr float kDefCellScale = 1.00f;
+    inline constexpr float kMinCellScale = 0.85f;
+    inline constexpr float kMaxCellScale = 1.20f;
     // ★0/0 means "the shipped rig", not "no light" — the offset origin. That
     // is what makes a right-click reset here identical to a fresh install, and
     // what lets an item def's 0/0 mean "whatever the global says".
