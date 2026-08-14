@@ -698,6 +698,13 @@ namespace FUI::Wheeler
 
             if (fav.kind == FavKind::kSpell) {
                 const char* key = SchoolOf(fav.form);
+                // ★A POWER has no school -- GetAssociatedSkill returns kNone --
+                // so it fell through to the old painted medallion and sat in a
+                // ring of brush marks wearing a picture frame. It cannot borrow
+                // the shout's dragon word either: a power has no word. Its own
+                // mark, then, and every power shares it -- there is nothing
+                // about a lesser power that a sigil could tell apart.
+                if (!key && UsesVoiceSlot(fav.form)) key = "sym_power";
                 const auto* ic = key ? Symbol(key) : nullptr;
                 if (!ic) return false;
                 const float h = a_sz * a_sigilScale;
@@ -1675,6 +1682,13 @@ namespace FUI::Wheeler
                 ImGui_ImplDX11_NewFrame();
                 ImGui_ImplWin32_NewFrame();
                 ImGui::NewFrame();
+                // ★★This menu draws its OWN ImGui frame, so the mip sampler the
+                // inventory binds at the head of its background list never
+                // reached the wheel: every sprite here was sampled at mip 0.
+                // A 256px sigil shown at ~48px is a 5x reduction, and the fine
+                // curves of the power mark came out as a staircase. The mips
+                // were already built (IconCache) -- nothing was using them.
+                UIRoot::UseMipSampler(ImGui::GetBackgroundDrawList());
                 Draw();
                 ImGui::Render();
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -3554,7 +3568,14 @@ namespace FUI::Wheeler
                 // so the same box holds far less ink. Matching the boxes made
                 // the sigils shout over the words -- these are the numbers that
                 // make the two weigh the same on the ring.
-                constexpr float kSigilScale = 0.80f;   // spell, of the medallion box
+                // ★0.92, up from 0.80. The schools are mostly open shapes -- a
+                // bird, a tree, three rings -- so they carry far less ink than
+                // their box suggests and read small beside a filled mark. The
+                // power sigil keeps its size by being drawn smaller INSIDE its
+                // file (82% of the tile against the schools' 94%), which is
+                // also where its edges got softened; scaling it here instead
+                // would have enlarged the aliasing along with the shape.
+                constexpr float kSigilScale = 0.92f;   // spell, of the medallion box
                 constexpr float kWordScale  = 1.00f;   // shout, ...along its length
                 // Which of the two the group wants is the table's answer now.
                 if (auto* face = G(shownGroup).face(i)) {

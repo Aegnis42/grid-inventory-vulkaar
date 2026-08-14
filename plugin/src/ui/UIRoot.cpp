@@ -3574,6 +3574,11 @@ namespace FUI::UIRoot
         a_dl->AddCallback(&SilhouetteOffCB, nullptr);
     }
 
+    void UseMipSampler(ImDrawList* a_dl)
+    {
+        if (a_dl) a_dl->AddCallback(&MipSamplerCB, nullptr);
+    }
+
     bool IsConsoleOpen()
     {
         auto* ui = RE::UI::GetSingleton();

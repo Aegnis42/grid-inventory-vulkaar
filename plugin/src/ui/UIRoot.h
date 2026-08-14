@@ -150,6 +150,15 @@ namespace FUI::UIRoot
     [[nodiscard]] bool BeginSilhouette(ImDrawList* a_dl);
     void EndSilhouette(ImDrawList* a_dl);
 
+    // ★★Binds the mip-enabled sampler for the rest of the draw list. The DX11
+    // backend's own sampler is MaxLOD = 0, so a texture's mip chain is ignored
+    // and a 256px sprite shown at ~48px aliases -- visible as a staircase along
+    // any fine curve. The inventory gets this at the head of its background
+    // list once a frame; the WHEEL runs its own ImGui frame (its PostDisplay
+    // calls NewFrame/Render itself) and so was never covered by that one.
+    // Call it first in any independent frame.
+    void UseMipSampler(ImDrawList* a_dl);
+
     // main.cpp installs these to keep legacy state (attack-input block) in sync
     void SetVisibilityCallbacks(std::function<void()> a_onShow, std::function<void()> a_onHide);
 
