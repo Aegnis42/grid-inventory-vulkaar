@@ -11,6 +11,7 @@
 #include "ui/Wheeler.h"
 #include "game/BagFilter.h"
 #include "game/Costume.h"
+#include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
 #include "ui/UIRoot.h"
@@ -3809,6 +3810,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     }
                 }
                 if (worn && wornUnits <= 0) wornUnits = 1;
+                // ★★The SECOND ring is worn without the engine knowing it: a
+                // carrier holds its look and its enchantment while the ring
+                // itself stays in the pack, so it carries no ExtraWorn for the
+                // count above to find. Counted by hand, or the player sees the
+                // very same ring on the doll AND on the board at once.
+                if (DualRing::Second() == obj) wornUnits += 1;
                 int units = count - wornUnits -
                             Loadout::ReservedCount(obj->GetFormID());
                 // pending-drop pattern (mirrors Rebuild): units whose engine
@@ -4030,7 +4037,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                 }
-                if (worn && wornUnits <= 0) wornUnits = 1;   // worn but unlisted
+                if (worn && wornUnits <= 0) wornUnits = 1;
+                // ★★The SECOND ring is worn without the engine knowing it: a
+                // carrier holds its look and its enchantment while the ring
+                // itself stays in the pack, so it carries no ExtraWorn for the
+                // count above to find. Counted by hand, or the player sees the
+                // very same ring on the doll AND on the board at once.
+                if (DualRing::Second() == obj) wornUnits += 1;   // worn but unlisted
                 int units = count - wornUnits -
                             Loadout::ReservedCount(obj->GetFormID());
                 // Phase 7: units sold/stored whose engine removal is still queued
@@ -8411,7 +8424,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // Only an ACCEPTED equip that actually displaces something starts the
             // return carry. A potion or spell tome dropped on a slot is drunk or
             // read -- nothing comes off, and there is nothing to hand back.
-            if (accepted && swapping) {
+            // ★★The SECOND RING slot settles its own displacement, so the
+            // cursor must stay empty here. Dropping a ring there either swaps
+            // the two rings -- the displaced one goes straight back onto the
+            // first slot -- or replaces the second, and DualRing::Wear returns
+            // the old one to the pack itself. Handing it to the cursor as well
+            // showed the same ring in two places at once, which reads as a
+            // duplicate.
+            if (accepted && swapping && g_slotTarget != "ringL") {
                 // The engine has not unequipped it yet, so this is exactly a doll
                 // pickup -- and it must name the HAND, or the worn-unit match can
                 // consume the copy we just put IN and leave the displaced one

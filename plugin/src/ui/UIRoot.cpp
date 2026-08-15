@@ -2,6 +2,7 @@
 #include "ui/Editor.h"
 #include "ui/Equip.h"
 #include "game/Costume.h"
+#include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
 #include "ui/GridMenu.h"
@@ -3322,6 +3323,9 @@ namespace FUI::UIRoot
 
     void OnShow()
     {
+        // PHASE 0 PROBE: the state the menu is opening onto. After a save/load
+        // this is the reading that matters -- kPostLoadGame fires before the 3D
+        // is back, so the report there cannot see what the body actually built.
         g_menuOpenSfx = 10;   // clear of the open transition (3 was too early)
         // Re-ask the engine which button carries what: the player may have
         // rebound the controls since the last time the menu was up. Done HERE,
@@ -3729,6 +3733,9 @@ namespace FUI::UIRoot
         // the costume dresses whatever is worn. Coalesced -- a full set change
         // fires many equip events and DoReset3D rebuilds the whole actor.
         Costume::Tick();
+        // ★After the costume, and for the same reason: it re-points the second
+        // ring's 3D once that 3D exists, and a costume rebuild replaces it.
+        DualRing::Tick();
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)
         Grid::CapacityTick();       // W1+W2: weight bypass / space overload

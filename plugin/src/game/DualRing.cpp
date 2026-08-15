@@ -1,0 +1,349 @@
+#include "game/DualRing.h"
+
+#include "game/Costume.h"
+#include "ui/Grid.h"
+
+#include <vector>
+
+namespace FUI::DualRing
+{
+    namespace
+    {
+        using Slot = RE::BGSBipedObjectForm::BipedObjectSlot;
+        using BO   = RE::BIPED_OBJECTS::BIPED_OBJECT;
+
+        constexpr std::uint32_t kSlots = BO::kEditorTotal;   // 32
+
+        // ★Costume anchor 32. Costume::kAnchorCount is 31 precisely so this one
+        // is never raised OR dropped by that system: `need` there is
+        // `j < groups.size()` and groups can hold at most 31 entries, so the
+        // costume could never want it -- but its loop would still drop one it
+        // found held, which is why the count was lowered rather than shared.
+        constexpr std::uint32_t kCarrierId = 0x84A;
+        constexpr const char*   kPlugin    = "Grid Inventory.esp";
+
+        RE::FormID g_ringId  = 0;      // the ring the carrier stands in for
+        bool       g_wantOff = false;  // take-off asked for from the render pass
+
+        // ★What the carrier borrowed, so it can be handed back. The carrier is
+        // OUR form and no other actor wears it, so this is bookkeeping rather
+        // than the safety problem it would be for a shared armour -- but a
+        // stale enchantment would still follow it into its next use.
+        struct Lent
+        {
+            RE::EnchantmentItem* ench = nullptr;
+            bool                 held = false;
+        };
+        Lent g_lent;
+
+        [[nodiscard]] RE::TESObjectARMO* Carrier()
+        {
+            // Not a function-local static initialiser: a miss must be
+            // retryable. This can run before the data handler has the plugin,
+            // and caching null there would disable the feature for the session.
+            static RE::TESObjectARMO* cached = nullptr;
+            if (!cached) {
+                if (auto* dh = RE::TESDataHandler::GetSingleton()) {
+                    cached = dh->LookupForm<RE::TESObjectARMO>(kCarrierId, kPlugin);
+                }
+            }
+            return cached;
+        }
+
+        [[nodiscard]] RE::TESObjectARMO* RingById(RE::FormID a_id)
+        {
+            if (!a_id) return nullptr;
+            auto* f = RE::TESForm::LookupByID(a_id);
+            return f ? f->As<RE::TESObjectARMO>() : nullptr;
+        }
+
+        [[nodiscard]] const char* NameOf(RE::TESForm* a_f)
+        {
+            const char* n = a_f ? a_f->GetName() : nullptr;
+            return (n && *n) ? n : "<unnamed>";
+        }
+
+        // The ring the ENGINE is wearing on kRing, if any.
+        [[nodiscard]] RE::TESObjectARMO* FirstRing(RE::PlayerCharacter* a_p)
+        {
+            if (!a_p) return nullptr;
+            for (const auto& [obj, data] : a_p->GetInventory(
+                     [](RE::TESBoundObject& o) { return o.IsArmor(); })) {
+                if (data.first <= 0 || !data.second || !data.second->IsWorn()) continue;
+                auto* a = obj->As<RE::TESObjectARMO>();
+                if (!a || Costume::IsAnchor(a) || IsCarrier(a)) continue;
+                if (Grid::IsRing(a)) return a;
+            }
+            return nullptr;
+        }
+
+        // ★★"Same effect" is NOT "same enchantment form". Two rings of one
+        // family at different strengths are separate forms carrying the same
+        // EffectSetting, and stacking those is exactly what this feature exists
+        // to prevent -- so the comparison is on the base effects.
+        [[nodiscard]] bool ShareAnEffect(RE::TESObjectARMO* a_x, RE::TESObjectARMO* a_y)
+        {
+            if (!a_x || !a_y) return false;
+            auto* ex = a_x->formEnchanting;
+            auto* ey = a_y->formEnchanting;
+            if (!ex || !ey) return false;   // an unenchanted ring stacks with anything
+            if (ex == ey) return true;
+            for (auto* px : ex->effects) {
+                if (!px || !px->baseEffect) continue;
+                for (auto* py : ey->effects) {
+                    if (py && py->baseEffect == px->baseEffect) return true;
+                }
+            }
+            return false;
+        }
+
+        [[nodiscard]] std::uint32_t WornMask(RE::PlayerCharacter* a_p)
+        {
+            std::uint32_t used = 0;
+            for (const auto& [obj, data] : a_p->GetInventory(
+                     [](RE::TESBoundObject& o) { return o.IsArmor(); })) {
+                if (data.first <= 0 || !data.second || !data.second->IsWorn()) continue;
+                if (auto* a = obj->As<RE::TESObjectARMO>()) {
+                    used |= static_cast<std::uint32_t>(a->GetSlotMask());
+                }
+            }
+            return used;
+        }
+
+        // A biped slot nothing is wearing right now.
+        // ★Searched from the TOP: the low custom slots (44-49) are where
+        // cloaks, backpacks and lanterns live, so taking one of those picks a
+        // fight with whatever the player already has installed. kFX01 (31) is
+        // skipped as well -- it is the effect slot and builds no armour.
+        [[nodiscard]] int FreeSlot(RE::PlayerCharacter* a_p)
+        {
+            const std::uint32_t used = WornMask(a_p);
+            for (int i = static_cast<int>(kSlots) - 2; i >= 14; --i) {
+                if (!(used & (1u << i))) return i;
+            }
+            return -1;
+        }
+
+        // Lend the ring's enchantment to the carrier and put it on a_mask.
+        // ★A ring's enchantment is kConstantEffect (verified: no vanilla ARMO
+        // carries EAMT at all), so there is no charge to manage -- lending the
+        // form IS lending the effect. It must be in place BEFORE the equip,
+        // because that is when the engine reads it.
+        void Lend(RE::TESObjectARMO* a_carrier, RE::TESObjectARMO* a_ring,
+                  std::uint32_t a_mask)
+        {
+            if (!g_lent.held) {
+                g_lent.ench = a_carrier->formEnchanting;
+                g_lent.held = true;
+            }
+            a_carrier->formEnchanting = a_ring->formEnchanting;
+            a_carrier->bipedModelData.bipedObjectSlots = static_cast<Slot>(a_mask);
+        }
+
+        void Reclaim()
+        {
+            auto* c = Carrier();
+            if (!c || !g_lent.held) return;
+            c->formEnchanting = g_lent.ench;
+            g_lent = {};
+        }
+    }
+
+    RE::TESObjectARMO* Second() { return RingById(g_ringId); }
+
+    bool IsCarrier(const RE::TESForm* a_form)
+    {
+        auto* c = Carrier();
+        return c && a_form && a_form->GetFormID() == c->GetFormID();
+    }
+
+    Verdict CanWear(RE::TESObjectARMO* a_ring)
+    {
+        if (!a_ring || !Grid::IsRing(a_ring)) return Verdict::kNotARing;
+        if (!Carrier()) return Verdict::kNoCarrier;
+        auto* p = RE::PlayerCharacter::GetSingleton();
+        if (!p) return Verdict::kNoCarrier;
+
+        // ★★The OTHER ring, whichever slot it is on. Asking only about the
+        // first slot made the drop rules asymmetric: dragging the LEFT ring
+        // onto the right slot picks it up first, which empties the left slot,
+        // and the drop was then refused for having no first ring -- so the
+        // ring came off instead of moving. The right-to-left direction worked
+        // only because that check happened to pass.
+        auto* other = FirstRing(p);
+        if (!other) other = RingById(g_ringId);
+        if (other == a_ring) return Verdict::kAlreadyWorn;
+        if (ShareAnEffect(other, a_ring)) return Verdict::kSameEffect;
+        if (FreeSlot(p) < 0) return Verdict::kNoFreeSlot;
+        // ★An empty first slot is no longer a refusal. Where the ring lands is
+        // Wear's decision -- it fills the first slot, or trades places with the
+        // ring already on the second -- because a slot that takes a drag and
+        // then drops the item on the floor is the worst of the options.
+        return Verdict::kOk;
+    }
+
+    const char* VerdictText(Verdict a_v)
+    {
+        // ★English literals, not Lang::T: that takes an enum key, so a
+        // player-facing string means a new entry in the table AND in four
+        // language files. These are log text today; they move to Lang the day
+        // one of them is shown to the player.
+        switch (a_v) {
+        case Verdict::kNotARing:    return "not a ring";
+        case Verdict::kNoFirstRing: return "fill the first ring slot first";
+        case Verdict::kAlreadyWorn: return "already worn";
+        case Verdict::kSameEffect:  return "the same effect is already worn";
+        case Verdict::kNoCarrier:   return "carrier form missing (is the esp loaded?)";
+        case Verdict::kNoFreeSlot:  return "no free biped slot";
+        default:                    return "";
+        }
+    }
+
+    bool Wear(RE::TESObjectARMO* a_ring, RE::ExtraDataList* a_xl)
+    {
+        const auto v = CanWear(a_ring);
+        if (v != Verdict::kOk) {
+            SKSE::log::info("[DUALRING] refused '{}': {}", NameOf(a_ring), VerdictText(v));
+            return false;
+        }
+        auto* p  = RE::PlayerCharacter::GetSingleton();
+        auto* c  = Carrier();
+        auto* em = RE::ActorEquipManager::GetSingleton();
+        if (!p || !c || !em) return false;
+
+        // ★★Where it actually goes. The second slot cannot hold a ring on its
+        // own -- the doll would show a gap with nothing above it -- so an empty
+        // first slot is filled instead of refused, and that is also what makes
+        // the drag symmetric.
+        if (!FirstRing(p)) {
+            if (g_ringId) {
+                // ★SWAP. The player dragged the first ring onto the second
+                // slot; the two trade places. The one on the carrier goes back
+                // to the engine's own ring slot, and the incoming one takes the
+                // carrier.
+                auto* prev = RingById(g_ringId);
+                TakeOff();
+                if (prev) {
+                    em->EquipObject(p, prev, nullptr, 1, nullptr,
+                                    false, false, false, true);
+                    SKSE::log::info("[DUALRING] swap: '{}' moved to the first slot",
+                        NameOf(prev));
+                }
+            } else {
+                // Nothing on either slot: this belongs on the FIRST one.
+                em->EquipObject(p, a_ring, nullptr, 1, nullptr,
+                                false, false, false, true);
+                SKSE::log::info("[DUALRING] '{}' -> first slot (the second cannot be "
+                                "filled alone)", NameOf(a_ring));
+                return true;
+            }
+        }
+
+        if (g_ringId) TakeOff();   // one at a time
+
+        const int slot = FreeSlot(p);
+        if (slot < 0) return false;
+        const std::uint32_t mask = 1u << slot;
+
+        Lend(c, a_ring, mask);
+        // The carrier is not the player's item; it goes in the pack purely so
+        // the engine has something to equip, and comes back out on removal.
+        p->AddObjectToContainer(c, nullptr, 1, nullptr);
+        em->EquipObject(p, c, nullptr, 1, nullptr, false, false, false, true);
+
+        g_ringId = a_ring->GetFormID();
+        SKSE::log::info("[DUALRING] second ring '{}' on slot {} (0x{:08X}), ench '{}'",
+            NameOf(a_ring), slot + 30, mask,
+            a_ring->formEnchanting ? NameOf(a_ring->formEnchanting) : "none");
+        (void)a_xl;
+        return true;
+    }
+
+    void TakeOff()
+    {
+        if (!g_ringId) return;
+        auto* ring = RingById(g_ringId);
+        auto* p    = RE::PlayerCharacter::GetSingleton();
+        auto* c    = Carrier();
+        if (p && c) {
+            if (auto* em = RE::ActorEquipManager::GetSingleton()) {
+                em->UnequipObject(p, c, nullptr, 1, nullptr, false, false, false, true);
+            }
+            // Count high enough to sweep duplicates a crossed save could leave.
+            p->RemoveItem(c, 99, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+        }
+        Reclaim();
+        SKSE::log::info("[DUALRING] second ring '{}' removed", NameOf(ring));
+        g_ringId = 0;
+    }
+
+    void RequestTakeOff() { g_wantOff = true; }
+
+    void Tick()
+    {
+        if (g_wantOff) {
+            g_wantOff = false;
+            TakeOff();
+            Grid::RequestRebuild();
+        }
+        if (!g_ringId) return;
+        auto* p = RE::PlayerCharacter::GetSingleton();
+        if (!p || !p->Is3DLoaded()) return;
+
+        // ★The ring can leave without going through us -- sold, dropped, taken
+        // by a script. Observing beats remembering: the moment it is not in the
+        // pack the carrier is standing in for nothing.
+        auto* ring = RingById(g_ringId);
+        if (!ring) { TakeOff(); return; }
+        bool have = false;
+        for (const auto& [obj, data] : p->GetInventory(
+                 [&](RE::TESBoundObject& o) { return &o == ring; })) {
+            have = data.first > 0;
+            (void)obj;
+        }
+        if (!have) {
+            SKSE::log::info("[DUALRING] the second ring left the inventory -- dropping it");
+            TakeOff();
+        }
+    }
+
+    void RevertGame(SKSE::SerializationInterface*)
+    {
+        Reclaim();
+        g_ringId  = 0;
+        g_wantOff = false;
+    }
+
+    void OnLoad()
+    {
+        if (!g_ringId) return;
+        // ★The equip survived in the save; the LOAN did not. The engine re-read
+        // the carrier from the plugin, so its enchantment is the record's own
+        // again -- and a carrier worn with no enchantment is a second ring that
+        // quietly stopped working.
+        auto* p    = RE::PlayerCharacter::GetSingleton();
+        auto* c    = Carrier();
+        auto* ring = RingById(g_ringId);
+        if (!p || !c || !ring) { g_ringId = 0; return; }
+        g_lent = {};   // whatever we recorded belongs to the previous session
+        const auto mask = static_cast<std::uint32_t>(c->GetSlotMask());
+        Lend(c, ring, mask ? mask : (1u << 30));
+        SKSE::log::info("[DUALRING] load: re-lent '{}' to the carrier", NameOf(ring));
+    }
+
+    void SaveGame(SKSE::SerializationInterface* a_intfc)
+    {
+        if (!a_intfc->OpenRecord(kRecordType, 1)) return;
+        a_intfc->WriteRecordData(&g_ringId, sizeof(g_ringId));
+    }
+
+    void LoadRecord(SKSE::SerializationInterface* a_intfc, std::uint32_t)
+    {
+        RE::FormID id = 0;
+        a_intfc->ReadRecordData(&id, sizeof(id));
+        // ★Through the resolver: a load order change moves every FormID, and a
+        // raw one would name a different item entirely.
+        RE::FormID resolved = 0;
+        g_ringId = (id && a_intfc->ResolveFormID(id, resolved)) ? resolved : 0;
+    }
+}

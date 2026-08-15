@@ -45,6 +45,8 @@ set(SOURCES
     src/game/BagFilter.cpp
     src/game/Costume.h
     src/game/Costume.cpp
+    src/game/DualRing.h
+    src/game/DualRing.cpp
     src/ui/ItemPreview.h
     src/ui/ItemPreview.cpp
     src/ui/GridMenu.h

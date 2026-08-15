@@ -1,6 +1,7 @@
-#include "api/HostApi.h"
+﻿#include "api/HostApi.h"
 #include "game/BagFilter.h"
 #include "game/Costume.h"
+#include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "ui/Editor.h"
 #include "ui/Fallback.h"
@@ -1676,6 +1677,10 @@ namespace
             // Costume::NoteGameLoaded: the engine rebuilds the actor for a
             // while after this message, and every rebuild undoes it.
             FUI::Costume::NoteGameLoaded();
+            // ★The equip survived the save; the LOAN did not -- the engine
+            // re-read the carrier from the plugin. Re-lend before the player
+            // can notice a second ring that stopped working.
+            FUI::DualRing::OnLoad();
             break;
         }
     }
@@ -1687,6 +1692,7 @@ namespace
         FUI::Grid::SaveGame(a_intfc);
         FUI::GoldCoins::SaveGame(a_intfc);
         FUI::Costume::SaveGame(a_intfc);
+        FUI::DualRing::SaveGame(a_intfc);
         FUI::LootBarter::SaveGame(a_intfc);   // F7: container spot memory (GCLY)
         FUI::Wheeler::SaveGame(a_intfc);      // quick-wheel slot order (GWHL)
     }
@@ -1703,6 +1709,8 @@ namespace
                 FUI::GoldCoins::LoadRecord(a_intfc, version);
             } else if (type == FUI::Costume::kRecordType) {
                 FUI::Costume::LoadRecord(a_intfc, version);
+            } else if (type == FUI::DualRing::kRecordType) {
+                FUI::DualRing::LoadRecord(a_intfc, version);
             } else if (type == FUI::Wheeler::kRecordType) {
                 FUI::Wheeler::LoadRecord(a_intfc, version);
             } else if (type == FUI::LootBarter::kContRecordType) {
@@ -1722,6 +1730,7 @@ namespace
     {
         FUI::Loadout::RevertGame(a_intfc);
         FUI::Costume::RevertGame(a_intfc);
+        FUI::DualRing::RevertGame(a_intfc);
         FUI::Wheeler::RevertGame(a_intfc);
         FUI::Grid::RevertGame(a_intfc);
         FUI::GoldCoins::RevertGame(a_intfc);

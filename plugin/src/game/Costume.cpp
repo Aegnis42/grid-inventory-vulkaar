@@ -73,10 +73,21 @@ namespace FUI::Costume
         // At 32 the array can no longer be the shortage: Apply() can build at
         // most 31 groups, so the warning below is now unreachable by counting
         // (it stays as the guard against that ever ceasing to be true).
+        // ★★...which is exactly why the COSTUME stops at 31 and the 32nd
+        // record (0x84A) belongs to DualRing instead. The costume cannot want
+        // it -- `need` is `j < groups.size()` and groups tops out at 31 -- but
+        // it would still DROP one it finds held, so the loop must not reach it
+        // at all. The reservation is free: nothing is taken from the costume.
         // ★They cost nothing to carry: no model, no keywords, 0/0/0, and only
         // the ones a costume actually needs are ever equipped.
         constexpr std::uint32_t kAnchorFirst = 0x82B;
-        constexpr int           kAnchorCount = 32;
+        constexpr int           kAnchorCount = 31;   // 32nd is DualRing's carrier
+        // ★★...but ALL 32 are ours to hide. IsAnchor is what keeps these off
+        // the grid, the doll, the capacity count and every transfer, and the
+        // carrier needs exactly the same treatment -- it is no more the
+        // player's property than an anchor is. Counting only 31 here would
+        // have put a nameless 0/0/0 helmet in the player's bag.
+        constexpr int           kAnchorTotal = 32;
         constexpr const char*   kPlugin = "Grid Inventory.esp";
 
         int  g_anchorTries = 0;        // give up rather than loop forever
@@ -97,8 +108,8 @@ namespace FUI::Costume
             // retryable. This can be reached before the data handler has the
             // plugin, and caching a null there would disable the feature for
             // the session with no way back.
-            static std::array<RE::TESObjectARMO*, kAnchorCount> cached{};
-            if (a_i < 0 || a_i >= kAnchorCount) return nullptr;
+            static std::array<RE::TESObjectARMO*, kAnchorTotal> cached{};
+            if (a_i < 0 || a_i >= kAnchorTotal) return nullptr;
             if (!cached[a_i]) {
                 if (auto* dh = RE::TESDataHandler::GetSingleton()) {
                     cached[a_i] = dh->LookupForm<RE::TESObjectARMO>(
@@ -111,7 +122,9 @@ namespace FUI::Costume
         [[nodiscard]] int AnchorIndexOf(const RE::TESForm* a_form)
         {
             if (!a_form) return -1;
-            for (int i = 0; i < kAnchorCount; ++i) {
+            // ★kAnchorTotal, not kAnchorCount: this answers "is this ours to
+            // hide", which covers DualRing's carrier too.
+            for (int i = 0; i < kAnchorTotal; ++i) {
                 auto* f = AnchorForm(i);
                 if (f && f->GetFormID() == a_form->GetFormID()) return i;
             }
@@ -447,9 +460,16 @@ namespace FUI::Costume
             // stale case repairs itself on the next tick.
             const int ai = AnchorIndexOf(a);
             if (ai >= 0) {
-                anc[ai].held = true;
-                anc[ai].mask = static_cast<std::uint32_t>(a->GetSlotMask());
-                if (data.second->IsWorn()) { anc[ai].worn = true; worn.push_back(a); }
+                // ★★AnchorIndexOf now answers for 32 records but anc[] holds 31
+                // -- index 31 is DualRing's carrier, which this system must
+                // neither track nor touch. It still `continue`s, so the carrier
+                // stays out of wornMask exactly like an anchor: the costume
+                // must not treat it as gear occupying a slot.
+                if (ai < kAnchorCount) {
+                    anc[ai].held = true;
+                    anc[ai].mask = static_cast<std::uint32_t>(a->GetSlotMask());
+                    if (data.second->IsWorn()) { anc[ai].worn = true; worn.push_back(a); }
+                }
                 continue;
             }
             if (!data.second->IsWorn()) continue;
