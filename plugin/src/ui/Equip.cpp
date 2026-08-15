@@ -689,12 +689,17 @@ namespace FUI::Equip
                         UIRoot::OpenInspect(eq->obj, Grid::DefKeyOf(eq->obj));
                     }
                 }
+                // ★★The second ring has NO worn copy for the unequip queue to
+                // find: the engine is wearing a carrier, not the ring. Both
+                // click paths have to route through DualRing instead -- the
+                // right-click one because the unequip would do nothing, and the
+                // left-click one because the carry would lift the item while it
+                // stayed on the doll, reading as a duplicate.
+                const bool secondRing = eq && std::string_view(a_slot.id) == "ringL" &&
+                                        DualRing::Second() == eq->obj;
+
                 if (eq && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {   // D5
-                    // ★The second ring has no worn copy for the normal queue to
-                    // find -- the engine is wearing a carrier, not the ring --
-                    // so the unequip goes through DualRing instead.
-                    if (std::string_view(a_slot.id) == "ringL" &&
-                        DualRing::Second() == eq->obj) {
+                    if (secondRing) {
                         SKSE::log::info("[ACT] rclick-unequip second ring '{}'",
                                         eq->obj->GetName());
                         DualRing::RequestTakeOff();
@@ -713,14 +718,7 @@ namespace FUI::Equip
                     // from there instead of re-resolving "the first worn list of
                     // this form", which answered the other hand's item whenever
                     // the same form was worn twice.
-                    // ★★The second ring has no worn copy for that queue to find
-                    // -- the engine is wearing a CARRIER, not the ring -- so
-                    // the unequip did nothing while the carry lifted the item
-                    // anyway: it stayed on the doll AND appeared on the cursor,
-                    // reading as a duplicate. The carrier has to let go here
-                    // exactly as it does on right-click.
-                    if (std::string_view(a_slot.id) == "ringL" &&
-                        DualRing::Second() == eq->obj) {
+                    if (secondRing) {
                         DualRing::RequestTakeOff();
                     } else {
                         g_pending.push_back({ eq->obj->GetFormID(), "", true,

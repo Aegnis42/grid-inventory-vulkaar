@@ -184,13 +184,8 @@ namespace FUI::DualRing
 
     const char* VerdictText(Verdict a_v)
     {
-        // ★English literals, not Lang::T: that takes an enum key, so a
-        // player-facing string means a new entry in the table AND in four
-        // language files. These are log text today; they move to Lang the day
-        // one of them is shown to the player.
         switch (a_v) {
         case Verdict::kNotARing:    return "not a ring";
-        case Verdict::kNoFirstRing: return "fill the first ring slot first";
         case Verdict::kAlreadyWorn: return "already worn";
         case Verdict::kSameEffect:  return "the same effect is already worn";
         case Verdict::kNoCarrier:   return "carrier form missing (is the esp loaded?)";

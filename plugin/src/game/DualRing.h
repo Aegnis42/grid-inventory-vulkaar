@@ -49,41 +49,48 @@ namespace FUI::DualRing
     // ★One place, asked by both the drop target and the act. The UI must be
     // able to refuse a drag WITHOUT restating these, or the two copies drift
     // and the player gets a slot that accepts a ring and then does nothing.
+    // ★An empty FIRST slot is deliberately not a refusal. Picking a ring up
+    // empties the slot it came from, so refusing on that basis made the drag
+    // asymmetric -- left-to-right took the ring off instead of moving it.
+    // Where a ring lands is Wear's decision, not a veto here.
     enum class Verdict : std::uint8_t
     {
         kOk,
         kNotARing,
-        kNoFirstRing,    // the first slot is empty -- fill that one first
         kAlreadyWorn,    // this very ring is already on one of the two slots
         kSameEffect,     // ★the feature's whole point: no stacking a duplicate
         kNoCarrier,      // the ESP record is missing
         kNoFreeSlot,
     };
     [[nodiscard]] Verdict CanWear(RE::TESObjectARMO* a_ring);
-    [[nodiscard]] const char* VerdictText(Verdict a_v);   // player-facing, localised
+    // English, for the log. A player-facing string would mean a new Lang key
+    // and four translations; nothing shows these to the player yet.
+    [[nodiscard]] const char* VerdictText(Verdict a_v);
 
     // ---- acts -------------------------------------------------------------
-    // Both are safe to call from the equip QUEUE only (game thread, outside
-    // the render pass) -- they equip, unequip and touch 3D.
+    // ★Equip-QUEUE only (game thread, outside the render pass): both call
+    // ActorEquipManager, and doing that inside the render pass defers the 3D
+    // refresh until the menu closes.
+    // Wear also decides WHERE the ring goes -- it fills an empty first slot,
+    // or trades places with the ring already on the second.
     bool Wear(RE::TESObjectARMO* a_ring, RE::ExtraDataList* a_xl);
     void TakeOff();
-    // ★Queued form of TakeOff, for callers inside the RENDER pass. Touching
-    // ActorEquipManager there defers the 3D refresh until the menu closes --
-    // the same rule every other equip act in this UI follows.
+    // Queued form of TakeOff, for callers inside the render pass.
     void RequestTakeOff();
 
     // ---- lifecycle --------------------------------------------------------
-    // Per game-update tick. Two jobs, both of which need the world to have
-    // settled rather than a callback: re-point the bone once the carrier's 3D
-    // exists, and drop the whole thing if the ring left the inventory (sold,
-    // dropped, stolen by a script).
+    // Per game-update tick. ★Drops the whole thing if the ring left the
+    // inventory -- sold, dropped, taken by a script. Observing beats
+    // remembering: the world can change behind this system's back, and the
+    // stale case then repairs itself on the next tick.
     void Tick();
 
     inline constexpr std::uint32_t kRecordType = 'DRNG';
     void RevertGame(SKSE::SerializationInterface* a_intfc);   // new game / pre-load
     void SaveGame(SKSE::SerializationInterface* a_intfc);
     void LoadRecord(SKSE::SerializationInterface* a_intfc, std::uint32_t a_version);
-    // ★The engine re-read the forms, so the enchantment and addon we lent the
-    // carrier are gone while the EQUIP survived in the save. Re-lends them.
+    // ★The engine re-read the forms, so the enchantment we lent the carrier is
+    // gone while the EQUIP survived in the save -- a carrier worn with no
+    // enchantment is a second ring that quietly stopped working. Re-lends it.
     void OnLoad();
 }

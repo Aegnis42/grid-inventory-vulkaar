@@ -3733,8 +3733,8 @@ namespace FUI::UIRoot
         // the costume dresses whatever is worn. Coalesced -- a full set change
         // fires many equip events and DoReset3D rebuilds the whole actor.
         Costume::Tick();
-        // ★After the costume, and for the same reason: it re-points the second
-        // ring's 3D once that 3D exists, and a costume rebuild replaces it.
+        // Second ring: notices when the ring has left the inventory behind our
+        // back (sold, dropped, taken by a script) and stands the carrier down.
         DualRing::Tick();
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)

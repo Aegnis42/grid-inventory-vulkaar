@@ -3811,10 +3811,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
                 if (worn && wornUnits <= 0) wornUnits = 1;
                 // ★★The SECOND ring is worn without the engine knowing it: a
-                // carrier holds its look and its enchantment while the ring
-                // itself stays in the pack, so it carries no ExtraWorn for the
-                // count above to find. Counted by hand, or the player sees the
-                // very same ring on the doll AND on the board at once.
+                // carrier wears its enchantment while the ring itself stays in
+                // the pack, so it carries no ExtraWorn for the count above to
+                // find. Counted by hand, or the player sees the very same ring
+                // on the doll AND on the board at once.
                 if (DualRing::Second() == obj) wornUnits += 1;
                 int units = count - wornUnits -
                             Loadout::ReservedCount(obj->GetFormID());
@@ -4037,13 +4037,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                 }
-                if (worn && wornUnits <= 0) wornUnits = 1;
+                if (worn && wornUnits <= 0) wornUnits = 1;   // worn but unlisted
                 // ★★The SECOND ring is worn without the engine knowing it: a
-                // carrier holds its look and its enchantment while the ring
-                // itself stays in the pack, so it carries no ExtraWorn for the
-                // count above to find. Counted by hand, or the player sees the
-                // very same ring on the doll AND on the board at once.
-                if (DualRing::Second() == obj) wornUnits += 1;   // worn but unlisted
+                // carrier wears its enchantment while the ring itself stays in
+                // the pack, so it carries no ExtraWorn for the count above to
+                // find. Counted by hand, or the player sees the very same ring
+                // on the doll AND on the board at once.
+                if (DualRing::Second() == obj) wornUnits += 1;
                 int units = count - wornUnits -
                             Loadout::ReservedCount(obj->GetFormID());
                 // Phase 7: units sold/stored whose engine removal is still queued
