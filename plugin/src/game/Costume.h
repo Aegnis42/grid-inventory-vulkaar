@@ -59,7 +59,7 @@ namespace FUI::Costume
     // ---- the anchors -----------------------------------------------------
     // A costume piece reaches the body by borrowing a WORN item's addon list,
     // so a slot the player left empty has no list and stays bare. An anchor
-    // fills that gap: a placeholder ARMO (Grid Inventory.esp 0x82B..0x832) with
+    // fills that gap: a placeholder ARMO (Grid Inventory.esp 0x82B..0x84A) with
     // 0 rating, 0 weight, 0 value, NO keywords and NO model, equipped into the
     // empty slot purely so there is a list to borrow.
     //

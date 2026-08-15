@@ -25,7 +25,7 @@
 # --- deliberately NOT here ---
 # Grid Inventory.esp is the mod's DATA and ships on Nexus, not from source.
 # The plugin references its FormIDs directly (coins 0x800.., bags 0x818..,
-# costume anchors 0x82B..0x832), so a clone builds but those features stay
+# costume anchors 0x82B..0x84A), so a clone builds but those features stay
 # inert without the released archive. That is the intended split: this repo
 # is the source, not a playable copy.
 

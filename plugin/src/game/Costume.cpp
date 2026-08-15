@@ -58,12 +58,25 @@ namespace FUI::Costume
         // ★24, not 8. Eight was a guess at how many slots a costume leaves
         // bare, and a real set overran it: a 17-piece outfit needed 11 and the
         // last three simply did not appear -- silently, apart from one warning
-        // in the log. The ceiling is now the number of slots a costume can
-        // cover at all, so the count can no longer be the thing that is wrong.
+        // in the log.
+        // ★★★32, not 24 -- and "24 is every slot a costume can cover" was
+        // simply wrong when it was written. BipedObjectSlot spans 32 bits and
+        // CoversSlot excludes only the shield, so 31 pieces can each want a
+        // slot of their own; 24 truncated seven of them.
+        // What makes that reachable rather than theoretical is the cost model:
+        // an anchor is spent per distinct donor ARMA, NOT per slot. A suit of
+        // armour covering body+forearms+hands costs ONE. Jewellery is the
+        // opposite -- one ARMA, one slot -- so a multi-ring mod, which gives
+        // every ring a custom slot of its own, spends one anchor per ring.
+        // Eight rings on top of the 11 that 17-piece outfit needed is 19, and a
+        // cloak, a backpack and a lantern take it past 24.
+        // At 32 the array can no longer be the shortage: Apply() can build at
+        // most 31 groups, so the warning below is now unreachable by counting
+        // (it stays as the guard against that ever ceasing to be true).
         // ★They cost nothing to carry: no model, no keywords, 0/0/0, and only
         // the ones a costume actually needs are ever equipped.
         constexpr std::uint32_t kAnchorFirst = 0x82B;
-        constexpr int           kAnchorCount = 24;
+        constexpr int           kAnchorCount = 32;
         constexpr const char*   kPlugin = "Grid Inventory.esp";
 
         int  g_anchorTries = 0;        // give up rather than loop forever
