@@ -404,6 +404,28 @@ namespace FUI::Grid
                                         RE::InventoryEntryData* a_entry,
                                         RE::ExtraDataList* a_xl);
 
+    // ★★"Is this a ring?" -- in ONE place, because it was four: the doll slot,
+    // the item category, the fallback icon and bag eligibility each asked
+    // HasPartOf(kRing) on their own.
+    // ★That bit can only ever answer for ONE worn ring. BipedAnim is
+    // `BIPOBJECT objects[kTotal]` -- a single item per slot -- so however a
+    // multi-ring mod is built, exactly one of the rings can hold kRing(6) and
+    // every other one must sit on a custom slot. The four copies therefore
+    // agreed on the first ring and quietly disagreed about the rest: filed as
+    // a nondescript accessory, drawn with the wrong icon, and allowed into a
+    // bag that refuses jewellery.
+    // ClothingRing is the ring's OWN keyword -- unlike ArmorJewelry, which
+    // amulets carry too -- so it answers for all of them.
+    // ★HasKeywordID compares FormIDs directly: no form to look up, no
+    // data-handler timing to get wrong, safe on a per-frame path.
+    [[nodiscard]] inline bool IsRing(const RE::TESObjectARMO* a_armo)
+    {
+        constexpr RE::FormID kClothingRing = 0x0010CD09;   // Skyrim.esm
+        return a_armo &&
+               (a_armo->HasPartOf(RE::BGSBipedObjectForm::BipedObjectSlot::kRing) ||
+                a_armo->HasKeywordID(kClothingRing));
+    }
+
     // GI1: one entry's units, in a stable order, each bound to the sub-stack it
     // belongs to. uid = ExtraUniqueID (0 when the engine assigned none),
     // xlIdx = position in entry->extraLists (-1 = a plain unit with no list).

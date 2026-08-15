@@ -698,7 +698,7 @@ namespace
         if (auto* armo = a_obj->As<RE::TESObjectARMO>()) {
             using S = RE::BGSBipedObjectForm::BipedObjectSlot;
             if (armo->HasPartOf(S::kAmulet))  return "armor_amulet";
-            if (armo->HasPartOf(S::kRing))    return "armor_ring";
+            if (FUI::Grid::IsRing(armo))      return "armor_ring";
             // circlet = slot 42 WITHOUT a head/hair slot (helmets add slot 42
             // to their mask just to hide circlets — those stay armor_head)
             if (armo->HasPartOf(S::kCirclet) && !armo->HasPartOf(S::kHead) &&

@@ -791,7 +791,7 @@ namespace FUI::Editor
                 }
                 if (const auto* armo = g_sel->As<RE::TESObjectARMO>()) {
                     using SB = RE::BGSBipedObjectForm::BipedObjectSlot;
-                    if (armo->HasPartOf(SB::kRing) || armo->HasPartOf(SB::kAmulet)) {
+                    if (Grid::IsRing(armo) || armo->HasPartOf(SB::kAmulet)) {
                         bagAllowed = false;   // jewelry
                     }
                 }

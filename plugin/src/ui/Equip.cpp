@@ -145,6 +145,11 @@ namespace FUI::Equip
         const char* SlotForArmor(RE::TESObjectARMO* a_armo)
         {
             using S = RE::BGSBipedObjectForm::BipedObjectSlot;
+            // ★Ring test before any slot test: Grid::IsRing asks the item what
+            // it IS, which outranks a guess made from the slot it happens to
+            // sit on. A mod ring parked on kEars or kCirclet would otherwise
+            // be filed as an earring and take that slot from a real one.
+            if (Grid::IsRing(a_armo))           return "ringR";
             if (a_armo->HasPartOf(S::kBody))    return "body";
             if (a_armo->HasPartOf(S::kHead) || a_armo->HasPartOf(S::kHair)) return "head";
             if (a_armo->HasPartOf(S::kHands))   return "gaunt";
@@ -173,7 +178,12 @@ namespace FUI::Equip
                 if (a_slotId == home) return true;
                 // rings occupy either hand; the doll splits them into two slots
                 if (std::string_view(home) == "ringR") {
-                    return a_slotId == "ringR" || a_slotId == "ringL";
+                    // ★...and past the second they SPILL into the accessory
+                    // pool, so those are legal targets too. Refusing them made
+                    // a spilled ring undroppable onto the very slot the doll
+                    // had just chosen for it.
+                    return a_slotId == "ringR" || a_slotId == "ringL" ||
+                           a_slotId.rfind("acc", 0) == 0;
                 }
                 return false;
             }
@@ -303,7 +313,6 @@ namespace FUI::Equip
 
             auto inv = player->GetInventory(
                 [](RE::TESBoundObject& o) { return o.Is(RE::FormType::Armor); });
-            bool ringUsed = false;
             for (auto& [obj, data] : inv) {
                 auto& [count, entry] = data;
                 if (count <= 0 || !entry || !entry->IsWorn()) continue;
@@ -325,8 +334,18 @@ namespace FUI::Equip
                     continue;
                 }
                 if (slot && std::string_view(slot) == "ringR") {
-                    if (ringUsed) slot = "ringL";
-                    ringUsed = true;
+                    // ★The doll has two ring slots but the body has one kRing
+                    // bit, so the second is only ever reached by a mod that
+                    // equips more than one ring at a time. Fill them in order
+                    // and SPILL the remainder into the accessory pool: a_out[s]
+                    // is an overwrite, so a third ring used to replace the
+                    // second and vanish off the doll leaving no trace at all.
+                    // ★Asked of a_out, not remembered in a flag -- the map IS
+                    // the answer to "is that slot taken", and a flag was a
+                    // second copy of it that could only ever be wrong.
+                    if (!a_out.contains("ringR"))      slot = "ringR";
+                    else if (!a_out.contains("ringL")) slot = "ringL";
+                    else                               slot = nullptr;
                 }
                 add(slot, obj, 1, Grid::GlowBits(obj, entry.get(), Grid::WornExtraOf(entry.get())));
             }

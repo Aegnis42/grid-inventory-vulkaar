@@ -234,7 +234,7 @@ namespace FUI::Fallback
             using S = RE::BGSBipedObjectForm::BipedObjectSlot;
             using A = RE::BGSBipedObjectForm::ArmorType;
             if (a_armo->HasPartOf(S::kAmulet)) return { "arm_necklace", "" };
-            if (a_armo->HasPartOf(S::kRing))   return { "arm_ring", "" };
+            if (Grid::IsRing(a_armo))          return { "arm_ring", "" };
             if (a_armo->HasPartOf(S::kCirclet) && !a_armo->HasPartOf(S::kHead) &&
                 !a_armo->HasPartOf(S::kHair)) {
                 return { "arm_circlet", "" };
