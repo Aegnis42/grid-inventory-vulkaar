@@ -80,6 +80,18 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
   Works on your grid, the equipment panel and container/merchant cells alike.
   **Opens at its smallest zoom.**
 - **Equipment doll**: 17 slots, place to equip / right-click to unequip.
+- **Two rings**: vanilla wears one; here you can wear two.
+  - The first goes on with a plain **click**, into the left ring slot.
+  - The second must be **dragged onto the right ring slot**. Clicking will not
+    put it there — otherwise every ring would keep replacing the first one.
+  - **Two rings with the same effect are refused**, including two grades of one
+    family: the check is on the magic effect, so a different name or rating does
+    not get past it.
+  - Drag the left ring onto the right slot and **the two trade places**.
+  - The second ring's **effect applies, but it is not visible on your hand.** A
+    ring's mesh carries its own slot number inside the file, and while the first
+    ring holds that number the second cannot be drawn. That is a limit of the
+    game, not something this mod can work around.
 - **Gear-set tabs**: one click swaps the whole set (really equips; stats follow).
   Gear held by inactive tabs is hidden and takes no squares.
 - **Eighteen bags**: right-click opens the inner grid.
