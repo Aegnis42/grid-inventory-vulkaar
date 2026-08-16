@@ -821,6 +821,29 @@ namespace FUI::LootBarter
                             RE::ITEM_REMOVE_REASON::kSteal, pick.xl, player);
                     });
                 }
+                // ★★★KNOWN EXCEPTION, accepted (author's call) -- do not
+                // re-investigate from scratch. AMMO the player reverse-
+                // pickpocketed INTO the mark comes back WITHOUT a stolen tag.
+                // Everything else does get one, ammo the mark owned itself does
+                // get one, and every other STACKABLE (potions, ingredients) gets
+                // one on the same round trip. Measured with a temporary
+                // [PICKOWN] log, since removed; these three were ruled out:
+                //   · AttemptPickpocket moving the item itself, which would skip
+                //     the kSteal removal below   -> engineMovedItself = false
+                //   · that removal not running   -> ourRemoveRan = true
+                //   · a surviving PLAYER ownership stamp that IsOwnedBy then
+                //     skips -> there is no stamp: the units arrive with NO
+                //     ExtraDataList at all ("player lists: (none)")
+                // With no list there is nothing to stamp either -- an
+                // ExtraDataList cannot be created from a plugin -- so any fix
+                // has to be upstream of the arrival, in whatever drops the list
+                // on the way in or out. Not pursued.
+                // ★Note this is also the one place our pickpocket matches VANILLA
+                // and the rest of it does not: vanilla treats anything you put on
+                // a mark as still yours, so taking it back is never theft. Ours
+                // makes it the mark's property, which the author prefers and
+                // deliberately kept -- ammo is simply the case that stayed
+                // vanilla-shaped.
                 ClearOut(r.obj, r.uid, r.sig, r.count);   // engine moved it
                 itemSound(r.obj, true);
                 break;
@@ -2500,14 +2523,22 @@ namespace FUI::LootBarter
             ImGuiChildFlags_None, ImGuiWindowFlags_None);
         const ImVec2 base = ImGui::GetCursorScreenPos();
 
+        // ★★The BOARD's screen rect, published in EVERY mode. It used to be set
+        // only under SpotMemoryOn because only the drop-cell maths read it --
+        // but "is the cursor on the board?" is now the question that decides
+        // whether a drop is a sale at all (see g_partnerHovered below), and a
+        // merchant has to answer it too.
+        g_partnerClipMin = ImGui::GetWindowPos();
+        {
+            const ImVec2 ws = ImGui::GetWindowSize();
+            g_partnerClipMax = ImVec2(g_partnerClipMin.x + ws.x, g_partnerClipMin.y + ws.y);
+        }
+
         // F7: publish this frame's grid geometry + placement for the
         // drop-cell math (QueryStoreDrop) — spot-memory modes only
         if (SpotMemoryOn()) {
             g_partnerGridLive = true;
             g_partnerBase = base;   // scroll-adjusted content origin
-            g_partnerClipMin = ImGui::GetWindowPos();
-            const ImVec2 ws = ImGui::GetWindowSize();
-            g_partnerClipMax = ImVec2(g_partnerClipMin.x + ws.x, g_partnerClipMin.y + ws.y);
             g_partnerRows = rows;
             g_lastCells = cells;
         }
@@ -2535,8 +2566,30 @@ namespace FUI::LootBarter
         // without this flag the window that owns it reports "not hovered" on
         // the one frame the drop is resolved. RootAndChildWindows because the
         // goods live in a scrolling child.
-        g_partnerHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows |
-                                                  ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        //
+        // ★★★...WHICH IS WHY THIS IS THE BOARD, NOT THE WINDOW. Every consumer
+        // of this flag asks a DROP question (the three kPartner* routes, the
+        // in-container rearrange, and two negative guards on player-grid drops),
+        // and the contract they were written against is stated at the rearrange:
+        // "Chrome (titlebar / bottom bar) cancels back to its spot."
+        // The title bar used to honour it by accident -- its drag strip owned
+        // ActiveId, so a plain IsWindowHovered went false there. Adding the flag
+        // above took that accident away and a drop on the title bar SOLD the
+        // item instead of cancelling. The rect test restores the contract on
+        // purpose rather than by side effect.
+        // ★MouseInOverlay for the other half: an overlay's chrome is drawn WIDER
+        // than its ImGui rect, so z-order alone leaves a ~14px band where a
+        // pickup is refused but a drop went through -- the same asymmetry the
+        // player grid had, fixed there this release and still here.
+        {
+            const ImVec2 m = ImGui::GetIO().MousePos;
+            const bool onBoard = m.x >= g_partnerClipMin.x && m.x < g_partnerClipMax.x &&
+                                 m.y >= g_partnerClipMin.y && m.y < g_partnerClipMax.y;
+            g_partnerHovered =
+                onBoard && !UIRoot::MouseInOverlay() &&
+                ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows |
+                                       ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        }
         ImGui::End();
         ImGui::PopStyleVar();
     }

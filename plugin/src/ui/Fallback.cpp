@@ -800,24 +800,7 @@ namespace FUI::Fallback
             if (auto* armo = a_obj->As<RE::TESObjectARMO>()) return ResolveArmor(armo);
             if (auto* ammo = a_obj->As<RE::TESAmmo>()) {
                 const char* mat = MaterialOf(ammo);
-                // ★NEVER TESAmmo::IsBolt() HERE. Its runtime data sits at 0x110
-                // on SE but 0x100 on AE (see GetRuntimeData's RelocateMember),
-                // and CommonLibSSE-NG's own IsBolt() reads the member DIRECTLY
-                // — so on AE it looks 16 bytes past the real DATA. Measured: 40
-                // of 41 ammo records reported flags=205 (0xCD, uninitialised
-                // fill), which made every bolt an arrow and made Bound Arrow —
-                // whose garbage happened to read 0 — the only "bolt".
-                // GetRuntimeData() relocates for the running version.
-                // Mesh still leads: every bolt in the game is named Bolt.nif and
-                // every arrow Arrow.nif, and that survives a mod setting the
-                // flag wrong. The record decides only when the path is silent.
-                const std::string m = LowerModel(ammo);
-                const bool bolt =
-                    Has(m, "bolt") ||
-                    (!Has(m, "arrow") &&
-                     ammo->GetRuntimeData().data.flags.none(
-                         RE::AMMO_DATA::Flag::kNonBolt));
-                return { bolt ? "amm_bolt" : "amm_arrow", mat ? mat : "" };
+                return { IsBoltAmmo(ammo) ? "amm_bolt" : "amm_arrow", mat ? mat : "" };
             }
             if (auto* gem = a_obj->As<RE::TESSoulGem>()) {
                 if (gem->CanHoldNPCSoul()) return { "knw_soulgem", "black" };
@@ -1065,6 +1048,20 @@ namespace FUI::Fallback
     }
 
     bool AssetsSeen() { return g_anyLoaded; }
+
+    // ★See the header for why TESAmmo::IsBolt() may never be called. Lives here
+    // because the two ingredients -- LowerModel and the runtime-data read -- are
+    // this file's, and one exported answer is what keeps the icon fallback and
+    // the category assignment from drifting apart (they had: main.cpp was still
+    // calling the broken API long after this file stopped).
+    bool IsBoltAmmo(RE::TESAmmo* a_ammo)
+    {
+        if (!a_ammo) return false;
+        const std::string m = LowerModel(a_ammo);
+        if (Has(m, "bolt")) return true;
+        if (Has(m, "arrow")) return false;
+        return a_ammo->GetRuntimeData().data.flags.none(RE::AMMO_DATA::Flag::kNonBolt);
+    }
 
     Assignment Classify(RE::TESBoundObject* a_obj)
     {

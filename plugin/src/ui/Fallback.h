@@ -63,6 +63,19 @@ namespace FUI::Fallback
     };
     [[nodiscard]] Assignment Classify(RE::TESBoundObject* a_obj);
 
+    // ★★★ARROW OR BOLT, and the only place that answers it. TESAmmo::IsBolt()
+    // is UNUSABLE: CommonLibSSE-NG reads the DATA member directly while its
+    // real offset moves between SE (0x110) and AE (0x100), so on AE it looks 16
+    // bytes past the record. Measured across a full load order: 40 of 41 ammo
+    // forms reported flags = 0xCD (uninitialised fill), which makes every bolt
+    // an arrow and leaves Bound Arrow -- whose garbage happened to read 0 --
+    // as the one "bolt". The category assignment in main.cpp was calling it.
+    // ★The MESH leads, and the record only breaks a tie: every bolt in the game
+    // is Bolt.nif and every arrow Arrow.nif, and a path survives a mod setting
+    // the flag wrong. GetRuntimeData() is what relocates correctly when the
+    // path says nothing.
+    [[nodiscard]] bool IsBoltAmmo(RE::TESAmmo* a_ammo);
+
     // GI60: a drawn transform that belongs to the ICON, not to the item.
     // One drawing is shared by everything that resolves to it — 472 swords all
     // draw wpn_sword — so "this sword sits too high" is a property of the

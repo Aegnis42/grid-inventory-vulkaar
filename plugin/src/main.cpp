@@ -742,7 +742,10 @@ namespace
         }
         if (a_obj->Is(RE::FormType::Scroll)) return "scroll";
         if (auto* ammo = a_obj->As<RE::TESAmmo>()) {
-            return ammo->IsBolt() ? "ammo_bolt" : "ammo_arrow";
+            // ★NOT TESAmmo::IsBolt() -- it reads a member whose offset moves
+            // between SE and AE, so on AE every bolt came back an arrow. The one
+            // correct answer lives in Fallback (see Fallback::IsBoltAmmo).
+            return FUI::Fallback::IsBoltAmmo(ammo) ? "ammo_bolt" : "ammo_arrow";
         }
         if (auto* alch = a_obj->As<RE::AlchemyItem>()) {
             if (alch->IsPoison()) return "poison";

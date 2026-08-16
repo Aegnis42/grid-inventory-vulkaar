@@ -201,6 +201,17 @@ namespace FUI::Grid
             float               rotFrom = 0.0f;   // where this turn started
             float               rotT = 1.0f;      // 0..1 through the turn (1 = settled)
             int                 rotPrev = 0;      // the footprint it just left
+            // ★★Which POOL this carry left, for the frames where `key` cannot
+            // say. A split fragment clears its key on purpose ("assigned on
+            // drop"), and PoolOfKey("") is "" -- which matches no pool, so the
+            // carried units were subtracted from NOBODY and the reconciler saw
+            // the source stack as short by exactly the amount on the cursor. It
+            // then refilled it: three arrows split off ten left three on the
+            // cursor and ten on the board.
+            // Set from the SOURCE TILE's key, so a fragment split off a stolen
+            // stack is attributed to the stolen pool rather than to the plain
+            // one it does not belong to.
+            std::string         srcPool;
             // Adopting an angle (lifting a tile that already lies on its side)
             // must NOT animate -- there is nothing to show, the item was already
             // like that. Only a keypress starts a turn.
@@ -3892,6 +3903,35 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             signedUnits += n;
                         }
                     }
+                    // ★★The two form-wide subtractions above have to be given
+                    // back to the pools they actually came from, or they all land
+                    // on the plain remainder's clamp and the sim models a board
+                    // the player is not looking at.
+                    //   removals  queued sells/stores -- per-pool since GI22
+                    //   trashed   parking is a UI idea with no trace on an xl, so
+                    //             the layout is the only place that knows whose
+                    //             units are in the bin
+                    // Getting this wrong is not cosmetic here: every capacity
+                    // gate reads this walk, so a pickup bounces or a buy clamps
+                    // against a board that does not exist.
+                    for (auto& [pk, n] : pools) {
+                        const std::string pfx = PoolPrefix(baseKey, pk.first, pk.second);
+                        if (const auto pi = g_pendingRemovePool.find(pfx);
+                            pi != g_pendingRemovePool.end()) {
+                            const int gone = (std::min)(n, pi->second);
+                            n -= gone;
+                            signedUnits -= gone;
+                        }
+                        int parked = 0;
+                        for (const auto& [k, le] : g_layout) {
+                            if (le.bag == kTrashKey && PoolOfKey(k) == pfx) {
+                                parked += (std::max)(1, le.count);
+                            }
+                        }
+                        const int binned = (std::min)(n, parked);
+                        n -= binned;
+                        signedUnits -= binned;   // TrashedUnits took it form-wide
+                    }
                     pools[{ 0, 0 }] += (std::max)(0, units - signedUnits);
                     for (const auto& [pk, n] : pools) {
                         if (n <= 0) continue;
@@ -4630,15 +4670,51 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         signedUnits += n;
                     }
                 }
+                // ★★★A QUEUED REMOVAL BELONGS TO THE POOL IT LEFT. The walk above
+                // reads LIVE extraLists, so units that have been sold but whose
+                // engine removal has not landed are still counted in their pool;
+                // `units` meanwhile already has them out, form-wide. Without this
+                // the whole difference lands on the plain pool's clamp below --
+                // sell five stolen gems while holding five clean ones and the
+                // CLEAN stack is drained and erased, while the sold tile is
+                // re-minted as a fresh (and shortly orphaned) one.
+                // ★The per-pool figure is not new work: NotePendingRemove has
+                // recorded it in g_pendingRemovePool since GI22. Only the gear
+                // branch was reading it.
+                for (auto& [p, n] : poolUnits) {
+                    if (const auto pi = g_pendingRemovePool.find(p);
+                        pi != g_pendingRemovePool.end()) {
+                        const int gone = (std::min)(n, pi->second);
+                        n -= gone;
+                        signedUnits -= gone;   // ...so the plain remainder gets it back
+                    }
+                }
+                // ★★Every pool the LAYOUT knows about, seeded at zero. A signed
+                // pool is otherwise only created from a live extraList, so when
+                // the last unit of one leaves (a quest script reclaiming its
+                // item, an engine removal landing) its slots belong to no pool at
+                // all: never drained, because the drain walks pools -- yet still
+                // emitted, because the emit walks the layout. The tile then sits
+                // on the board for good and FinalizeRebuild writes it to the
+                // cosave. The old form-wide `owned` sum drained these for free.
+                for (const auto& s : slots) poolUnits.emplace(PoolOfKey(s.key), 0);
                 // ★The plain pool takes the REMAINDER, so every subtlety the
                 // form-wide accounting above worked out (worn, loadout reserves,
                 // queued removals, pending equips) stays attached to it rather
                 // than being re-derived per pool and getting one of them wrong.
                 poolUnits[baseKey] = (std::max)(0, units - signedUnits);
 
-                // ★The carry belongs to ONE pool -- its own key says which.
-                const std::string carryPool =
-                    (carried > 0 && g_held) ? PoolOfKey(g_held->key) : std::string();
+                // ★The carry belongs to ONE pool. Its key says which -- except
+                // for a split fragment, whose key is deliberately empty until it
+                // lands (PoolOfKey("") matches nothing, so the carry used to be
+                // subtracted from no pool at all and the source stack was
+                // refilled underneath it). That case carries the pool itself.
+                std::string carryPool;
+                if (carried > 0 && g_held) {
+                    carryPool = g_held->key.empty() ? g_held->srcPool
+                                                    : PoolOfKey(g_held->key);
+                    if (carryPool.empty()) carryPool = baseKey;   // pre-GI carries
+                }
 
                 // std::map order puts the plain pool first (`base` < `base~XXXX`),
                 // which is what the one-shot drop hint below wants: an ordinary
@@ -4757,9 +4833,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     int deficit = -diff;
                     // The tile the player acted on gives up its unit FIRST (rule
                     // 2-B). Only then do the positional passes below run.
-                    // ★Cleared only when it was actually SPENT. The hint names one
-                    // key, that key lives in one pool, and the other pools must
-                    // not throw it away on their way past.
+                    // ★SPENDING is a pool's business -- the hint names one key and
+                    // that key lives in one pool, so the others must not throw it
+                    // away on their way past. DISPOSAL is the form's, and happens
+                    // once the pool loop is over (see below): a hint whose tile
+                    // emptied, or whose pool never ran a deficit, would otherwise
+                    // outlive the form entirely and be spent later by a brand-new
+                    // tile that happened to inherit its key from NextTileKey.
                     if (deficit > 0 && g_drainHint.baseKey == baseKey) {
                         for (auto si : mine) {
                             auto& s = slots[si];
@@ -4790,6 +4870,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     drain([&](const Slot& s) { return s.le.count > 0; });   // trash: last resort
                 }
                 }   // ---- end per-pool reconciliation ----
+
+                // ★The hint dies with the FORM it named, spent or not. This is
+                // the same ownership g_dropHint states one screen up ("the hint
+                // is spent by the ARRIVAL"), and the old form-wide reconciler
+                // had it for free by clearing at the end.
+                if (g_drainHint.baseKey == baseKey) g_drainHint = {};
 
                 // emit survivors; purge emptied tiles from the layout
                 // ★Form-wide on purpose: the pools placed their own units, but
@@ -6299,6 +6385,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         const GridDef d = g_resolver ? g_resolver(a_obj) : GridDef{};
         Held h;
         h.key.clear();            // assigned on drop (new tile) or absorbed (merge)
+        h.srcPool = PoolOfKey(a_srcKey);   // ...but the POOL is known now, and needed now
         h.obj = a_obj;
         h.SetRot(CanRotate(d) ? srcRot : 0);
         h.mask = MaskOf(d, h.rot);
@@ -9743,6 +9830,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_target = {};
         g_slotTarget.clear();
         g_dropHint = {};
+        // ★Its twin, which this list was missing. A hint that survives a load
+        // names a key from the PREVIOUS save, and NextTileKey hands out the
+        // lowest free ordinal -- so the first tile of that form in the new game
+        // inherits the name and is drained ahead of the positional rules.
+        g_drainHint = {};
         g_pouchOpen = false;
         g_pouchSlider = 0;
         g_overloaded = false;
