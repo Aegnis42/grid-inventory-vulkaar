@@ -341,7 +341,8 @@ namespace FUI::Grid
     // inside one tile — it did not before (40px), and spilled onto the
     // neighbour.
     void DrawMarkerTray(ImDrawList* a_dl, const ImVec2& a_boxMin, const ImVec2& a_boxMax,
-                        bool a_fav, bool a_stolen, bool a_poisoned);
+                        bool a_fav, bool a_stolen, bool a_poisoned,
+                        bool a_worn = false);
 
     // ★★1.0.5 — the item's own drop shadow, so a pale sprite does not vanish
     // into a pale panel. Cream parchment sits at 177,160,131 once the occupied

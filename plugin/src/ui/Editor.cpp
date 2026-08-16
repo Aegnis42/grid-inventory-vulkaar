@@ -416,12 +416,12 @@ namespace FUI::Editor
         // takes it must (Theme::TitleTopPad).
         const float topPad = Theme::TitleTopPad();
         const ImVec2 size(342.0f * s + 2.0f * Theme::FrameInsetX(),
-                          666.0f * s + topPad + 2.0f * Theme::FrameInsetY());   // +Stack row (G3)
+                          666.0f * s + 2.0f * Theme::FrameInsetY());   // +Stack row (G3)
         ImVec2 defPos(60.0f, 120.0f);
         if (auto* mw = wm->Find("main")) {
             defPos = ImVec2(mw->pos.x - size.x - 8.0f, mw->pos.y);
         }
-        wm->ApplyNext("editor", defPos, size);
+        wm->ApplyNext("editor", defPos, size, WinManager::Anchor::kTopLeft, topPad);
 
         // Bake the torn-frame inset into the window padding: every line and
         // the body child then respect the ragged edges on BOTH sides (only
@@ -432,8 +432,7 @@ namespace FUI::Editor
                    Theme::PadY() + Theme::FrameInsetY()));
         ImGui::Begin("##fablerim_editor", nullptr, kManagedWinFlags);
         UIRoot::NoteOverlayRect();
-        wm->TitleBar("editor", Lang::SentenceCase(Lang::T(Lang::Str::Edit)).c_str(),
-                     0.0f, false, topPad);
+        wm->TitleBar("editor", Lang::SentenceCase(Lang::T(Lang::Str::Edit)).c_str());
 
         // scrollable body child — the titlebar pins the content start to a
         // SCREEN position each frame, so window-level scrolling moves the

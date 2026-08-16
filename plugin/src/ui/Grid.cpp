@@ -1004,8 +1004,20 @@ namespace FUI::Grid
         // GI62: `rot` is the return leg of the same journey NoteStoreSpot makes
         // outbound -- a sword taken back out of a chest on its side lands on the
         // board on its side. Without it the turn survived only one direction.
-        struct DropHint { std::string baseKey; int col = -1; int row = -1;
-                          std::string bag; int rot = 0; };
+        // ★★`pool` as well as `baseKey`. The hint says "the tile this arrival
+        // mints goes HERE", and since tiles pool by sub-stack signature the
+        // arrival belongs to one pool -- but the hint named only the form, and
+        // the plain pool sorts first, so it took (or discarded) a hint armed for
+        // a signed one and the signed tile first-fitted into the front gap.
+        // Empty pool = "any", which is what a carry with no signature wants.
+        struct DropHint { std::string baseKey; std::string pool; int col = -1; int row = -1;
+                          std::string bag; int rot = 0;
+            [[nodiscard]] bool Wants(const std::string& a_base,
+                                     const std::string& a_pool) const
+            {
+                return col >= 0 && baseKey == a_base && (pool.empty() || pool == a_pool);
+            }
+        };
         DropHint                                       g_dropHint;
         std::string                                    g_slotTarget;   // hovered equip slot (C6)
         bool                                           g_needRebuild = false;
@@ -4592,8 +4604,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // entry-missing test permanently false, and every dragged
                         // loot silently first-fit into the front gap instead of
                         // landing where it was dropped.
-                        if (le.col < 0 && g_dropHint.col >= 0 &&
-                            g_dropHint.baseKey == baseKey) {
+                        if (le.col < 0 &&
+                            g_dropHint.Wants(baseKey, PoolOfKey(u.key))) {
                             le.col = g_dropHint.col;
                             le.row = g_dropHint.row;
                             le.bag = g_dropHint.bag;
@@ -4716,6 +4728,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (carryPool.empty()) carryPool = baseKey;   // pre-GI carries
                 }
 
+                // slots grouped by pool, in one pass (see the loop's note)
+                std::map<std::string, std::vector<std::size_t>> byPool;
+                for (std::size_t si = 0; si < slots.size(); ++si) {
+                    byPool[PoolOfKey(slots[si].key)].push_back(si);
+                }
+                static const std::vector<std::size_t> kNoSlots;
+
                 // std::map order puts the plain pool first (`base` < `base~XXXX`),
                 // which is what the one-shot drop hint below wants: an ordinary
                 // pickup still gets it.
@@ -4728,10 +4747,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
                 // this pool's slots, by index so the minting below can append to
                 // `slots` without invalidating the walk
-                std::vector<std::size_t> mine;
-                for (std::size_t si = 0; si < slots.size(); ++si) {
-                    if (PoolOfKey(slots[si].key) == poolKey) mine.push_back(si);
-                }
+                // ★Grouped ONCE before the loop, not re-scanned per pool: this
+                // used to be O(pools x slots) with a PoolOfKey parse on every
+                // visit, for a walk that already runs behind a rebuild gate.
+                auto  mineIt = byPool.find(poolKey);
+                auto& mine   = mineIt != byPool.end() ? mineIt->second : kNoSlots;
                 if (placeUnits <= 0 && mine.empty()) continue;
 
                 int owned = 0;
@@ -4797,7 +4817,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // B2: partner-drop hint — the first NEW tile of this form
                         // lands at the drop cell (one-shot, then back to first-fit)
                         bool viaHint = false;
-                        if (g_dropHint.col >= 0 && g_dropHint.baseKey == baseKey) {
+                        if (g_dropHint.Wants(baseKey, poolKey)) {
                             ns.le.col = g_dropHint.col;
                             ns.le.row = g_dropHint.row;
                             ns.le.bag = g_dropHint.bag;
@@ -4823,9 +4843,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // tile: when the fill loop absorbed everything into piles
                     // no tile was made, and a hint left armed here fires on the
                     // NEXT pickup of this form — teleporting it to a stale cell.
-                    if (g_dropHint.col >= 0 && g_dropHint.baseKey == baseKey) {
-                        g_dropHint = {};
-                    }
+                    // ★...but only THIS pool's arrival spends it. A hint armed
+                    // for a signed unit must survive the plain pool walking past
+                    // with an acquisition of its own.
+                    if (g_dropHint.Wants(baseKey, poolKey)) g_dropHint = {};
                 } else if (diff < 0) {
                     // CONSUME: drain partial tiles first (bottom-right), then full
                     // ones; tiles PARKED in the trash (F2) drain dead last — an
@@ -6855,9 +6876,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // ★See Grid.h. Shared by the grid, the equipment doll and the partner
     // window so one item cannot look like two different items.
     void DrawMarkerTray(ImDrawList* a_dl, const ImVec2& a_boxMin, const ImVec2& a_boxMax,
-                        bool a_fav, bool a_stolen, bool a_poisoned)
+                        bool a_fav, bool a_stolen, bool a_poisoned, bool a_worn)
     {
-        if (!a_dl || (!a_fav && !a_stolen && !a_poisoned)) return;
+        if (!a_dl || (!a_fav && !a_stolen && !a_poisoned && !a_worn)) return;
         const float cell  = CellPx();
         const float mw    = cell * kMarkFrac;
         const float r     = mw * 0.5f;
@@ -6869,6 +6890,39 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         float       cx = a_boxMax.x - r - inset;   // rightmost marker centre
         const float cy = a_boxMax.y - r - inset;
 
+        // ★★★"ON THE BODY" IS A TRAY MARKER, not a mark of its own. It was drawn
+        // straight onto the partner cell at the same bottom-right corner the
+        // tray starts from, so on a corpse wearing a POISONED weapon the two
+        // landed on the same pixels and the torso -- drawn later -- hid the
+        // droplet. It also carried a fixed 1px outline while everything in here
+        // scales with RimPx(), which is the "one set, different shapes, same
+        // weight" rule (RULES 63) read the other way round.
+        // ★Rightmost, so the common case (worn, nothing else) looks exactly
+        // where it always did; anything else steps left as it always has.
+        if (a_worn) {
+            const float s = r * 2.0f;
+            const float x = cx - r, y = cy - r;
+            const auto  torso = [&](float dx, float dy, ImU32 col) {
+                a_dl->AddCircleFilled(
+                    ImVec2(x + dx + s * 0.5f, y + dy + s * 0.26f), s * 0.23f, col);
+                const ImVec2 t[4] = {
+                    ImVec2(x + dx + s * 0.08f, y + dy + s),
+                    ImVec2(x + dx + s * 0.24f, y + dy + s * 0.56f),
+                    ImVec2(x + dx + s * 0.76f, y + dy + s * 0.56f),
+                    ImVec2(x + dx + s * 0.92f, y + dy + s),
+                };
+                a_dl->AddConvexPolyFilled(t, 4, col);
+            };
+            // ★An outline in four directions rather than a fatter silhouette
+            // underneath: at this size a grown shape closes the gap between head
+            // and shoulders and the figure becomes a blob.
+            torso(-rim, 0.0f, oc);
+            torso(rim, 0.0f, oc);
+            torso(0.0f, -rim, oc);
+            torso(0.0f, rim, oc);
+            torso(0.0f, 0.0f, IM_COL32(220, 200, 150, 235));
+            cx -= mw + gap;
+        }
         if (a_stolen) {
             a_dl->AddCircleFilled(ImVec2(cx, cy), r, IM_COL32(206, 64, 52, 255));
             a_dl->AddCircle(ImVec2(cx, cy), r, oc, 0, rim);
@@ -7012,6 +7066,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         void StripSurvivalBlocks(std::string& a_s, bool a_keep)
         {
             static constexpr std::string_view kOpen = "[SURV=";
+            // ★A cheap look before a copy. Effects carrying a SURV block are a
+            // handful in the whole game, and this runs for every effect line of
+            // a tooltip, every frame it is up -- so the 99% case should not be
+            // paying for a rebuilt string. The '[' scan is the same work the
+            // loop below would do anyway.
+            if (a_s.find('[') == std::string::npos) return;
             const auto same = [](char a_l, char a_r) {
                 return std::tolower(static_cast<unsigned char>(a_l)) ==
                        std::tolower(static_cast<unsigned char>(a_r));
@@ -7950,15 +8010,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         const float topPad = Theme::TitleTopPad();   // paid for in the height below
         const ImVec2 size(
             contentW + 30.0f * S + 2.0f * insX,
-            barH + topPad + 8.0f * S + lineH + ImGui::GetFrameHeight() + 6.0f * S +
+            barH + 8.0f * S + lineH + ImGui::GetFrameHeight() + 6.0f * S +
                 2.0f * sp + ImGui::GetFrameHeight() + 18.0f * S + 2.0f * insY);
         wm->ApplyNext("pouch",
-            ImVec2((disp.x - size.x) * 0.5f, (disp.y - size.y) * 0.5f), size);
+            ImVec2((disp.x - size.x) * 0.5f, (disp.y - size.y) * 0.5f), size,
+            WinManager::Anchor::kTopLeft, topPad);
         ImGui::Begin("##grid_pouch", nullptr, kManagedWinFlags);
         UIRoot::NoteOverlayRect();
         auto* pouch = GoldCoins::PouchForm();
         wm->TitleBar("pouch", pouch && pouch->GetName() ? pouch->GetName() : "?",
-            0.0f, true, topPad);
+            0.0f, true);
 
         if (!ImGui::IsWindowAppearing() &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsWindowHovered()) {
@@ -8044,8 +8105,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const float topPad = Theme::TitleTopPad();
             const ImVec2 size(v.cols * CellPx() + 2.0f * Theme::PadX() * S +
                                   2.0f * Theme::FrameInsetX(),
-                              v.rows * CellPx() + 54.0f * S + topPad +
-                                  2.0f * Theme::FrameInsetY());
+                              v.rows * CellPx() + 54.0f * S + 2.0f * Theme::FrameInsetY());
 
             // default: flow to the right of the main window (E5).
             // ★Wrapped cascade: one straight diagonal walked the 18th bag
@@ -8058,7 +8118,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 defPos = ImVec2(mw->pos.x + mw->size.x + 8.0f + band * 48.0f,
                                 mw->pos.y + step * 60.0f);
             }
-            wm->ApplyNext(v.bagKey, defPos, size);
+            wm->ApplyNext(v.bagKey, defPos, size, WinManager::Anchor::kTopLeft, topPad);
 
             // typed bag: the COLLECT control sits in the titlebar, so reserve
             // its width before the title is laid out (same contract the main
@@ -8074,7 +8134,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const float colRes = typedBag ? colW + Theme::TopControlRightPad() : 0.0f;
 
             ImGui::Begin(("##bag_" + v.bagKey).c_str(), nullptr, kManagedWinFlags);
-            wm->TitleBar(v.bagKey, v.bagName.c_str(), colRes, false, topPad);
+            wm->TitleBar(v.bagKey, v.bagName.c_str(), colRes);
             if (typedBag) {
                 const ImVec2 keep = ImGui::GetCursorScreenPos();
                 // ★On the TITLE's own line — the same centring the main
@@ -8477,7 +8537,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             }
                         }
                     }
+                    // ★The pool the ARRIVING unit belongs to, so a signed tile
+                    // cannot have its cell taken by a plain one landing in the
+                    // same rebuild. A carry with no signature leaves it empty
+                    // and the hint stays form-wide, as it always was.
                     g_dropHint = { hintBase,
+                                   PoolPrefix(hintBase, a_held.uid, a_held.sig),
                                    g_target.col, g_target.row, v.bagKey, a_held.rot };
                     if (swapDisp) {
                         // free the displaced tile's spot for the incoming item

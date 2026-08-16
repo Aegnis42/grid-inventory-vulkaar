@@ -864,9 +864,14 @@ namespace FUI
     }
 
     void WinManager::ApplyNext(const std::string& a_key, ImVec2 a_defaultPos,
-                               ImVec2 a_defaultSize, Anchor a_anchor)
+                               ImVec2 a_defaultSize, Anchor a_anchor, float a_topPad)
     {
         if (!m_loaded) Load();
+        // ★The height pays for the title's clearance right here, at the one call
+        // that owns the size and still runs before Begin. TitleBar reads the
+        // same number back off the record, so "passed the pad but forgot the
+        // height" is not a state this can be in.
+        a_defaultSize.y += a_topPad;
         // ★GI72: ask for whole pixels. Every size here is derived from the UI
         // scale and lands on fractions at most scale values; ImGui floors them,
         // and any code comparing request to readback then sees a phantom
@@ -891,6 +896,7 @@ namespace FUI
         // the position persists — otherwise a stale saved size wins forever.
         w->size = want;
         w->reqSize = want;
+        w->topPad = a_topPad;
         // whole-pixel position too: ImGui rounds it anyway, and feeding its
         // rounded value back into the next frame's anchor maths is the same
         // trap one level down
@@ -944,9 +950,13 @@ namespace FUI
     float WinManager::TitleBarH() { return 34.0f * Theme::Scale(); }
 
     void WinManager::TitleBar(const std::string& a_key, const char* a_label, float a_reserveRight,
-                              bool a_centerTitle, float a_topPad)
+                              bool a_centerTitle)
     {
         auto& w = Ensure(a_key);
+        // ★What ApplyNext already charged this window's height for. Reading it
+        // rather than taking it again is the whole point: one argument, one
+        // number, no way to pay for one and spend the other.
+        const float a_topPad = w.topPad;
         w.pos = ImGui::GetWindowPos();
         w.size = ImGui::GetWindowSize();
         w.lastSeen = ImGui::GetFrameCount();
@@ -1343,7 +1353,6 @@ namespace FUI
         // through this one door, and a caller that sized its own body has no
         // business also knowing about the title's margin.
         const float topPad = Theme::TitleTopPad();
-        a_size.y += topPad;
         const ImVec2 disp = ImGui::GetIO().DisplaySize;
         // ★★Open AT THE CURSOR, not in the middle of the screen. A confirm
         // popup is answered and dismissed immediately, so the trip from the
@@ -1382,10 +1391,10 @@ namespace FUI
             }
             if (w) w->posKnown = false;
         }
-        ApplyNext(a_key, def, a_size);
+        ApplyNext(a_key, def, a_size, Anchor::kTopLeft, topPad);
         ImGui::Begin(a_imguiId, nullptr, kManagedWinFlags);
         UIRoot::NoteOverlayRect();
-        TitleBar(a_key, a_title, 0.0f, true, topPad);
+        TitleBar(a_key, a_title, 0.0f, true);
         // outside click cancels (settings pattern) — never on the opening
         // frame: a popup first drawn on the SAME frame as the opening click
         // would read that click as "outside" and instantly close

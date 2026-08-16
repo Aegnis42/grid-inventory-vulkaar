@@ -1785,7 +1785,8 @@ namespace FUI::UIRoot
             if (auto* mw = wm->Find("main")) {
                 defPos = ImVec2(mw->pos.x + mw->size.x - size.x, mw->pos.y + 40.0f * S);
             }
-            wm->ApplyNext("settings", defPos, size);
+            wm->ApplyNext("settings", defPos, size, WinManager::Anchor::kTopLeft,
+                          Theme::TitleTopPad());
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                 ImVec2(Theme::PadX() + insX, Theme::PadY() + insY));
             ImGui::Begin("##fablerim_settings", nullptr, kManagedWinFlags);
@@ -1794,8 +1795,7 @@ namespace FUI::UIRoot
             // which is the cursor TitleBar leaves behind, so the pad is already
             // inside it. Only the first frame's fallback height misses it, and
             // that snaps a frame later.
-            wm->TitleBar("settings", Lang::SentenceCase(Lang::T(Lang::Str::Settings)).c_str(),
-                         0.0f, false, Theme::TitleTopPad());
+            wm->TitleBar("settings", Lang::SentenceCase(Lang::T(Lang::Str::Settings)).c_str());
 
             // EDIT-style lifetime (user request): stays open until the gear
             // toggle or ESC. The old click-outside-closes popup rule ALSO ate
@@ -2769,7 +2769,7 @@ namespace FUI::UIRoot
             const ImVec2 mainSize(compact
                     ? pad + gridW + pad + 2.0f * insX
                     : pad + leftW + pad + 1.0f + pad + gridW + pad + 2.0f * insX,
-                barH + topPad + bodyH + padB + 2.0f * insY);
+                barH + bodyH + padB + 2.0f * insY);
 
             // ★Pin the RIGHT edge across the compact/normal size change. The
             //  item grid is the half that exists in both layouts and it sits
@@ -2780,7 +2780,7 @@ namespace FUI::UIRoot
             wm->ApplyNext("main",
                 ImVec2((io.DisplaySize.x - mainSize.x) * 0.5f,
                        (io.DisplaySize.y - mainSize.y) * 0.5f),
-                mainSize, WinManager::Anchor::kTopRight);
+                mainSize, WinManager::Anchor::kTopRight, topPad);
 
             if (!ImGui::Begin("##fablerim_main", nullptr, kManagedWinFlags)) {
                 ImGui::End();
@@ -2795,8 +2795,7 @@ namespace FUI::UIRoot
             // strip excludes the right-aligned control zone (EDIT + SETTINGS
             // + ✕) so the buttons below actually receive their clicks
             wm->TitleBar("main", Lang::T(Lang::Str::Inventory),
-                pad + insX + editW + setW + closeW + 2.0f * btnGap + 14.0f * S,
-                false, topPad);
+                pad + insX + editW + setW + closeW + 2.0f * btnGap + 14.0f * S);
 
             const ImVec2 bodyTop = ImGui::GetCursorScreenPos();
 

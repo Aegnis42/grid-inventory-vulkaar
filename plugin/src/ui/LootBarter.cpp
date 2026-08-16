@@ -2158,15 +2158,25 @@ namespace FUI::LootBarter
                     // here now that DrawGlow no longer draws it. Favourite and
                     // stolen stay off: a PartnerCell is a container's item, not
                     // the player's, and carries neither flag.
+                    // ★"On the body" joins them rather than being drawn beside
+                    // them: it used to own the same corner the tray starts from
+                    // and covered the poison droplet outright. Not while LOCKED
+                    // -- the lock already means worn and owns that square.
                     Grid::DrawMarkerTray(dl, p0, ImVec2(p0.x + bw, p0.y + bh),
-                                         false, false, (it.glow & 0x4) != 0);
+                                         false, false, (it.glow & 0x4) != 0,
+                                         it.worn && !it.locked);
                 }
                 // ★The EDIT selection ring, so the partner board can say WHICH
                 // form is being edited -- without it the click has no visible
                 // answer and the panel's numbers look like they belong to
                 // nothing. A plain rect rather than the player board's mask
                 // outline because a partner cell IS a rectangle (no polyomino).
-                if (Editor::IsSelected(Grid::DefKeyOf(it.obj))) {
+                // ★IsEditMode() FIRST. DefKeyOf builds a string, and this runs
+                // once per visible cell every frame -- a merchant's hundred
+                // wares was ~12k heap allocations a second to answer a question
+                // that is "no" whenever EDIT is closed, which is almost always.
+                // Rule 3: no string work on the per-frame path.
+                if (Editor::IsEditMode() && Editor::IsSelected(Grid::DefKeyOf(it.obj))) {
                     dl->AddRect(p0, ImVec2(p0.x + bw, p0.y + bh),
                                 Theme::Col(Theme::S().sel, 1.0f), 0.0f, 0, 2.0f);
                 }
@@ -2239,51 +2249,6 @@ namespace FUI::LootBarter
                         dl->AddText(ImVec2(tp.x, tp.y + 1), outline, pb);
                         dl->AddText(tp, cc, pb);
                     }
-                }
-                // ★★"ON THE BODY", as a mark rather than a colour. Same corner
-                // and size as the lock, because it answers the same KIND of
-                // question -- what is true about this item that the sprite
-                // cannot show.
-                // ★A torso: the equipment doll is the one place this UI already
-                // draws a body, so it is the one shape a player has seen mean
-                // "worn" before.
-                // ★★OUTSIDE the pickpocket branch, which is where it was first
-                // written by mistake -- so it never ran while looting a corpse,
-                // the one place it was asked for.
-                // ★Not while LOCKED. The lock owns this corner and says more
-                // (it already implies the item is worn, since that is what
-                // locks a pickpocket cell); two marks in one square would only
-                // be legible as clutter.
-                if (it.worn && !it.locked) {
-                    const float ps = 10.0f * Theme::Scale();
-                    const ImVec2 lp(p0.x + bw - ps - 4.0f, p0.y + bh - ps - 4.0f);
-                    // ★★The LOCK's own gold, so the two read as one family of
-                    // marks. The lock can wear it plainly because it paints a
-                    // dark wash under itself first; this mark has no wash, so
-                    // it carries its own outline instead -- the same trick the
-                    // pickpocket percentage uses to stay legible on any ground.
-                    const ImU32 gold    = IM_COL32(220, 200, 150, 235);
-                    const ImU32 outline = IM_COL32(0, 0, 0, 190);
-                    const auto  torsoAt = [&](float dx, float dy, ImU32 col) {
-                        const float x = lp.x + dx, y = lp.y + dy;
-                        dl->AddCircleFilled(
-                            ImVec2(x + ps * 0.5f, y + ps * 0.26f), ps * 0.23f, col);
-                        const ImVec2 t[4] = {
-                            ImVec2(x + ps * 0.08f, y + ps),
-                            ImVec2(x + ps * 0.24f, y + ps * 0.56f),
-                            ImVec2(x + ps * 0.76f, y + ps * 0.56f),
-                            ImVec2(x + ps * 0.92f, y + ps),
-                        };
-                        dl->AddConvexPolyFilled(t, 4, col);
-                    };
-                    // ★One pixel, four directions -- not a fatter silhouette
-                    // underneath. At 10px a grown shape closes the gap between
-                    // head and shoulders and the figure turns into a blob.
-                    torsoAt(-1.0f, 0.0f, outline);
-                    torsoAt(1.0f, 0.0f, outline);
-                    torsoAt(0.0f, -1.0f, outline);
-                    torsoAt(0.0f, 1.0f, outline);
-                    torsoAt(0.0f, 0.0f, gold);
                 }
             }
             // F7: drop ghost — the SAME anchor/blocker verdict the drop will
@@ -2475,20 +2440,20 @@ namespace FUI::LootBarter
         // other is visible as a step between them.
         const float topPad = Theme::TitleTopPad();
         const ImVec2 size(gridW + sbW + 2.0f * (insX + Theme::PadX() * S),
-                          barH + topPad + labelH + visRows * cell + 14.0f * S +
+                          barH + labelH + visRows * cell + 14.0f * S +
                               BottomStripH() + 2.0f * insY);
         ImVec2 defPos(120.0f, 200.0f);
         if (auto* m = wm->Find("main"); m && m->posKnown) {
             defPos = ImVec2(m->pos.x - size.x - 12.0f * S, m->pos.y);
         }
-        wm->ApplyNext("partner", defPos, size);
+        wm->ApplyNext("partner", defPos, size, WinManager::Anchor::kTopLeft, topPad);
         // managed-window rule: WindowPadding must equal the frame inset, else
         // the content starts at the default padding (left) while the width was
         // sized from insX (right) — a lopsided right margin. (See memory note.)
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
             ImVec2(insX + Theme::PadX() * S, insY + Theme::PadY() * S));
         ImGui::Begin("##gi_partner", nullptr, kManagedWinFlags);
-        wm->TitleBar("partner", title, 0.0f, false, topPad);
+        wm->TitleBar("partner", title);
 
         // F6a/F6b: red crime chrome — border + label line flip to crimson so
         // an owned container / a living mark is unmistakable.

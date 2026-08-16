@@ -40,6 +40,9 @@ namespace FUI
             // the readback, or a fractional request looks like a change on
             // every single frame.
             ImVec2      reqSize = ImVec2(0.0f, 0.0f);
+            // What ApplyNext added to this window's height for the title's top
+            // clearance, so TitleBar offsets the name by the same number.
+            float       topPad = 0.0f;
         };
 
         static WinManager* GetSingleton();
@@ -100,8 +103,15 @@ namespace FUI
         };
 
         // Call BEFORE ImGui::Begin: applies the stored position.
+        // ★★a_topPad: clearance ABOVE the title (Theme::TitleTopPad). It is taken
+        // HERE, not at TitleBar, because this is the one call that owns the SIZE
+        // and still runs before Begin -- so the height grows by exactly what the
+        // title is offset by, out of one argument, and the two cannot drift.
+        // A window that does not pass it gets neither, which is the opt-in the
+        // old separate TitleBar parameter was for; the difference is that it can
+        // no longer be passed to one and forgotten at the other.
         void ApplyNext(const std::string& a_key, ImVec2 a_defaultPos, ImVec2 a_defaultSize,
-                       Anchor a_anchor = Anchor::kTopLeft);
+                       Anchor a_anchor = Anchor::kTopLeft, float a_topPad = 0.0f);
 
         // Call right after ImGui::Begin: draws the drag strip, records the
         // window rect, and starts a drag when the strip is grabbed.
@@ -110,15 +120,12 @@ namespace FUI
         // otherwise claim ActiveId first and eat them.
         // a_centerTitle: force a centred title regardless of the skin (small
         // confirm dialogs — loadout buy/delete — look lopsided left-anchored).
-        // a_topPad: extra clearance ABOVE the title (Theme::TitleTopPad — every
-        // skin). Opt-in per window because the caller has to grow its own
-        // height by the same amount; a window that took the pad without paying
-        // for it would push its own foot off the bottom edge. ★Which is why
-        // this still defaults to 0: the settings / EDIT / pouch / confirm
-        // windows do not pass it, and must not be given it without their
-        // heights being changed to match.
+        // ★The title's top pad is NOT a parameter here any more -- it is read
+        // back from what ApplyNext recorded for this key. It used to be passed
+        // to both, and the comment describing which windows opted out went stale
+        // the same day four of them opted in.
         void TitleBar(const std::string& a_key, const char* a_label, float a_reserveRight = 0.0f,
-                      bool a_centerTitle = false, float a_topPad = 0.0f);
+                      bool a_centerTitle = false);
 
         // Height of the title strip, scale included. Anything a caller draws
         // INTO that strip (EDIT / SETTINGS / a bag's COLLECT) centres itself
