@@ -2054,6 +2054,15 @@ namespace FUI::UIRoot
         // Main inventory window (v9): [tabs + equip doll + GOLD] | [ITEMS + grid]
         // ---- Phase 3: DrawMainWindow helpers (bodies moved verbatim) ----
 
+        // ★★A title-bar control's BOX is this much wider than its label on each
+        // side, and that is why the number has a name. The layout below knows
+        // only the LABEL's width, so aligning the label's right edge to a
+        // margin leaves the drawn box hanging this far past it — measured, the
+        // x sat 8px from the frame while FIND, whose widget frame IS its item
+        // rect, sat at the 14 both were meant to share. Read by the button that
+        // draws the box and by the code that places it.
+        float TitleBtnBoxPad() { return 6.0f * Theme::Scale(); }
+
         // titlebar text button (v10.6): dim tracked text, hover brightens,
         // active = hi + underline (fade on skin 2). Fires on RELEASE — a
         // press-time toggle opened the settings popup and the same click's
@@ -2105,7 +2114,7 @@ namespace FUI::UIRoot
             // (ImGuiCol_Border + FrameRounding), so this is that same frame,
             // not a new idea. Only the BEVEL stays light-panel-only: it is
             // part of the recessed-button grammar SIMPLE is built on.
-            const float pad = 6.0f * Theme::Scale();
+            const float pad = TitleBtnBoxPad();
             const ImVec2 b0(a_x - pad, boxTop);
             const ImVec2 b1(a_x + a_w + pad, boxTop + boxH);
             {
@@ -2155,14 +2164,18 @@ namespace FUI::UIRoot
         // right-aligned titlebar controls (F1): … EDIT SETTINGS ✕ — the close
         // button sits at the right edge and closes EVERYTHING at once (no
         // sub-window cascade), with the close sound played up front.
-        void DrawTitleBarControls(const ImVec2& a_mainSize, float a_barH, float a_pad,
-                                  float a_insX, float a_insY,
+        void DrawTitleBarControls(const ImVec2& a_mainSize, float a_barH,
+                                  float a_insY, float a_topPad,
                                   const char* a_editLbl, const char* a_setLbl,
                                   float a_editW, float a_setW, float a_btnGap)
         {
             const ImVec2 wp = ImGui::GetWindowPos();
             // half the inset, matching the title itself (see WinManager)
-            const float ty = wp.y + a_insY * 0.5f +
+            // ★...and the WHOLE top pad, also matching it. EDIT / SETTINGS / x
+            // sit on the title's line, so they take the same two terms in the
+            // same proportions -- give this one a half and they float 7px above
+            // the name they are aligned to.
+            const float ty = wp.y + a_insY * 0.5f + a_topPad +
                              (a_barH - ImGui::GetTextLineHeight()) * 0.5f;
             const char* closeLbl = "\xC3\x97";   // × (U+00D7, already baked)
             // ★The x is capped at the TITLE size. The old 1.55 multiplier was
@@ -2174,7 +2187,15 @@ namespace FUI::UIRoot
             const float closePx = Theme::SnapPx(Theme::S().titleSize * Theme::Scale());
             const float kCloseMul = closePx / (std::max)(1.0f, ImGui::GetFontSize());
             const float closeW = ImGui::CalcTextSize(closeLbl).x * kCloseMul;
-            const float xClose = wp.x + a_mainSize.x - a_pad - a_insX - closeW;
+            // ★The same right margin the FIND box below it keeps. ★★Minus the
+            // BOX pad as well as the label width: these controls are drawn as
+            // boxes and the margin the eye reads is to the box's edge, not to
+            // the last letter. Subtracting only closeW aligned the GLYPH and
+            // left the frame 6px proud -- an 8px margin under a 14px one,
+            // which is the "barely moved" this went through once already.
+            // COLLECT needs no such term: Sfx::Button's frame IS its item rect.
+            const float xClose = wp.x + a_mainSize.x - Theme::TopControlRightPad() -
+                                 closeW - TitleBtnBoxPad();
             const float xSet = xClose - a_btnGap - a_setW;
             const float xEdit = xSet - a_btnGap - a_editW;
             if (TitleBarTextButton(xEdit, ty, a_editLbl, a_editW, Editor::IsEditMode())) {
@@ -2736,10 +2757,14 @@ namespace FUI::UIRoot
             const float bodyH  = (compact
                 ? gridBodyH + 30.0f * S
                 : (std::max)(Equip::PanelH() + dollGap + StatsPanelH(), gridBodyH)) + 8.0f * S;
+            // ★PAID FOR HERE. TitleBar only spends the pad; the height has to
+            // grow by the same number or the extra clearance at the top comes
+            // straight out of the gold bar's margin at the foot.
+            const float topPad = Theme::TitleTopPad();
             const ImVec2 mainSize(compact
                     ? pad + gridW + pad + 2.0f * insX
                     : pad + leftW + pad + 1.0f + pad + gridW + pad + 2.0f * insX,
-                barH + bodyH + padB + 2.0f * insY);
+                barH + topPad + bodyH + padB + 2.0f * insY);
 
             // ★Pin the RIGHT edge across the compact/normal size change. The
             //  item grid is the half that exists in both layouts and it sits
@@ -2765,11 +2790,12 @@ namespace FUI::UIRoot
             // strip excludes the right-aligned control zone (EDIT + SETTINGS
             // + ✕) so the buttons below actually receive their clicks
             wm->TitleBar("main", Lang::T(Lang::Str::Inventory),
-                pad + insX + editW + setW + closeW + 2.0f * btnGap + 14.0f * S);
+                pad + insX + editW + setW + closeW + 2.0f * btnGap + 14.0f * S,
+                false, topPad);
 
             const ImVec2 bodyTop = ImGui::GetCursorScreenPos();
 
-            DrawTitleBarControls(mainSize, barH, pad, insX, insY,
+            DrawTitleBarControls(mainSize, barH, insY, topPad,
                 editLbl, setLbl, editW, setW, btnGap);
             ParkPreviewModel(mainSize);
 
@@ -2802,11 +2828,7 @@ namespace FUI::UIRoot
             ImGui::BeginChild("fab_right", ImVec2(gridW, bodyH), ImGuiChildFlags_None,
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             {
-                if (sk.diamondLabels) {   // v10.4: "◇ LABEL" in crimson
-                    ImGui::TextColored(sk.sel, "\xE2\x97\x87 %s", Lang::T(Lang::Str::Items));
-                } else {
-                    OutlinedText(Theme::Chrome(1.0f), Lang::T(Lang::Str::Items));
-                }
+                SectionLabel(Lang::T(Lang::Str::Items));
                 auto* cache = IconCache::GetSingleton();
                 if (cache->IsBusy()) {
                     ImGui::SameLine();
@@ -2881,6 +2903,17 @@ namespace FUI::UIRoot
     void DrawPromptRow(const std::vector<PromptBit>& a_bits, bool a_warn, float a_fade)
     {
         DrawPromptRowImpl(a_bits, a_warn, a_fade);
+    }
+
+    void SectionLabel(const char* a_text, const ImVec4* a_col)
+    {
+        if (!a_text) return;
+        const auto& sk = Theme::S();
+        if (sk.diamondLabels) {   // v10.4: "◇ LABEL" in crimson
+            ImGui::TextColored(a_col ? *a_col : sk.sel, "\xE2\x97\x87 %s", a_text);
+        } else {
+            OutlinedText(a_col ? ImGui::GetColorU32(*a_col) : Theme::Chrome(1.0f), a_text);
+        }
     }
 
     void NoteHoverHint(const char* a_text)

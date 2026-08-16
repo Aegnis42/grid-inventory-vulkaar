@@ -110,8 +110,15 @@ namespace FUI
         // otherwise claim ActiveId first and eat them.
         // a_centerTitle: force a centred title regardless of the skin (small
         // confirm dialogs — loadout buy/delete — look lopsided left-anchored).
+        // a_topPad: extra clearance ABOVE the title (Theme::TitleTopPad — every
+        // skin). Opt-in per window because the caller has to grow its own
+        // height by the same amount; a window that took the pad without paying
+        // for it would push its own foot off the bottom edge. ★Which is why
+        // this still defaults to 0: the settings / EDIT / pouch / confirm
+        // windows do not pass it, and must not be given it without their
+        // heights being changed to match.
         void TitleBar(const std::string& a_key, const char* a_label, float a_reserveRight = 0.0f,
-                      bool a_centerTitle = false);
+                      bool a_centerTitle = false, float a_topPad = 0.0f);
 
         // Height of the title strip, scale included. Anything a caller draws
         // INTO that strip (EDIT / SETTINGS / a bag's COLLECT) centres itself
@@ -121,7 +128,11 @@ namespace FUI
 
         // Phase 2: shared chrome for the centred confirm-style popups
         // (quantity slider / sell-confirm / loadout buy / delete):
-        // screen-centred ApplyNext + Begin(kManagedWinFlags) + overlay-rect
+        // ★Opens AT THE CURSOR (clamped so the whole popup stays on screen),
+        // re-placed on every open -- a popup is answered and dismissed, so it
+        // has no position worth remembering and no reason to make the player
+        // travel to the middle of the display.
+        // ApplyNext + Begin(kManagedWinFlags) + overlay-rect
         // registration (hover-through prevention can't be forgotten any more)
         // + centred TitleBar. Returns TRUE when an outside click cancelled
         // the popup THIS frame — the caller resets its own state and plays

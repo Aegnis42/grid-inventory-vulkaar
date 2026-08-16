@@ -944,7 +944,7 @@ namespace FUI
     float WinManager::TitleBarH() { return 34.0f * Theme::Scale(); }
 
     void WinManager::TitleBar(const std::string& a_key, const char* a_label, float a_reserveRight,
-                              bool a_centerTitle)
+                              bool a_centerTitle, float a_topPad)
     {
         auto& w = Ensure(a_key);
         w.pos = ImGui::GetWindowPos();
@@ -1037,7 +1037,7 @@ namespace FUI
         // dark enough is the skin's darkest token with nothing to stand
         // against. The fill alone separates the window from the world.
         if (sk.bevelChrome && !sk.lightPanel) {
-            const float tbB = wp.y + Theme::FrameInsetY() + barH;
+            const float tbB = wp.y + Theme::FrameInsetY() + a_topPad + barH;
             const ImU32 topA = Theme::Col(sk.ink, 0.13f);
             const ImU32 topB = Theme::Col(sk.ink, 0.00f);
             dl->AddRectFilledMultiColor(wp, ImVec2(we.x, tbB), topA, topA, topB, topB);
@@ -1114,7 +1114,7 @@ namespace FUI
         }
         // (no title rule on a light panel — same reason as the frame above)
         if (!sk.lightPanel) {
-            const float ly = wp.y + Theme::FrameInsetY() + barH;
+            const float ly = wp.y + Theme::FrameInsetY() + a_topPad + barH;
             dl->AddLine(ImVec2(wp.x + Theme::FrameInsetX(), ly),
                 ImVec2(we.x - Theme::FrameInsetX(), ly),
                 Theme::Acc(sk.cornerFade ? 0.10f : 0.25f));
@@ -1133,7 +1133,11 @@ namespace FUI
         // title was starting below all of it — on a torn skin that is 24px, so
         // the name sat visibly low in its own bar while the bar's lower half
         // stayed empty. The title belongs to the bar, not under the frame.
-        const float ty = wp.y + insY * 0.5f + (barH - fontSize) * 0.5f;
+        // ★a_topPad is added WHOLE, not halved like the inset. The inset is how
+        // far the frame eats in (the title belongs to the bar, so it only
+        // clears half of it); this is clearance the caller has already paid for
+        // in its window height, so every pixel of it goes above the name.
+        const float ty = wp.y + insY * 0.5f + a_topPad + (barH - fontSize) * 0.5f;
         float tx = a_centerTitle ? wp.x + (w.size.x - textW) * 0.5f
                                  : wp.x + 12.0f * S + insX;
         // ★★INK: a brush mark laid UNDER the name, in the accent at half
@@ -1193,7 +1197,11 @@ namespace FUI
 
         ImGui::SetCursorScreenPos(wp);
         const float stripW = (std::max)(40.0f, w.size.x - a_reserveRight);
-        ImGui::InvisibleButton(("##titlebar_" + a_key).c_str(), ImVec2(stripW, insY + barH));
+        // the drag strip covers the pad too — it is title-bar space, and a
+        // 14px dead band along the window's top edge would be the one place the
+        // window cannot be picked up by
+        ImGui::InvisibleButton(("##titlebar_" + a_key).c_str(),
+                               ImVec2(stripW, insY + a_topPad + barH));
         if (ImGui::IsItemActivated() && !m_dragLock && !m_drag.active) {
             StartDrag(a_key);
         }
@@ -1206,7 +1214,7 @@ namespace FUI
         // while the left stayed at a hard-coded 12, so the content drifted
         // off-centre instead of tightening.
         ImGui::SetCursorScreenPos(
-            ImVec2(wp.x + Theme::PadX() * S + insX, wp.y + insY + barH + 8.0f * S));
+            ImVec2(wp.x + Theme::PadX() * S + insX, wp.y + insY + a_topPad + barH + 8.0f * S));
     }
 
     // ---- drag machinery (JS startWinDrag / mousemove / mouseup) ----
@@ -1332,8 +1340,44 @@ namespace FUI
                                        const char* a_title, ImVec2 a_size)
     {
         const ImVec2 disp = ImGui::GetIO().DisplaySize;
-        ApplyNext(a_key, ImVec2((disp.x - a_size.x) * 0.5f,
-                                (disp.y - a_size.y) * 0.5f), a_size);
+        // ★★Open AT THE CURSOR, not in the middle of the screen. A confirm
+        // popup is answered and dismissed immediately, so the trip from the
+        // cursor to its buttons is the entire cost of using one -- and on a
+        // wide display, going to the centre and back is most of that cost.
+        //
+        // ★Only on the frame it OPENS. ApplyNext runs every frame the popup is
+        // up, so feeding it the live cursor would drag the window around behind
+        // the mouse. IsOpen answers "was this drawn in the last couple of
+        // frames", which is exactly "is this a re-open".
+        //
+        // ★posKnown is cleared as well: ApplyNext only takes the default
+        // position the first time it sees a key, and without this the popup
+        // would land at the cursor once and then return to that same spot
+        // forever after. A popup has no position worth remembering.
+        auto*      w    = Find(a_key);
+        const bool open = w && IsOpen(*w);
+        ImVec2     def(( disp.x - a_size.x) * 0.5f, (disp.y - a_size.y) * 0.5f);
+        if (!open) {
+            const ImVec2 m = ImGui::GetIO().MousePos;
+            // ★Cursor lands 70px into the popup, horizontally centred -- below
+            // the title bar (34 * scale), so the pointer is never on the drag
+            // handle: the click that opened the popup is still held, and a
+            // cursor on the bar would start moving the window with the mouse.
+            // ★Scaled, like every other measurement here. A fixed 70 would
+            // drift into the bar as the UI scale goes up.
+            def = ImVec2(m.x - a_size.x * 0.5f, m.y - 70.0f * Theme::Scale());
+            // ★The WHOLE popup has to be on screen -- ApplyNext only keeps the
+            // title bar reachable, which is right for a window the player parks
+            // but would cut the buttons off a popup opened near an edge.
+            if (disp.x > a_size.x) {
+                def.x = (std::max)(0.0f, (std::min)(disp.x - a_size.x, def.x));
+            }
+            if (disp.y > a_size.y) {
+                def.y = (std::max)(0.0f, (std::min)(disp.y - a_size.y, def.y));
+            }
+            if (w) w->posKnown = false;
+        }
+        ApplyNext(a_key, def, a_size);
         ImGui::Begin(a_imguiId, nullptr, kManagedWinFlags);
         UIRoot::NoteOverlayRect();
         TitleBar(a_key, a_title, 0.0f, true);

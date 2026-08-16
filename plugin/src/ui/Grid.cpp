@@ -2884,8 +2884,28 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const auto& io = ImGui::GetIO();
             const float gridW = a_view.cols * CellPx();
             const float gridH = a_view.rows * CellPx();
+            // ★★★ASK IMGUI WHO OWNS THE CURSOR, then measure. The rect test
+            // below knows only geometry, and geometry does not include DEPTH:
+            // with a merchant window laid over a bag, every cell of the bag it
+            // covers still answered "the cursor is inside me", so selling into
+            // the overlap stored the item in the hidden bag -- or, if that cell
+            // was occupied, swapped and handed the buried item to the cursor
+            // (user report). Windows on top of it were simply not part of the
+            // question.
+            // ★The same two gates pass 4 applies to HOVER, and for the same
+            // reasons: IsWindowHovered resolves z-order, and MouseInOverlay
+            // covers the chrome that popups/settings/EDIT draw OUTSIDE their
+            // ImGui rect. Where an item can be picked up is where it can be
+            // dropped -- one pass answering that differently from the other is
+            // what let a drop land somewhere a click could not reach.
+            // ★AllowWhenBlockedByActiveItem: the drop CLICK activates the tile
+            // button under the cursor, and a plain IsWindowHovered would then
+            // report no window at the exact moment the drop is resolved.
+            const bool cursorIsOurs =
+                ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+                !UIRoot::MouseInOverlay();
             // carried item: this grid is the drop candidate while hovered (C2)
-            if (g_held &&
+            if (g_held && cursorIsOurs &&
                 io.MousePos.x >= base.x && io.MousePos.x < base.x + gridW &&
                 io.MousePos.y >= base.y && io.MousePos.y < base.y + gridH) {
                 auto& held = *g_held;
@@ -3844,8 +3864,43 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     EnumerateUnitTiles(baseKey, count, (std::numeric_limits<int>::max)(),
                                        entry, unitKeys, gdef.bag == 0);
                 } else {
-                    const int tiles = (units + cap - 1) / cap;
-                    for (int k = 0; k < tiles; ++k) unitKeys.push_back({ TileKey(baseKey, 0, 0, k), -1 });
+                    // ★★★POOLED, exactly like the board (CollectDisplayTiles).
+                    // "units ARE fungible" was true only while stackable tiles
+                    // ignored signatures. Now a stolen / quest / poisoned
+                    // sub-stack gets its own tile, so a form-wide ceil(units/cap)
+                    // models a board one tile SMALLER than the one drawn -- and
+                    // every capacity gate reads this walk: space used, overload,
+                    // the pickup bounce, the buy clamp. The two walks have to
+                    // produce the same keys or they disagree about the board.
+                    std::map<std::pair<std::uint16_t, std::uint16_t>, int> pools;
+                    int signedUnits = 0;
+                    if (entry && entry->extraLists) {
+                        for (auto* xl : *entry->extraLists) {
+                            if (!xl) continue;
+                            if (xl->HasType<RE::ExtraWorn>() ||
+                                xl->HasType<RE::ExtraWornLeft>()) {
+                                continue;
+                            }
+                            std::uint16_t xuid = 0;
+                            if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
+                                xuid = xu->uniqueID;
+                            }
+                            const std::uint16_t sg = InstanceSig(xl);
+                            if (xuid == 0 && sg == 0) continue;   // plain
+                            const int n = (std::max)(1, xl->GetCount());
+                            pools[{ xuid, sg }] += n;
+                            signedUnits += n;
+                        }
+                    }
+                    pools[{ 0, 0 }] += (std::max)(0, units - signedUnits);
+                    for (const auto& [pk, n] : pools) {
+                        if (n <= 0) continue;
+                        const int tiles = (n + cap - 1) / cap;
+                        for (int k = 0; k < tiles; ++k) {
+                            unitKeys.push_back(
+                                { TileKey(baseKey, pk.first, pk.second, k), -1 });
+                        }
+                    }
                 }
                 for (const auto& uk : unitKeys) {
                     Item it;
@@ -4534,26 +4589,93 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     return a.le.col < b.le.col;
                 });
 
+                // ---- POOLS: a signed sub-stack is not the same thing -----------
+                // ★★★Every attribute that hangs off a pool -- the stolen dot, the
+                // quest lock, the merchant's refusal -- is recorded under
+                // PoolPrefix(base, uid, sig). Gear tiles carry that prefix
+                // because they come from EnumerateUnitTiles; STACKABLE tiles were
+                // keyed `base#n` with no signature at all, so PoolOfKey handed
+                // back the bare base and none of those lookups could ever match.
+                // A stolen gem showed no dot, sold to any merchant instead of a
+                // fence, and a quest-flagged stack could be dropped (user report).
+                // ★Patching the LOOKUP could not fix it: a stackable tile has no
+                // sub-stack identity, so "5 amethysts" may be 1 stolen + 4 clean
+                // and no single answer is right for that tile. The tiles have to
+                // split, which is what pooling by signature does -- the same rule
+                // the gear branch already follows, and the position-order slot
+                // assignment both branches share is unchanged.
+                // ★Only signed sub-stacks split out (ownership, quest alias,
+                // health, enchantment, charge, poison, soul). Everything with no
+                // list, which is nearly every stack in the game, stays in the
+                // plain pool and is keyed exactly as before.
+                std::map<std::string, int> poolUnits;   // pool prefix -> units
+                int signedUnits = 0;
+                if (entry && entry->extraLists) {
+                    for (auto* xl : *entry->extraLists) {
+                        if (!xl) continue;
+                        // worn units are off the board entirely; `units` above
+                        // has already taken them out of the total
+                        if (xl->HasType<RE::ExtraWorn>() ||
+                            xl->HasType<RE::ExtraWornLeft>()) {
+                            continue;
+                        }
+                        std::uint16_t xuid = 0;
+                        if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
+                            xuid = xu->uniqueID;
+                        }
+                        const std::string p = PoolPrefix(baseKey, xuid, InstanceSig(xl));
+                        if (p == baseKey) continue;   // plain: the remainder below
+                        const int n = (std::max)(1, xl->GetCount());
+                        poolUnits[p] += n;
+                        signedUnits += n;
+                    }
+                }
+                // ★The plain pool takes the REMAINDER, so every subtlety the
+                // form-wide accounting above worked out (worn, loadout reserves,
+                // queued removals, pending equips) stays attached to it rather
+                // than being re-derived per pool and getting one of them wrong.
+                poolUnits[baseKey] = (std::max)(0, units - signedUnits);
+
+                // ★The carry belongs to ONE pool -- its own key says which.
+                const std::string carryPool =
+                    (carried > 0 && g_held) ? PoolOfKey(g_held->key) : std::string();
+
+                // std::map order puts the plain pool first (`base` < `base~XXXX`),
+                // which is what the one-shot drop hint below wants: an ordinary
+                // pickup still gets it.
+                for (const auto& [poolKey, poolWant] : poolUnits) {
                 // `carried` was already reduced above by whatever the worn count
                 // is still accounting for -- subtracting the raw carry here took
                 // a doll-lifted unit out twice.
-                int placeUnits = (std::max)(0, units - carried);
+                int placeUnits = poolKey == carryPool
+                                     ? (std::max)(0, poolWant - carried) : poolWant;
+
+                // this pool's slots, by index so the minting below can append to
+                // `slots` without invalidating the walk
+                std::vector<std::size_t> mine;
+                for (std::size_t si = 0; si < slots.size(); ++si) {
+                    if (PoolOfKey(slots[si].key) == poolKey) mine.push_back(si);
+                }
+                if (placeUnits <= 0 && mine.empty()) continue;
 
                 int owned = 0;
-                for (auto& s : slots) owned += (std::max)(0, s.le.count);
+                for (auto si : mine) owned += (std::max)(0, slots[si].le.count);
 
                 int diff = placeUnits - owned;
                 if (qTrace) {
                     std::string ks;
-                    for (const auto& s : slots) {
-                        ks += " '" + s.key + "'x" + std::to_string(s.le.count);
+                    for (auto si : mine) {
+                        ks += " '" + slots[si].key + "'x" +
+                              std::to_string(slots[si].le.count);
                     }
-                    SKSE::log::info("[QUIVER] place={} owned={} diff={} slots{}",
-                                    placeUnits, owned, diff, ks.empty() ? " (none)" : ks);
+                    SKSE::log::info("[QUIVER] pool='{}' place={} owned={} diff={} slots{}",
+                                    poolKey, placeUnits, owned, diff,
+                                    ks.empty() ? " (none)" : ks);
                 }
                 if (diff > 0) {
                     // ACQUIRE: fill partial tiles top-left, then spill into new tiles
-                    for (auto& s : slots) {
+                    for (auto si : mine) {
+                        auto& s = slots[si];
                         if (diff <= 0) break;
                         // F2: never absorb fresh pickups into a tile parked in
                         // the trash (it's queued for deletion, not storage)
@@ -4589,7 +4711,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     while (diff > 0) {
                         const int cnt = (std::min)(cap, diff);
                         Slot ns;
-                        ns.key = NextTileKey(baseKey);
+                        // ★NextTileKey of the POOL, not of the form: this is
+                        // where `base~SIG#n` is born. The key grammar already
+                        // supported it -- BaseKey strips the suffix and PoolOfKey
+                        // cuts at the first '#' after it -- so nothing downstream
+                        // needed teaching.
+                        ns.key = NextTileKey(poolKey);
                         ns.le.col = -1; ns.le.row = -1; ns.le.count = cnt;
                         // B2: partner-drop hint — the first NEW tile of this form
                         // lands at the drop cell (one-shot, then back to first-fit)
@@ -4630,24 +4757,29 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     int deficit = -diff;
                     // The tile the player acted on gives up its unit FIRST (rule
                     // 2-B). Only then do the positional passes below run.
+                    // ★Cleared only when it was actually SPENT. The hint names one
+                    // key, that key lives in one pool, and the other pools must
+                    // not throw it away on their way past.
                     if (deficit > 0 && g_drainHint.baseKey == baseKey) {
-                        for (auto& s : slots) {
+                        for (auto si : mine) {
+                            auto& s = slots[si];
                             if (s.key != g_drainHint.key || s.le.count <= 0) continue;
                             const int take = (std::min)(s.le.count, deficit);
                             s.le.count -= take;
                             deficit -= take;
+                            g_drainHint = {};
                             break;
                         }
-                        g_drainHint = {};
                     }
                     // (explicit sells/stores never reach this drain: their tile's
                     // remembered quantity is decremented at confirm time in
                     // NotePendingRemove, so the reconciler sees no gap)
                     auto drain = [&](auto&& a_pick) {
-                        for (auto it2 = slots.rbegin(); it2 != slots.rend() && deficit > 0; ++it2) {
-                            if (!a_pick(*it2)) continue;
-                            const int take = (std::min)(it2->le.count, deficit);
-                            it2->le.count -= take;
+                        for (auto it2 = mine.rbegin(); it2 != mine.rend() && deficit > 0; ++it2) {
+                            auto& s = slots[*it2];
+                            if (!a_pick(s)) continue;
+                            const int take = (std::min)(s.le.count, deficit);
+                            s.le.count -= take;
                             deficit -= take;
                         }
                     };
@@ -4657,8 +4789,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     drain([&](const Slot& s) { return s.le.bag != kTrashKey && s.le.count > 0; });
                     drain([&](const Slot& s) { return s.le.count > 0; });   // trash: last resort
                 }
+                }   // ---- end per-pool reconciliation ----
 
                 // emit survivors; purge emptied tiles from the layout
+                // ★Form-wide on purpose: the pools placed their own units, but
+                // the board is one board and the conservation check below has to
+                // see every tile of the form at once.
                 for (auto& s : slots) {
                     if (s.le.count <= 0) { g_layout.erase(s.key); continue; }
                     g_layout[s.key].count = s.le.count;   // persist owned count now
@@ -6776,6 +6912,115 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
         }
+
+        // ★★★`[SURV=...]` is the ENGINE's conditional-description syntax, not a
+        // mod's invention. Verified rather than assumed: the token "SURV" sits
+        // in SkyrimSE.exe among the item card's own field names (`warmth`,
+        // `warmthChange`, `numItemEffects`), USSEP ships a record that uses it,
+        // and ccQDRSSE001-SurvivalMode.bsa holds 56 of them in every shipped
+        // language. It marks text belonging to Creation Club Survival Mode:
+        // shown while that mode is ON, dropped WHOLE while it is off.
+        // Printing the DNAM verbatim put "[SURV=Restore <2> points of Hunger.]"
+        // on a wine bottle's card, where vanilla shows nothing (user report).
+        void StripSurvivalBlocks(std::string& a_s, bool a_keep)
+        {
+            static constexpr std::string_view kOpen = "[SURV=";
+            const auto same = [](char a_l, char a_r) {
+                return std::tolower(static_cast<unsigned char>(a_l)) ==
+                       std::tolower(static_cast<unsigned char>(a_r));
+            };
+            std::string out;
+            out.reserve(a_s.size());
+            std::size_t i = 0;
+            while (i < a_s.size()) {
+                const bool hit = a_s.size() - i >= kOpen.size() &&
+                                 std::equal(kOpen.begin(), kOpen.end(), a_s.begin() + i, same);
+                if (!hit) {
+                    out.push_back(a_s[i++]);
+                    continue;
+                }
+                const std::size_t close = a_s.find(']', i + kOpen.size());
+                if (close == std::string::npos) {
+                    // ★Unterminated: copy the rest verbatim rather than eat it.
+                    // A malformed record should look wrong, not go silent.
+                    out.append(a_s, i, std::string::npos);
+                    break;
+                }
+                if (a_keep) out.append(a_s, i + kOpen.size(), close - (i + kOpen.size()));
+                i = close + 1;
+            }
+            a_s.swap(out);
+        }
+
+        // ★★An all-digit tag is a NUMBER, not a placeholder. Bethesda's own
+        // Survival strings write the amount inside the brackets -- the archive
+        // holds <2> / <18> / <220> / <380>, exactly the four hunger tiers, in
+        // the same file that uses <mag> and <dur> correctly elsewhere. So there
+        // is nothing to look up: the brackets are the only thing to remove.
+        // Anything else in angle brackets is left alone -- an unknown tag
+        // printed as-is is a visible fault, and inventing a value for it would
+        // be a quiet one.
+        void UnwrapNumericTags(std::string& a_s)
+        {
+            std::size_t i = 0;
+            while (i < a_s.size()) {
+                if (a_s[i] != '<') { ++i; continue; }
+                std::size_t j = i + 1;
+                while (j < a_s.size() && std::isdigit(static_cast<unsigned char>(a_s[j]))) ++j;
+                if (j > i + 1 && j < a_s.size() && a_s[j] == '>') {
+                    a_s.erase(j, 1);   // '>'
+                    a_s.erase(i, 1);   // '<'
+                    i = j - 1;         // one past the digits, both brackets gone
+                } else {
+                    ++i;
+                }
+            }
+        }
+
+        // The engine's OWN switch for the above -- the default object the game
+        // itself reads, so this cannot disagree with it. Null (and false) when
+        // the Creation Club content is not installed at all.
+        // ★★★NEVER GetObject(DefaultObjectID) -- that overload is BROKEN, and it
+        // took a CTD to find out. Its two lines look alike and are not:
+        //     (&RelocateMember<bool>(this, 0xB80, 0xBA8))[idx]      <- correct
+        //     &RelocateMember<TESForm**>(this, 0x20, 0x20)[idx]     <- wrong
+        // The first takes the array's ADDRESS and then subscripts. The second
+        // subscripts first, so it reads the VALUE at 0x20 -- objects[0], an
+        // ordinary form pointer -- and uses that as the array base. 323 slots
+        // past a TESForm is unmapped memory, and As<TESGlobal>() then read its
+        // formType at +0x1A: an access violation on every tooltip with effects
+        // on it, which is nearly every tooltip.
+        // (Crash log signature, should it ever come back: `cmp byte ptr
+        // [rcx+0x1A], 0x09` -- 0x1A is TESForm::formType and 9 is kGlobal.)
+        // The size_t overload subscripts the real `objects` member instead, and
+        // is what the SE/AE-only builds compile down to anyway.
+        // ★The index comes from the enum, not from a literal. DefaultObjectID
+        // packs (se | vr << 16); Survival Mode is SE/AE-only, so its high word
+        // is zero and the low word IS the index -- which is also why VR has to
+        // be turned away here rather than fed a 323 that means something else
+        // entirely on that runtime.
+        // ★Release-only caveat, stated so it is not a surprise: the size_t
+        // overload asserts against DEFAULT_OBJECTS::kTotal, which a cross-VR
+        // build compiles as 183. NDEBUG removes it; a Debug build would trip.
+        [[nodiscard]] bool SurvivalModeOn()
+        {
+            if (REL::Module::IsVR()) return false;
+            const auto* dom = RE::BGSDefaultObjectManager::GetSingleton();
+            if (!dom) return false;
+            constexpr auto kIdx = static_cast<std::size_t>(
+                std::to_underlying(RE::DefaultObjectID::kSurvivalModeEnabled) & 0xFFFF);
+            const auto* g = dom->GetObject<RE::TESGlobal>(kIdx);
+            return g && g->value != 0.0f;
+        }
+
+        // ★Both ends, in place. Leading/trailing space is what a dropped SURV
+        // block leaves behind, and " " is not empty.
+        void TrimInPlace(std::string& a_s)
+        {
+            const auto b = a_s.find_first_not_of(" \t\r\n");
+            if (b == std::string::npos) { a_s.clear(); return; }
+            a_s = a_s.substr(b, a_s.find_last_not_of(" \t\r\n") - b + 1);
+        }
     }
 
     // ★ONE board for the whole screen. The partner window used to draw its
@@ -7051,6 +7296,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // enchantment effects mostly have no name and only a description, so
         // an enchanted robe printed a hidden helper effect ("Fortify Health
         // 25") and none of the two lines the game itself shows.
+        // Once per tooltip, not once per effect line — the answer cannot change
+        // between two lines of the same card.
+        const bool survivalOn = SurvivalModeOn();
         auto effectLine = [&](RE::Effect* a_e, const ImVec4& a_col) {
             auto* base = a_e ? a_e->baseEffect : nullptr;
             if (!base) return;
@@ -7067,7 +7315,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const std::uint32_t area = a_e->GetArea();
 
             std::string line;
+            // ★★Whether the effect HAD a description, which is a different
+            // question from what is LEFT of one. A Survival-only description
+            // resolves to nothing once its block is dropped, and vanilla then
+            // prints no line at all -- falling through to the name form below
+            // would invent one ("Restore Hunger 2") that the game never shows.
+            // That fallback is for effects with no description to begin with.
+            bool hadDesc = false;
             if (const char* d = base->magicItemDescription.c_str(); d && *d) {
+                hadDesc = true;
                 line = d;
                 char v[32];
                 std::snprintf(v, sizeof(v), "%.0f", mag);
@@ -7076,8 +7332,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 FillTag(line, "<dur>", v);
                 std::snprintf(v, sizeof(v), "%u", area);
                 FillTag(line, "<area>", v);
+                // ★After the tags, so a <mag> INSIDE a kept block is already a
+                // number by the time the block is unwrapped.
+                StripSurvivalBlocks(line, survivalOn);
+                UnwrapNumericTags(line);
+                TrimInPlace(line);
             }
             if (line.empty()) {
+                if (hadDesc) return;
                 // No description (common on crafted and mod-added effects):
                 // fall back to the old "Name 50 (10s)" form.
                 const char* n = base->GetName();
@@ -7688,9 +7950,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (!v.open) continue;   // closed bag: holds items, draws no window
             // symmetric 12px margins around the bag grid (scale-aware) +
             // 2x frame inset for tornFrame skins (breathing room)
+            // ★+ the skin's title clearance, and the height pays for it (see
+            // Theme::TitleTopPad). A bag docks to the main window's edge, so
+            // its title has to sit on the same line as the one beside it.
+            const float topPad = Theme::TitleTopPad();
             const ImVec2 size(v.cols * CellPx() + 2.0f * Theme::PadX() * S +
                                   2.0f * Theme::FrameInsetX(),
-                              v.rows * CellPx() + 54.0f * S + 2.0f * Theme::FrameInsetY());
+                              v.rows * CellPx() + 54.0f * S + topPad +
+                                  2.0f * Theme::FrameInsetY());
 
             // default: flow to the right of the main window (E5).
             // ★Wrapped cascade: one straight diagonal walked the 18th bag
@@ -7711,21 +7978,44 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const bool typedBag = !v.accept.empty();
             const char* colLbl = Lang::T(Lang::Str::BagCollect);
             const float colW = typedBag ? ImGui::CalcTextSize(colLbl).x + 14.0f * S : 0.0f;
+            // ★The reserve has to cover the MARGIN as well as the button. It
+            // was colW alone, so the drag strip ran under the button's right
+            // edge and claimed ActiveId there first -- the very failure the
+            // reserve exists to prevent, just narrow enough (6px) to pass for
+            // a missed click. Widening the margin would have widened it too.
+            const float colRes = typedBag ? colW + Theme::TopControlRightPad() : 0.0f;
 
             ImGui::Begin(("##bag_" + v.bagKey).c_str(), nullptr, kManagedWinFlags);
-            wm->TitleBar(v.bagKey, v.bagName.c_str(), colW);
+            wm->TitleBar(v.bagKey, v.bagName.c_str(), colRes, false, topPad);
             if (typedBag) {
                 const ImVec2 keep = ImGui::GetCursorScreenPos();
                 // ★On the TITLE's own line — the same centring the main
                 // window's EDIT / SETTINGS use. The old anchor was the
                 // content cursor (window padding), which sits well above the
                 // title text, so COLLECT floated over the bag's name.
+                // ★★HALF the frame inset, which is what that comment above
+                // always claimed and what the code did not do. The inset is how
+                // far the FRAME eats inward; the title clears half of it and
+                // stays centred in its own bar (WinManager::TitleBar), and the
+                // main window's EDIT / SETTINGS / x take the same half. Taking
+                // the WHOLE of it put this button below the name it is aligned
+                // to on 16 of the 19 skins -- 3px under a translucent SIMPLE,
+                // 12px under a torn PARCHMENT, and invisible only on Sumi and
+                // Fable, where the inset happens to be zero. The top pad is a
+                // different quantity and is still taken whole: the caller paid
+                // for it in the window's height (Theme::TitleTopPad).
                 const float lineH = ImGui::GetTextLineHeight();
                 const float btnH = lineH + 6.0f * S;
-                const float textTop = ImGui::GetWindowPos().y + Theme::FrameInsetY() +
+                const float textTop = ImGui::GetWindowPos().y +
+                                      Theme::FrameInsetY() * 0.5f + topPad +
                                       (WinManager::TitleBarH() - lineH) * 0.5f;
+                // ★Same right margin as the main window's x and the FIND box
+                // (Theme::TopControlRightPad). This was the odd one out at 6px
+                // -- with bags docked along the main window's edge, three
+                // different margins on one vertical line were all visible at
+                // once.
                 ImGui::SetCursorScreenPos(ImVec2(
-                    ImGui::GetWindowPos().x + size.x - colW - Theme::FrameInsetX() - 6.0f * S,
+                    ImGui::GetWindowPos().x + size.x - colW - Theme::TopControlRightPad(),
                     textTop - (btnH - lineH) * 0.5f));   // button centres the label
                 if (Sfx::Button(("##collect_" + v.bagKey).c_str(),
                                 ImVec2(colW, btnH))) {

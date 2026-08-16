@@ -312,6 +312,27 @@ namespace FUI::Theme
     [[nodiscard]] float FrameInsetX();
     [[nodiscard]] float FrameInsetY();
 
+    // ★TOP-ONLY breathing room above a window title, and the reason it is not
+    // just a bigger FrameInsetY: that one is symmetric (a window grows by 2x it
+    // and the bottom strip measures up from it), so spending it on the TOP
+    // would have opened the same gap under the gold bar.
+    // ★Skin-independent. It was born as clearance for Sumi's brush frame and
+    // Fable's crimson strip, both of which put ink where the title wants to be,
+    // and is now applied to every skin so they all read alike.
+    // ★A caller must add it to its OWN height as well as pass it to TitleBar --
+    // see WinManager::TitleBar.
+    [[nodiscard]] float TitleTopPad();
+
+    // ★★ONE right margin for every control that hangs off the top-right of a
+    // window -- the FIND box, the main window's EDIT / SETTINGS / x, a bag's
+    // COLLECT. They stack vertically down the same edge, so nothing but a
+    // shared number can keep them flush; measured, they were at 14 / 12 / 6.
+    // ★The number is the BOARD's right edge (one PadX inside the frame) plus
+    // the 2px the find box holds back from its child's clip boundary. Read
+    // from the window's right edge, so a call site subtracts it and its own
+    // width and is done -- no per-site frame-inset arithmetic.
+    [[nodiscard]] float TopControlRightPad();
+
     // helpers: token -> ImU32 with alpha override
     [[nodiscard]] ImU32 Acc(float a_alpha);
     // The EMPHASIS colour for values, numbers and active chrome text. `hi` on

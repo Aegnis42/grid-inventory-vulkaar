@@ -259,6 +259,18 @@ namespace FUI::LootBarter
         //
         // IsLootMode() is deliberately NOT widened -- it also drives the red
         // STEAL chrome and the take/store semantics, neither of which applies.
+        // ★★The bottom strip's height, derived from the TEXT it has to hold.
+        // It was a flat 30*S, which fit while the strip drew at the default
+        // font size -- then the label moved to Theme::TextOutlined at
+        // FontValue() (20px) to match the player's gold bar, and 8 above plus
+        // 20 of glyph left two pixels under it. The number now follows the
+        // font, so the same thing cannot happen the next time either changes.
+        [[nodiscard]] float BottomStripH()
+        {
+            const float S = Theme::Scale();
+            return 8.0f * S + Theme::FontValue() + 10.0f * S;
+        }
+
         bool SpotMemoryOn()
         {
             return IsLootMode(g_mode) || g_mode == Mode::kPickpocket;
@@ -937,6 +949,21 @@ namespace FUI::LootBarter
         const float sliderW = 220.0f * S;
 
         const char* name = g_slider.obj ? g_slider.obj->GetName() : "";
+        // ★★The coin forms carry NO name on purpose (the esp blanks them so
+        // TrueHUD skips them, and the grid shows the amount badge instead), so
+        // the "?" fallback -- meant for a form with a genuinely missing name --
+        // is what the player saw when splitting gold. Name it what the rest of
+        // the UI calls it; Lang::Str::Gold follows the language setting.
+        // ★SentenceCase because that string is the stats panel's LABEL and is
+        // spelled "GOLD" for that row. Every other title here is an item name
+        // in ordinary case, so the shout stood out as the one word in caps.
+        // Non-ASCII scripts pass through untouched.
+        std::string coinName;
+        if (g_slider.obj && GoldCoins::IsCoinForm(g_slider.obj->GetFormID()) &&
+            !GoldCoins::IsPouch(g_slider.obj->GetFormID())) {
+            coinName = Lang::SentenceCase(Lang::T(Lang::Str::Gold));
+            name = coinName.c_str();
+        }
         if (!name || !*name) name = "?";
         const char* lbl = Lang::T(Lang::Str::TakeLabel);
         switch (g_slider.dir) {
@@ -1157,6 +1184,13 @@ namespace FUI::LootBarter
         const float btnRow = 2.0f * btnW + 8.0f * S;
 
         const char* name = g_confirm.obj ? g_confirm.obj->GetName() : "";
+        // Same nameless-coin case as the slider above.
+        std::string coinName;
+        if (g_confirm.obj && GoldCoins::IsCoinForm(g_confirm.obj->GetFormID()) &&
+            !GoldCoins::IsPouch(g_confirm.obj->GetFormID())) {
+            coinName = Lang::SentenceCase(Lang::T(Lang::Str::Gold));
+            name = coinName.c_str();
+        }
         if (!name || !*name) name = "?";
         const char* question = Lang::T(Lang::Str::SellFavoriteConfirm);
         char priceLine[32];
@@ -1836,6 +1870,9 @@ namespace FUI::LootBarter
             // blue panel, so the merchant's board had no cells at all.
             Grid::DrawCellLattice(dl, base, cols, rows);
 
+            // (the board's outer edge is drawn OUTSIDE this child, at a fixed
+            //  position -- see PartnerBoardEdge)
+
             // GI16: occupied-cell shading, the same pass the player grid runs
             // (DrawOccupancyPass). Its absence here was never a deliberate
             // choice -- the partner window simply drew sprites onto bare grid
@@ -1845,20 +1882,49 @@ namespace FUI::LootBarter
             // one distinction that changes what the player does next.
             // same ground as the player's grid and the doll (see Grid.cpp)
             const ImU32 shadeCol = Theme::OccupiedGround();
-            const ImU32 wornCol = IM_COL32(196, 172, 108, 92);
+            // ★★★NO COLOUR FOR "WORN". It used to take a hardcoded amber ground
+            // -- the one colour on this board that did not come from the skin,
+            // which is why it looked wrong on every one of them -- and the
+            // colour could not carry the meaning anyway. Nothing teaches a
+            // player that a pale ground means "this is on the body"; the state
+            // was read as new-pickup instead, by the person who designed it.
+            // Worse, it collided with what a ground already says here: our own
+            // grid uses ground tints for new-pickup and open-bag.
+            // ★It is a MARK now, in the corner, the way the lock says "you
+            // cannot have this". See the worn silhouette further down.
+            // ★The clearance is the skin's, not a constant. Same rule as the
+            // player's grid: an engraved skin carves after the cell, an ink
+            // skin rules ON TOP afterwards and so needs none, and only a plain
+            // hairline wants a pixel either side. A fixed 1.0 left a bright
+            // seam on the ink skins and shrank the cell on the engraved ones,
+            // which is the "subtly different from the inventory" part.
+            const float in0 = (sk.engravedCells || Theme::InkChrome()) ? 0.0f : 1.0f;
+            const float in1 = sk.engravedCells
+                                ? Theme::kGrooveW * Theme::Scale() * 0.5f
+                            : Theme::InkChrome() ? 0.0f
+                                                 : 1.0f;
             for (const auto& it : cells) {
                 if (Grid::IsHeldPartnerUnit(it.obj, it.uid, it.xlIdx, it.ord)) continue;
-                const ImU32 fill = it.worn ? wornCol : shadeCol;
                 for (int y = 0; y < it.h; ++y) {
                     for (int x = 0; x < it.w; ++x) {
-                        const ImVec2 c0(base.x + (it.col + x) * cell,
-                                        base.y + (it.row + y) * cell);
-                        // 1px inset: the fill must not cover the grid hairlines
-                        dl->AddRectFilled(ImVec2(c0.x + 1.0f, c0.y + 1.0f),
-                            ImVec2(c0.x + cell - 1.0f, c0.y + cell - 1.0f), fill);
+                        const int cc = it.col + x, rr = it.row + y;
+                        const ImVec2 c0(base.x + cc * cell, base.y + rr * cell);
+                        const ImVec2 q0(c0.x + (cc > 0 ? in1 : in0),
+                                        c0.y + (rr > 0 ? in1 : in0));
+                        const ImVec2 q1(c0.x + cell - (cc + 1 < cols ? in1 : in0),
+                                        c0.y + cell - (rr + 1 < rows ? in1 : in0));
+                        dl->AddRectFilled(q0, q1, shadeCol);
                     }
                 }
             }
+
+            // ★★★The ink skins' lattice, and the reason the partner board had
+            // NO cells at all on them: DrawCellLattice deliberately draws
+            // nothing under InkChrome -- the marks have to land OVER the
+            // occupied ground, not be cleared around by it -- and the second
+            // call that actually draws them was only ever made by the player's
+            // grid. Same order as there: chrome, ground, THEN the lattice.
+            Grid::DrawInkLattice(dl, base, cols, rows);
 
             // cells
             for (size_t i = 0; i < cells.size(); ++i) {
@@ -2067,8 +2133,17 @@ namespace FUI::LootBarter
                     shape.w = it.w;
                     shape.h = it.h;
                     auto       pr = g_partner.get();
-                    const bool hov = ImGui::IsMouseHoveringRect(
-                        p0, ImVec2(p0.x + bw, p0.y + bh), false);
+                    // ★IsMouseHoveringRect is geometry only -- it clips, but it
+                    // never asks who is on top, so a badge under another window
+                    // still lit up. Cosmetic where the other two were not, but
+                    // it is the same missing question, so it gets the same gate.
+                    // (The cell's InvisibleButton is not available here: it is
+                    // only submitted while nothing is being carried.)
+                    const bool hov =
+                        ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+                        !UIRoot::MouseInOverlay() &&
+                        ImGui::IsMouseHoveringRect(
+                            p0, ImVec2(p0.x + bw, p0.y + bh), false);
                     Badges::Draw(dl, p0, bw, bh, shape,
                                  pr ? pr->GetFormID() : 0u,
                                  it.obj->GetFormID(), it.uid, hov);
@@ -2090,8 +2165,7 @@ namespace FUI::LootBarter
                 // with a small padlock at the bottom-right marker spot.
                 if (g_mode == Mode::kPickpocket) {
                     if (it.locked) {
-                        // amber already says "worn"; this only adds the
-                        // greyed-out reading of "and you can't have it"
+                        // greyed out: "and you can't have it"
                         dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
                             IM_COL32(0, 0, 0, 90));
                         const float ps = 10.0f * Theme::Scale();
@@ -2117,6 +2191,51 @@ namespace FUI::LootBarter
                         dl->AddText(ImVec2(tp.x, tp.y + 1), outline, pb);
                         dl->AddText(tp, cc, pb);
                     }
+                }
+                // ★★"ON THE BODY", as a mark rather than a colour. Same corner
+                // and size as the lock, because it answers the same KIND of
+                // question -- what is true about this item that the sprite
+                // cannot show.
+                // ★A torso: the equipment doll is the one place this UI already
+                // draws a body, so it is the one shape a player has seen mean
+                // "worn" before.
+                // ★★OUTSIDE the pickpocket branch, which is where it was first
+                // written by mistake -- so it never ran while looting a corpse,
+                // the one place it was asked for.
+                // ★Not while LOCKED. The lock owns this corner and says more
+                // (it already implies the item is worn, since that is what
+                // locks a pickpocket cell); two marks in one square would only
+                // be legible as clutter.
+                if (it.worn && !it.locked) {
+                    const float ps = 10.0f * Theme::Scale();
+                    const ImVec2 lp(p0.x + bw - ps - 4.0f, p0.y + bh - ps - 4.0f);
+                    // ★★The LOCK's own gold, so the two read as one family of
+                    // marks. The lock can wear it plainly because it paints a
+                    // dark wash under itself first; this mark has no wash, so
+                    // it carries its own outline instead -- the same trick the
+                    // pickpocket percentage uses to stay legible on any ground.
+                    const ImU32 gold    = IM_COL32(220, 200, 150, 235);
+                    const ImU32 outline = IM_COL32(0, 0, 0, 190);
+                    const auto  torsoAt = [&](float dx, float dy, ImU32 col) {
+                        const float x = lp.x + dx, y = lp.y + dy;
+                        dl->AddCircleFilled(
+                            ImVec2(x + ps * 0.5f, y + ps * 0.26f), ps * 0.23f, col);
+                        const ImVec2 t[4] = {
+                            ImVec2(x + ps * 0.08f, y + ps),
+                            ImVec2(x + ps * 0.24f, y + ps * 0.56f),
+                            ImVec2(x + ps * 0.76f, y + ps * 0.56f),
+                            ImVec2(x + ps * 0.92f, y + ps),
+                        };
+                        dl->AddConvexPolyFilled(t, 4, col);
+                    };
+                    // ★One pixel, four directions -- not a fatter silhouette
+                    // underneath. At 10px a grown shape closes the gap between
+                    // head and shoulders and the figure turns into a blob.
+                    torsoAt(-1.0f, 0.0f, outline);
+                    torsoAt(1.0f, 0.0f, outline);
+                    torsoAt(0.0f, -1.0f, outline);
+                    torsoAt(0.0f, 1.0f, outline);
+                    torsoAt(0.0f, 0.0f, gold);
                 }
             }
             // F7: drop ghost — the SAME anchor/blocker verdict the drop will
@@ -2150,7 +2269,7 @@ namespace FUI::LootBarter
 
         // stage 4: bottom strip — barter = merchant GOLD bar, loot = the
         // R shortcut hint (design pass C/G); runs inside the window
-        void DrawPartnerBottomBar(const ImVec2& size)
+        void DrawPartnerBottomBar(const ImVec2& size, float a_gridW)
         {
             const auto& sk = Theme::S();
             const float S = Theme::Scale();
@@ -2161,11 +2280,39 @@ namespace FUI::LootBarter
             {
                 auto* wdl = ImGui::GetWindowDrawList();
                 const ImVec2 wp = ImGui::GetWindowPos();
-                const float gy = wp.y + size.y - insY - 30.0f * S;
-                const float x0 = wp.x + insX + 2.0f;
-                const float x1 = wp.x + size.x - insX - 2.0f;
-                wdl->AddLine(ImVec2(wp.x + insX, gy), ImVec2(wp.x + size.x - insX, gy),
-                    Theme::Rule());
+                const float gy = wp.y + size.y - insY - BottomStripH();
+                // ★★The window's content inset is (insX + PadX) -- that is what
+                // this window's PushStyleVar(WindowPadding) sets. This strip is
+                // drawn straight onto the draw list and so bypassed it, sitting
+                // PadX further left than everything else in the window. On the
+                // ink skins the frame is a brush stroke rather than a hairline,
+                // so "slightly outside the inset" became the label lying ON the
+                // border. Same inset as the content it sits under.
+                const float pad = Theme::PadX() * S;
+                const float x0 = wp.x + insX + pad;
+                // ★★★TO THE BOARD'S RIGHT EDGE, NOT THE WINDOW'S. The window is
+                // `gridW + sbW` wide, and sbW is the SCROLLBAR GUTTER -- 0 until
+                // the partner happens to hold more than 12 rows of goods, 14px
+                // after that. Ruling this strip off the window width therefore
+                // ran it 14px past the last column and underneath the scrollbar,
+                // on merchants only, which is exactly how a footer rule reads as
+                // "the scrollbar has a border along its bottom" (user report,
+                // twice). A container that does not scroll never showed it,
+                // which is what made it look like a scrollbar defect.
+                // ★The gutter is CHROME, not content: the strip belongs to the
+                // board above it and must be the same width whether or not the
+                // wares happen to overflow.
+                const float x1 = x0 + a_gridW;
+                wdl->AddLine(ImVec2(x0, gy), ImVec2(x1, gy), Theme::Rule());
+                // ★★★THE SAME GLYPH STYLE AS THE PLAYER'S GOLD BAR. This strip
+                // is the partner's half of one line across the screen, and it
+                // was drawn with plain AddText at the default font size while
+                // the player's half used Theme::TextOutlined at FontValue().
+                // On a skin whose chrome carries outlines, the two halves then
+                // wore different type -- same row, same grammar, different
+                // lettering. One helper, one size, both sides.
+                const float vpx = Theme::FontValue();
+                const float ty  = gy + 8.0f * S;
                 if (g_mode == Mode::kBarter) {
                     char amt[32];
                     if (g_merchGoldInf) {
@@ -2173,25 +2320,30 @@ namespace FUI::LootBarter
                     } else {
                         std::snprintf(amt, sizeof(amt), "%d", MerchantGold());
                     }
+                    char lbl[96];
                     if (sk.diamondLabels) {
-                        char lbl[96];
                         std::snprintf(lbl, sizeof(lbl), "\xE2\x97\x87 %s",
                             Lang::T(Lang::Str::MerchantGoldLabel));
-                        wdl->AddText(ImVec2(x0, gy + 8.0f * S), Theme::Col(sk.sel, 1.0f), lbl);
                     } else {
-                        wdl->AddText(ImVec2(x0, gy + 8.0f * S), Theme::Chrome(0.72f),
+                        std::snprintf(lbl, sizeof(lbl), "%s",
                             Lang::T(Lang::Str::MerchantGoldLabel));
                     }
-                    const float amtW = ImGui::CalcTextSize(amt).x;
-                    wdl->AddText(ImVec2(x1 - amtW, gy + 8.0f * S),
-                        Theme::GoldCol(), amt);
+                    // ★Chrome at FULL alpha, as the player's label has it. The
+                    // 0.72 here was a second opinion about the same token.
+                    Theme::TextOutlined(wdl, ImVec2(x0, ty),
+                        sk.diamondLabels ? Theme::Col(sk.sel, 1.0f) : Theme::Chrome(1.0f),
+                        lbl, vpx);
+                    const float amtW = Theme::TrackedSize(amt, vpx, 0.0f).x;
+                    Theme::TextOutlined(wdl, ImVec2(x1 - amtW, ty),
+                        Theme::GoldCol(), amt, vpx);
                 } else if (g_mode == Mode::kPickpocket) {
-                    // F6b: no take-all here — every move is an individual roll
-                    wdl->AddText(ImVec2(x0, gy + 8.0f * S),
-                        Theme::Col(sk.inkDim, 1.0f), Lang::T(Lang::Str::PickpocketTitle));
+                    // ★Nothing. The strip exists to say what the R key does or
+                    // what the merchant can pay; a pickpocket has neither, and
+                    // repeating the window's own title down here said the same
+                    // word twice on one screen.
                 } else {
-                    wdl->AddText(ImVec2(x0, gy + 8.0f * S),
-                        Theme::Col(sk.inkDim, 1.0f), Lang::T(Lang::Str::HintTakeAll));
+                    Theme::TextOutlined(wdl, ImVec2(x0, ty), Theme::Col(sk.inkDim, 1.0f),
+                        Lang::T(Lang::Str::HintTakeAll), vpx);
                 }
             }
         }
@@ -2270,8 +2422,13 @@ namespace FUI::LootBarter
         // last cell column PadX past the right edge, where ImGui clips it.
         // Invisible on skins whose PadX is baked into a frame inset; on SIMPLE
         // (inset 0, PadX 8) the merchant's grid simply lost its right column.
+        // ★Same clearance the player's window takes, paid for the same way --
+        // the two sit side by side, so a pad on one title line and not the
+        // other is visible as a step between them.
+        const float topPad = Theme::TitleTopPad();
         const ImVec2 size(gridW + sbW + 2.0f * (insX + Theme::PadX() * S),
-                          barH + labelH + visRows * cell + 14.0f * S + 30.0f * S + 2.0f * insY);
+                          barH + topPad + labelH + visRows * cell + 14.0f * S +
+                              BottomStripH() + 2.0f * insY);
         ImVec2 defPos(120.0f, 200.0f);
         if (auto* m = wm->Find("main"); m && m->posKnown) {
             defPos = ImVec2(m->pos.x - size.x - 12.0f * S, m->pos.y);
@@ -2283,25 +2440,30 @@ namespace FUI::LootBarter
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
             ImVec2(insX + Theme::PadX() * S, insY + Theme::PadY() * S));
         ImGui::Begin("##gi_partner", nullptr, kManagedWinFlags);
-        wm->TitleBar("partner", title);
+        wm->TitleBar("partner", title, 0.0f, false, topPad);
 
         // F6a/F6b: red crime chrome — border + label line flip to crimson so
         // an owned container / a living mark is unmistakable.
         static constexpr ImU32 kStealRed = IM_COL32(168, 44, 32, 220);
+        // ★★★NO RED WINDOW BORDER. It stroked a square 2px line where the SKIN
+        // draws its own frame -- over a brush stroke on the ink skins, over a
+        // torn edge on Fable, half-buried under the bevel elsewhere -- so it
+        // read as a stray rectangle rather than as chrome. Moving it a
+        // frame-inset inward did not help: it was still a second frame drawn in
+        // a grammar no skin uses. The warning belongs to the LABEL, which is
+        // where a player looks to find out what this window is.
         if (g_mode == Mode::kSteal || g_mode == Mode::kPickpocket) {
-            auto* wdl = ImGui::GetWindowDrawList();
-            const ImVec2 wp = ImGui::GetWindowPos();
-            const ImVec2 we(wp.x + size.x, wp.y + size.y);
-            wdl->PushClipRect(wp, we, false);   // reach the edge pixels (chrome rule)
-            wdl->AddRect(wp, we, kStealRed, sk.rounding, 0, 2.0f);
-            wdl->PopClipRect();
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kStealRed),
-                "\xE2\x97\x87 %s", Lang::T(g_mode == Mode::kSteal
-                                               ? Lang::Str::StealTitle
-                                               : Lang::Str::PickpocketTitle));
+            // ★Same style as every other section label -- the skin decides
+            // between a crimson diamond and outlined chrome -- with only the
+            // COLOUR overridden. Drawing this one by hand is what left it
+            // wearing the diamond on skins that had moved on from it.
+            const ImVec4 warn = ImGui::ColorConvertU32ToFloat4(kStealRed);
+            UIRoot::SectionLabel(Lang::T(g_mode == Mode::kSteal
+                                             ? Lang::Str::StealTitle
+                                             : Lang::Str::PickpocketTitle),
+                                 &warn);
         } else {
-            ImGui::TextColored(sk.sel, "\xE2\x97\x87 %s",
-                g_mode == Mode::kLoot ? "CONTENTS" : "WARES");
+            UIRoot::SectionLabel(g_mode == Mode::kLoot ? "CONTENTS" : "WARES");
         }
         // merchant gold moved to the bottom GOLD bar (design pass C) — the
         // player and partner windows now mirror each other's layout
@@ -2326,13 +2488,30 @@ namespace FUI::LootBarter
         }
 
         DrawPartnerCells(cells, rows, gridW, sbW, base); // stage 3
+        // ★★★TRIED AND REVERTED: a board-edge AddRect here, copied from
+        // DrawGridChrome. It was never needed. Both lattices already close
+        // their own boundary -- the hairline pass runs `c <= cols` / `r <=
+        // rows` so the first and last lines ARE the edge, and the ink pass
+        // strokes all four sides after its inner rules. The missing edge that
+        // started this was the ink lattice not being called at all (fixed in
+        // DrawPartnerCells), not a missing frame.
+        // The rect only added faults of its own: anchored inside the child it
+        // scrolled with the goods, and pulled out here it boxed in the
+        // scrollbar -- a line under the bar on a merchant, which is what the
+        // board's own edge never draws.
         ImGui::EndChild();
 
-        DrawPartnerBottomBar(size);                      // stage 4
+        DrawPartnerBottomBar(size, gridW);               // stage 4
         TakeAllShortcut(cells);                          // stage 5
 
         // record hover for the drag-to-store drop test (whole window + child)
-        g_partnerHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+        // ★AllowWhenBlockedByActiveItem, matching the player grid's gate. The
+        // drop CLICK activates whatever ImGui item sits under the cursor, and
+        // without this flag the window that owns it reports "not hovered" on
+        // the one frame the drop is resolved. RootAndChildWindows because the
+        // goods live in a scrolling child.
+        g_partnerHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows |
+                                                  ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         ImGui::End();
         ImGui::PopStyleVar();
     }
@@ -2343,6 +2522,15 @@ namespace FUI::LootBarter
     {
         StoreDrop d;
         if (!g_partnerGridLive) return d;
+        // ★★★The MIRROR of the player grid's fault, and it was here too: the
+        // clip test below is pure geometry, so a bag window dragged on TOP of
+        // the merchant still let a drop in the overlap land in the merchant's
+        // board underneath. `g_partnerGridLive` says the board was drawn this
+        // frame, not that it is the thing under the cursor.
+        // ★This one cannot ask ImGui itself -- it is queried at drop time, long
+        // after the partner's Begin/End scope closed -- so it reads the answer
+        // the window recorded while it WAS current.
+        if (!g_partnerHovered) return d;
         int hw = 1, hh = 1;
         float offX = 0.0f, offY = 0.0f;
         if (!Grid::HeldFootprint(hw, hh, offX, offY)) return d;

@@ -7,6 +7,7 @@
 struct ImDrawList;
 struct ImFont;
 struct ImVec2;
+struct ImVec4;
 
 // Plan B core: owns the ImGui context (init from the game's D3D11 device),
 // runs the per-frame ImGui pass from GridInventoryMenu::PostDisplay, and
@@ -26,6 +27,19 @@ namespace FUI::UIRoot
         bool        sep = false;   // draw a divider before this bit
     };
     void DrawPromptRow(const std::vector<PromptBit>& a_bits, bool a_warn, float a_fade);
+
+    // ★★The section label over a board -- "ITEMS" on the player's side,
+    // "CONTENTS" / "WARES" on the partner's. ONE place because the two windows
+    // have to agree: the skin chooses between a crimson diamond and outlined
+    // chrome, and the partner window only ever drew the diamond. On the ink
+    // skins its label was then the one piece of the old style left on screen,
+    // which is exactly the kind of split a shared window frame is meant to
+    // prevent.
+    // ★a_col overrides only the COLOUR -- the style (crimson diamond vs
+    // outlined chrome) still comes from the skin. A warning label needs its own
+    // colour, but it does not get to wear a different typeface from the label
+    // beside it.
+    void SectionLabel(const char* a_text, const ImVec4* a_col = nullptr);
 
     // One line of help for the BOTTOM prompt bar, good for this frame only.
     // Call it while a control is hovered; the bar shows it in place of its

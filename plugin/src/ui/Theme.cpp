@@ -1859,6 +1859,26 @@ namespace FUI::Theme
         return sk.tornFrame ? 24.0f * g_scale : sk.translucent ? 6.0f * g_scale : 0.0f;
     }
 
+    float TitleTopPad()
+    {
+        // ★★EVERY SKIN, deliberately. This began as clearance for the two
+        // treatments whose top chrome reaches into the bar -- Sumi's brush frame
+        // and Fable's crimson strip -- and was then made the rule everywhere at
+        // the author's request, so a title sits the same way on all of them.
+        // ★What it does, stated plainly, because it is NOT a centring tweak:
+        // the band grows by this and the title moves down by all of it, so the
+        // gap ABOVE the title exceeds the gap below it by exactly this number.
+        // Without it the title is dead centre in its band (the half-inset rule
+        // in WinManager::TitleBar is exact centring); with it, every skin is
+        // offset the same way instead.
+        return 8.0f * g_scale;
+    }
+
+    float TopControlRightPad()
+    {
+        return FrameInsetX() + PadX() * g_scale + 2.0f * g_scale;
+    }
+
     float BorderPx() { return (std::max)(1.0f, std::round(g_scale)); }
 
     ImU32 WinBorder()
@@ -2549,6 +2569,15 @@ namespace FUI::Theme
         style.FrameRounding     = FrameRounding();
         style.GrabRounding      = FrameRounding();
         style.TabRounding       = FrameRounding();
+        // ★The scrollbar was the one metric left on ImGui's defaults: a 9px
+        // pill 14px wide, while every other number here is scaled and every
+        // other corner follows the skin. At 2x that is a hairline beside a 96px
+        // cell. Both come from the same knobs as the rest of the chrome now.
+        // ★The partner window sizes its gutter from ScrollbarSize (LootBarter
+        // `sbW`), so its width follows this on its own -- no second place to
+        // keep in step.
+        style.ScrollbarSize     = 14.0f * g_scale;
+        style.ScrollbarRounding = FrameRounding();
         // cornerFade / tornFrame replace the full window border — kill the
         // geometry, not just the colour (decisive regardless of style state)
         style.WindowBorderSize  = (sk.cornerFade || sk.tornFrame || sk.bevelChrome) ? 0.0f : 1.0f;
@@ -2646,8 +2675,27 @@ namespace FUI::Theme
         c[ImGuiCol_TabSelected]      = mix(0.16f);
         c[ImGuiCol_TitleBg]          = win;
         c[ImGuiCol_TitleBgActive]    = win;
-        c[ImGuiCol_ScrollbarBg]      = win;
+        // ★★★THE TRACK PAINTS NOTHING. `win` here was an opaque rect stamped
+        // over whatever the skin had already drawn -- and ImGui rounds it with
+        // the CHILD rounding, so it arrives with corners of its own. On the
+        // skins that paint their own sheet (paper / tornFrame / ink) WindowBg is
+        // deliberately transparent for exactly this reason, but the scrollbar
+        // ignored that and laid a flat cream slab down the gutter; where the
+        // sheet is shaded, its rounded BOTTOM corner read as a stray border
+        // under the bar (user report, merchant window). On a translucent skin it
+        // double-coated the glass instead, darkening that one column.
+        // Only the MERCHANT ever showed it, because only the merchant scrolls.
+        // Transparent is the one value that is right on every skin: where the
+        // window is opaque `win` the track was that same colour anyway, so
+        // nothing there changes.
+        c[ImGuiCol_ScrollbarBg]      = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
         c[ImGuiCol_ScrollbarGrab]    = mix(0.25f);
+        // ★These two were never set, so the grab flashed ImGui's DEFAULT opaque
+        // grey the moment the cursor touched it -- the one widget on screen
+        // wearing no skin at all. Same accent, same ladder as every other
+        // hover/active pair above.
+        c[ImGuiCol_ScrollbarGrabHovered] = mix(0.38f);
+        c[ImGuiCol_ScrollbarGrabActive]  = mix(0.50f);
 
         // bevelChrome (kept for future skins): dark translucent beveled
         // buttons/fields so white ink reads — acc-tinted fills read flat on
