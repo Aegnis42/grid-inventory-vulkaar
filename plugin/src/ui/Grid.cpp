@@ -7860,9 +7860,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             ImGui::CalcTextSize(line).x });
         const float lineH = ImGui::GetTextLineHeightWithSpacing();
         const float sp = ImGui::GetStyle().ItemSpacing.y;
+        const float topPad = Theme::TitleTopPad();   // paid for in the height below
         const ImVec2 size(
             contentW + 30.0f * S + 2.0f * insX,
-            barH + 8.0f * S + lineH + ImGui::GetFrameHeight() + 6.0f * S +
+            barH + topPad + 8.0f * S + lineH + ImGui::GetFrameHeight() + 6.0f * S +
                 2.0f * sp + ImGui::GetFrameHeight() + 18.0f * S + 2.0f * insY);
         wm->ApplyNext("pouch",
             ImVec2((disp.x - size.x) * 0.5f, (disp.y - size.y) * 0.5f), size);
@@ -7870,7 +7871,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         UIRoot::NoteOverlayRect();
         auto* pouch = GoldCoins::PouchForm();
         wm->TitleBar("pouch", pouch && pouch->GetName() ? pouch->GetName() : "?",
-            0.0f, true);
+            0.0f, true, topPad);
 
         if (!ImGui::IsWindowAppearing() &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsWindowHovered()) {

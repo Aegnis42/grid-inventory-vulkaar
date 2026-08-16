@@ -1,4 +1,5 @@
 ﻿#include "ui/Badges.h"
+#include "ui/Editor.h"
 #include "ui/Fallback.h"
 #include "ui/LootBarter.h"
 
@@ -1986,6 +1987,21 @@ namespace FUI::LootBarter
                     // Merchant gold isn't carriable.
                     if (UIRoot::MouseInOverlay()) {
                         // popup chrome overlaps this cell: no click-through
+                    } else if (Editor::IsEditMode()) {
+                        // ★★EDIT reaches the PARTNER board too. A def belongs to
+                        // the FORM, so an item's footprint, icon and rotation are
+                        // the same object whether the item is in the pack or on a
+                        // merchant's shelf -- and a shelf is the only place many
+                        // forms are ever seen. Having to buy something before it
+                        // could be sized was an accident of where the click
+                        // handler lived, not a rule anyone chose.
+                        // ★It PRE-EMPTS the take / buy / lift branches below, the
+                        // same contract the player grid keeps: in EDIT a click
+                        // selects and does nothing else. Gold included -- the
+                        // coin tiles are editable on our own board.
+                        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                            Editor::Select(it.obj, Grid::DefKeyOf(it.obj));
+                        }
                     } else if (!ImGui::GetIO().KeyShift &&
                         ImGui::IsItemClicked(ImGuiMouseButton_Left) && !it.obj->IsGold()) {
                         if (it.locked) {
@@ -2121,6 +2137,15 @@ namespace FUI::LootBarter
                     // the player's, and carries neither flag.
                     Grid::DrawMarkerTray(dl, p0, ImVec2(p0.x + bw, p0.y + bh),
                                          false, false, (it.glow & 0x4) != 0);
+                }
+                // ★The EDIT selection ring, so the partner board can say WHICH
+                // form is being edited -- without it the click has no visible
+                // answer and the panel's numbers look like they belong to
+                // nothing. A plain rect rather than the player board's mask
+                // outline because a partner cell IS a rectangle (no polyomino).
+                if (Editor::IsSelected(Grid::DefKeyOf(it.obj))) {
+                    dl->AddRect(p0, ImVec2(p0.x + bw, p0.y + bh),
+                                Theme::Col(Theme::S().sel, 1.0f), 0.0f, 0, 2.0f);
                 }
                 // GI8: extension overlay (socket wells). ★This is the side that
                 // matters most for the socket mod -- the point is to SEE what a

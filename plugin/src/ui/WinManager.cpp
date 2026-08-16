@@ -1339,6 +1339,11 @@ namespace FUI
     bool WinManager::BeginConfirmPopup(const std::string& a_key, const char* a_imguiId,
                                        const char* a_title, ImVec2 a_size)
     {
+        // ★The pad is added HERE rather than at each call site: every popup goes
+        // through this one door, and a caller that sized its own body has no
+        // business also knowing about the title's margin.
+        const float topPad = Theme::TitleTopPad();
+        a_size.y += topPad;
         const ImVec2 disp = ImGui::GetIO().DisplaySize;
         // ★★Open AT THE CURSOR, not in the middle of the screen. A confirm
         // popup is answered and dismissed immediately, so the trip from the
@@ -1380,7 +1385,7 @@ namespace FUI
         ApplyNext(a_key, def, a_size);
         ImGui::Begin(a_imguiId, nullptr, kManagedWinFlags);
         UIRoot::NoteOverlayRect();
-        TitleBar(a_key, a_title, 0.0f, true);
+        TitleBar(a_key, a_title, 0.0f, true, topPad);
         // outside click cancels (settings pattern) — never on the opening
         // frame: a popup first drawn on the SAME frame as the opening click
         // would read that click as "outside" and instantly close

@@ -412,8 +412,11 @@ namespace FUI::Editor
         // tall enough that the body never needs a scrollbar (v9.2 feedback;
         // v10.6 merged the painter+bag row, so the panel shrank).
         // +2x frame inset for tornFrame skins (breathing room)
+        // ★+ the title's top pad, paid for in the height as every window that
+        // takes it must (Theme::TitleTopPad).
+        const float topPad = Theme::TitleTopPad();
         const ImVec2 size(342.0f * s + 2.0f * Theme::FrameInsetX(),
-                          666.0f * s + 2.0f * Theme::FrameInsetY());   // +Stack row (G3)
+                          666.0f * s + topPad + 2.0f * Theme::FrameInsetY());   // +Stack row (G3)
         ImVec2 defPos(60.0f, 120.0f);
         if (auto* mw = wm->Find("main")) {
             defPos = ImVec2(mw->pos.x - size.x - 8.0f, mw->pos.y);
@@ -429,7 +432,8 @@ namespace FUI::Editor
                    Theme::PadY() + Theme::FrameInsetY()));
         ImGui::Begin("##fablerim_editor", nullptr, kManagedWinFlags);
         UIRoot::NoteOverlayRect();
-        wm->TitleBar("editor", Lang::SentenceCase(Lang::T(Lang::Str::Edit)).c_str());
+        wm->TitleBar("editor", Lang::SentenceCase(Lang::T(Lang::Str::Edit)).c_str(),
+                     0.0f, false, topPad);
 
         // scrollable body child — the titlebar pins the content start to a
         // SCREEN position each frame, so window-level scrolling moves the

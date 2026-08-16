@@ -1790,7 +1790,12 @@ namespace FUI::UIRoot
                 ImVec2(Theme::PadX() + insX, Theme::PadY() + insY));
             ImGui::Begin("##fablerim_settings", nullptr, kManagedWinFlags);
             NoteOverlayRect();
-            wm->TitleBar("settings", Lang::SentenceCase(Lang::T(Lang::Str::Settings)).c_str());
+            // ★No height term needed here: s_wantH is measured from `childTop`,
+            // which is the cursor TitleBar leaves behind, so the pad is already
+            // inside it. Only the first frame's fallback height misses it, and
+            // that snaps a frame later.
+            wm->TitleBar("settings", Lang::SentenceCase(Lang::T(Lang::Str::Settings)).c_str(),
+                         0.0f, false, Theme::TitleTopPad());
 
             // EDIT-style lifetime (user request): stays open until the gear
             // toggle or ESC. The old click-outside-closes popup rule ALSO ate

@@ -684,11 +684,17 @@ namespace FUI::Theme
     // that one feature in the middle of the line -- the first assembly failed
     // exactly that way.
     // a_whole: use the sprite END TO END instead of a section of it. A section
-    // is cut square at both ends, which is right for a frame side (the corner
-    // covers the cut) and wrong for a mark that stands alone -- a title stroke
-    // has to taper the way a brush leaving the paper does.
+    // is cut square at both ends, which is right for a mark whose ends are
+    // covered and wrong for one that stands alone.
+    // ★a_fade: taper both ends to nothing over this FRACTION of the length,
+    // via per-vertex alpha. "The corner covers the cut" was never true -- the
+    // corner is itself thinning where it meets the side, so a square end either
+    // doubles the ink with it or is left exposed. Two marks that both fade lie
+    // on top of one another and read as one stroke, which is what the corner
+    // sprite was painted expecting. 0 keeps the hard-ended behaviour.
     void InkStroke(ImDrawList* a_dl, ImVec2 a_from, float a_len, float a_th,
-                   ImU32 a_col, bool a_vert = false, bool a_whole = false);
+                   ImU32 a_col, bool a_vert = false, bool a_whole = false,
+                   float a_fade = 0.0f);
 
     // ★A DIVIDER, drawn the way the skin draws dividers. Every caller used to
     // AddLine with Theme::Rule(), which is a colour and cannot answer "is this

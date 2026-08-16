@@ -1292,7 +1292,20 @@ namespace FUI::Theme
         constexpr float kArmTH = 0.089f;   // ...and its thickness
         constexpr float kArmX  = 0.062f;   // vertical arm centreline / width
         constexpr float kArmTV = 0.099f;
-        constexpr float kArmRun = 0.50f;   // a side starts halfway along the arm
+        // ★★★0.30 -- MORE overlap, not less, because the sides now fade into it.
+        // The corner's arms thin from ~0.55 of the sprite and are gone by ~0.8;
+        // a side that starts inside that and fades UP as the corner fades DOWN
+        // crosses over without either of them showing an edge. Starting later
+        // (or butting exactly, which a re-baked corner allowed) only trades the
+        // doubled band for an exposed end -- both were rendered and both are
+        // worse. See kInkArmFade and Theme::MarkTailed.
+        constexpr float kArmRun = 0.30f;
+        // How much of a frame side is taper, as a fraction of its length. Sized
+        // from the CORNER, not from the side: it has to cover the crossover, and
+        // that is ~0.85 cs long however wide the window is. Clamped so a long
+        // main-window edge does not become a ghost and a stubby slot edge does
+        // not become all taper.
+        constexpr float kInkArmFade = 0.85f;
 
         [[nodiscard]] const InkSheet* InkSheetFor(const std::string& a_name)
         {
@@ -1368,6 +1381,68 @@ namespace FUI::Theme
                 ImVec2(a_u1, 1.0f), ImVec2(a_u0, 1.0f), a_col);
         }
 
+        // ★★★THE SAME MARK, BUT ITS ENDS FADE OUT. A slice of a brush is cut
+        // square at full strength, so wherever a side meets the corner one of
+        // them steps: overlap and the two inks composite into a band darker and
+        // wider than the line (0.67 over 0.67 = 0.89); butt them and the cut is
+        // simply exposed. Both were measured and both look wrong.
+        // A brush on paper does neither -- it thins away, and two marks that
+        // both thin can lie on top of one another and read as one stroke. The
+        // corner sprite was painted that way from the start; only the sides
+        // were not, which is why re-baking the CORNER made it worse (two steps
+        // instead of one) while this is the half that was missing.
+        // ★Per-VERTEX alpha, not three quads at three alphas: a stepped ramp
+        // just moves the steps inward. Four vertex columns -- 0, fade, 1-fade,
+        // 1 -- with alpha 0/1/1/0 give the interpolator a true linear ramp for
+        // the cost of two extra quads.
+        void MarkTailed(ImDrawList* a_dl, const IconCache::Icon* a_ic,
+                        ImVec2 a_min, ImVec2 a_max, ImU32 a_col, bool a_vert,
+                        float a_u0, float a_u1, float a_fade)
+        {
+            if (!a_dl || !a_ic) return;
+            const float f = std::clamp(a_fade, 0.01f, 0.49f);
+            const float knot[4] = { 0.0f, f, 1.0f - f, 1.0f };
+            const float mul[4]  = { 0.0f, 1.0f, 1.0f, 0.0f };
+            ImVec2 pos[4][2], uvs[4][2];
+            for (int i = 0; i < 4; ++i) {
+                const float t = knot[i];
+                const float u = a_u0 + (a_u1 - a_u0) * t;
+                if (!a_vert) {
+                    const float x = a_min.x + (a_max.x - a_min.x) * t;
+                    pos[i][0] = ImVec2(x, a_min.y); uvs[i][0] = ImVec2(u, 0.0f);
+                    pos[i][1] = ImVec2(x, a_max.y); uvs[i][1] = ImVec2(u, 1.0f);
+                } else {
+                    // ★The vertical case turns the uvs exactly as Mark does --
+                    // one sprite serves both directions, and t runs from the
+                    // BOTTOM up, which is the order Mark's quad established.
+                    const float y = a_max.y + (a_min.y - a_max.y) * t;
+                    pos[i][0] = ImVec2(a_min.x, y); uvs[i][0] = ImVec2(u, 0.0f);
+                    pos[i][1] = ImVec2(a_max.x, y); uvs[i][1] = ImVec2(u, 1.0f);
+                }
+            }
+            const auto  tex = reinterpret_cast<ImTextureID>(a_ic->srv);
+            const ImU32 rgb = a_col & ~IM_COL32_A_MASK;
+            const auto  al  = static_cast<float>((a_col >> IM_COL32_A_SHIFT) & 0xFF);
+            a_dl->PushTexture(tex);
+            a_dl->PrimReserve(18, 8);
+            const unsigned int base = a_dl->_VtxCurrentIdx;
+            for (int i = 0; i < 4; ++i) {
+                const ImU32 c = rgb | (static_cast<ImU32>(al * mul[i]) << IM_COL32_A_SHIFT);
+                a_dl->PrimWriteVtx(pos[i][0], uvs[i][0], c);
+                a_dl->PrimWriteVtx(pos[i][1], uvs[i][1], c);
+            }
+            for (unsigned int s = 0; s < 3; ++s) {
+                const auto a = static_cast<ImDrawIdx>(base + s * 2);
+                a_dl->PrimWriteIdx(a);
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(a + 2));
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(a + 3));
+                a_dl->PrimWriteIdx(a);
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(a + 3));
+                a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(a + 1));
+            }
+            a_dl->PopTexture();
+        }
+
         // ★★How much of the sprite a mark of this size should USE. Stretching
         // the whole 25:1 stroke into an 82px slot edge compresses it 16 times,
         // and every dry gap and swell in it averages out -- what lands is a
@@ -1415,8 +1490,43 @@ namespace FUI::Theme
     // gain -- the line it produces is snapped later, where snapping belongs.
     float InkHeavyPx() { return (std::max)(1.0f, 2.5f * Scale()); }
 
+    namespace
+    {
+        // ★★★WHERE A STROKE SITS IN ITS WINDOW, not where the window sits on the
+        // screen. The key below chooses which slice of the brush sprite a mark
+        // uses, and it was hashed from SCREEN coordinates -- so dragging a window
+        // re-dealt every rule, every lattice line and every frame stroke, a new
+        // slice per frame, and the ink visibly crawled inside its own lines
+        // (user report: Sumi, main window drag).
+        // A window already solved exactly this for its paper sheet and its torn
+        // silhouette by seeding from the window KEY -- "a window keeps ONE piece
+        // of paper for the whole session, and moving it must not deal a new one"
+        // (WinManager::TitleBar). The strokes never got the same treatment.
+        // ★CONTENT-local, not merely window-local: the scroll is added back, or
+        // the same crawl returns the moment a partner's list is scrolled rather
+        // than dragged.
+        // ★★★...AND WHICH WINDOW IT IS. Local coordinates alone are not enough:
+        // every window's frame starts at the same offset inside itself, so a
+        // purely local key handed EVERY window the identical slice -- and with
+        // it the identical cut end, in the identical place, on every bag on
+        // screen at once (user report). Screen coordinates used to scatter that
+        // by accident, which is the only reason the cuts were not visible
+        // before; the scattering is what has to be kept, minus the crawl.
+        // The window ID is stable for the life of the window, so the slice is
+        // dealt once and never again.
+        unsigned int InkSpanKey(ImVec2 a_at)
+        {
+            const auto* w = ImGui::GetCurrentWindowRead();
+            const ImVec2 o = w ? ImVec2(w->Pos.x - w->Scroll.x, w->Pos.y - w->Scroll.y)
+                               : ImVec2(0.0f, 0.0f);
+            const auto local = static_cast<unsigned int>(
+                std::lround((a_at.x - o.x) * 7.0f + (a_at.y - o.y) * 13.0f));
+            return local ^ (w ? static_cast<unsigned int>(w->ID) * 2246822519u : 0u);
+        }
+    }
+
     void InkStroke(ImDrawList* a_dl, ImVec2 a_from, float a_len, float a_th,
-                   ImU32 a_col, bool a_vert, bool a_whole)
+                   ImU32 a_col, bool a_vert, bool a_whole, float a_fade)
     {
         if (a_len <= 0.5f || a_th <= 0.05f) return;
         const auto* ic = InkArt(kStroke);
@@ -1432,16 +1542,15 @@ namespace FUI::Theme
         const float len = a_len + over * 2.0f;
         const ImVec2 from(a_vert ? a_from.x : a_from.x - over,
                           a_vert ? a_from.y - over : a_from.y);
-        const unsigned int key = static_cast<unsigned int>(
-            std::lround(from.x * 7.0f + from.y * 13.0f));
+        const unsigned int key = InkSpanKey(from);
         float u0 = 0.0f, u1 = 1.0f;
         if (!a_whole) MarkSpan(ic, len, a_th, key, u0, u1);
         const float h = a_th * 0.5f;
-        Mark(a_dl, ic,
-             a_vert ? ImVec2(from.x - h, from.y) : ImVec2(from.x, from.y - h),
-             a_vert ? ImVec2(from.x + h, from.y + len)
-                    : ImVec2(from.x + len, from.y + h),
-             a_col, a_vert, u0, u1);
+        const ImVec2 mn = a_vert ? ImVec2(from.x - h, from.y) : ImVec2(from.x, from.y - h);
+        const ImVec2 mx = a_vert ? ImVec2(from.x + h, from.y + len)
+                                 : ImVec2(from.x + len, from.y + h);
+        if (a_fade > 0.0f) MarkTailed(a_dl, ic, mn, mx, a_col, a_vert, u0, u1, a_fade);
+        else               Mark(a_dl, ic, mn, mx, a_col, a_vert, u0, u1);
     }
 
     void RuleLine(ImDrawList* a_dl, ImVec2 a_from, ImVec2 a_to)
@@ -1462,8 +1571,7 @@ namespace FUI::Theme
     {
         if (a_len <= 0.5f || a_th <= 0.05f) return;
         const auto* ic = InkArt(kRule);
-        const unsigned int key = static_cast<unsigned int>(
-            std::lround(a_from.x * 7.0f + a_from.y * 13.0f));
+        const unsigned int key = InkSpanKey(a_from);
         float u0 = 0.0f, u1 = 1.0f;
         MarkSpan(ic, a_len, a_th, key, u0, u1);
         const float h = a_th * 0.5f;
@@ -1494,10 +1602,46 @@ namespace FUI::Theme
         const float hy = kArmY * cs, hth = kArmTH * cs;   // top/bottom runs
         const float vx = kArmX * cs, vth = kArmTV * cs;   // left/right runs
         const float run = cs * kArmRun;
-        InkStroke(a_dl, ImVec2(a_min.x + run, a_min.y + hy), w - run * 2.0f, hth, a_col);
-        InkStroke(a_dl, ImVec2(a_min.x + run, a_max.y - hy), w - run * 2.0f, hth, a_col);
-        InkStroke(a_dl, ImVec2(a_min.x + vx, a_min.y + run), h - run * 2.0f, vth, a_col, true);
-        InkStroke(a_dl, ImVec2(a_max.x - vx, a_min.y + run), h - run * 2.0f, vth, a_col, true);
+        // ★★★TRIED AND REVERTED: whole=true on these four arms, to stop them
+        // ending in a cut. It does not, and it costs. Measured offline against
+        // the real sprites: stroke_0.png is 1308x51 and its alpha goes 0 -> 245
+        // in ONE column, so the "taper" a whole mark ends in is a single pixel
+        // -- a whole mark has hard ends too. What it does change is the middle:
+        // squeezing a 25:1 brush into a short arm flattens every dry gap in it
+        // (the note on MarkSpan says the same), and it put a dark blob halfway
+        // down every bag's side. The step at the corner did not move, because
+        // the step is not a cut -- see below.
+        const float lenH = w - run * 2.0f, lenV = h - run * 2.0f;
+        const auto fadeOf = [&](float a_len) {
+            return a_len > 1.0f ? std::clamp(kInkArmFade * cs / a_len, 0.05f, 0.45f) : 0.0f;
+        };
+        const float fH = fadeOf(lenH), fV = fadeOf(lenV);
+        InkStroke(a_dl, ImVec2(a_min.x + run, a_min.y + hy), lenH, hth, a_col, false, false, fH);
+        InkStroke(a_dl, ImVec2(a_min.x + run, a_max.y - hy), lenH, hth, a_col, false, false, fH);
+        InkStroke(a_dl, ImVec2(a_min.x + vx, a_min.y + run), lenV, vth, a_col, true, false, fV);
+        InkStroke(a_dl, ImVec2(a_max.x - vx, a_min.y + run), lenV, vth, a_col, true, false, fV);
+        // ★★★THE SIDE IS THE HALF THAT WAS WRONG, NOT THE CORNER.
+        // Measured from corner_0.png (273x348): its arms hold full thickness to
+        // ~0.55 of the sprite and have faded to nothing by ~0.8 --
+        //     x .55W th .086   x .70W th .063   x .85W th .006
+        // That taper is CORRECT; it is how a brush leaves the paper. The sides
+        // were the ones ending square, at full strength, so the crossover could
+        // only ever double (0.67 over 0.67 = 0.89, a band darker and wider than
+        // the line, ending in a step) or gap.
+        // Everything geometric was rendered offline against the real sprites,
+        // and every one of them failed:
+        //   run .62 / .72 / .80  the band shrinks, then the side's blunt start
+        //                        is exposed instead, which is worse
+        //   corner cropped to    butts two full ends, but stroke_0 is DARKEST
+        //     .55 and run .55    in its first column -- a dark blob, not a step
+        //   arms drawn last      identical; the corner's arm is the wider one
+        //   whole=true strokes   stroke_0 goes 0 -> 245 in ONE column, so a
+        //                        whole mark has hard ends too. It only
+        //                        flattened the brush on short sides.
+        //   re-baked corner with its arms run out at full thickness: made it
+        //                        WORSE -- the pasted band's own start became a
+        //                        second edge, so there were two steps.
+        // The sides fade instead, and overlap the corner while doing it.
         // ...corners last, over the joins and over the cuts.
         const auto tex = reinterpret_cast<ImTextureID>(cn->srv);
         const ImVec2 uv[4] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
