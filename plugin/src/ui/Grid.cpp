@@ -2921,12 +2921,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // ImGui rect. Where an item can be picked up is where it can be
             // dropped -- one pass answering that differently from the other is
             // what let a drop land somewhere a click could not reach.
-            // ★AllowWhenBlockedByActiveItem: the drop CLICK activates the tile
-            // button under the cursor, and a plain IsWindowHovered would then
-            // report no window at the exact moment the drop is resolved.
-            const bool cursorIsOurs =
-                ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
-                !UIRoot::MouseInOverlay();
+            // ★Both halves, and the flag -- see UIRoot::CursorOwnsWindow.
+            const bool cursorIsOurs = UIRoot::CursorOwnsWindow();
             // carried item: this grid is the drop candidate while hovered (C2)
             if (g_held && cursorIsOurs &&
                 io.MousePos.x >= base.x && io.MousePos.x < base.x + gridW &&
@@ -3333,6 +3329,66 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // Removal is best-effort by design: while a lifted unit is still WORN it is
         // already absent (skipWorn), and asking to remove it again must be a no-op,
         // not an over-subtraction.
+        // ★★★THE ONE POOL WALK. Two of these existed -- the board's and the
+        // capacity sim's -- with the same skeleton, different container types
+        // and two different spellings of "is this the plain pool"
+        // (`xuid == 0 && sg == 0` against `PoolPrefix == base`, which agreed only
+        // by luck. They HAVE to produce the same keys: the sim decides whether a
+        // pickup fits and the board decides where it goes, so a disagreement is
+        // a bounce against a tile that is on screen.
+        //
+        // Returns SIGNED pools only, already netted against the removals queued
+        // out of them; `a_signedOut` is what to take off the form-wide total
+        // before the plain pool claims the remainder. `a_countTrashed` is for the
+        // sim, where parked units have been subtracted form-wide and parking
+        // leaves no trace on an extraList -- the layout is the only witness.
+        [[nodiscard]] std::map<std::string, int> SignedPools(
+            RE::InventoryEntryData* a_entry, const std::string& a_base,
+            int& a_signedOut, bool a_countTrashed)
+        {
+            std::map<std::string, int> pools;
+            a_signedOut = 0;
+            if (a_entry && a_entry->extraLists) {
+                for (auto* xl : *a_entry->extraLists) {
+                    if (!xl) continue;
+                    // worn units are off the board entirely, and the caller's
+                    // total has already taken them out
+                    if (xl->HasType<RE::ExtraWorn>() ||
+                        xl->HasType<RE::ExtraWornLeft>()) {
+                        continue;
+                    }
+                    std::uint16_t xuid = 0;
+                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
+                        xuid = xu->uniqueID;
+                    }
+                    const std::string p = PoolPrefix(a_base, xuid, InstanceSig(xl));
+                    if (p == a_base) continue;   // plain: the caller's remainder
+                    const int n = (std::max)(1, xl->GetCount());
+                    pools[p] += n;
+                    a_signedOut += n;
+                }
+            }
+            for (auto& [p, n] : pools) {
+                if (const auto pi = g_pendingRemovePool.find(p);
+                    pi != g_pendingRemovePool.end()) {
+                    const int gone = (std::min)(n, pi->second);
+                    n -= gone;
+                    a_signedOut -= gone;   // ...so the plain remainder gets it back
+                }
+                if (!a_countTrashed) continue;
+                int parked = 0;
+                for (const auto& [k, le] : g_layout) {
+                    if (le.bag == kTrashKey && PoolOfKey(k) == p) {
+                        parked += (std::max)(1, le.count);
+                    }
+                }
+                const int binned = (std::min)(n, parked);
+                n -= binned;
+                a_signedOut -= binned;
+            }
+            return pools;
+        }
+
         void EnumerateUnitRefs(int a_count, int a_units, RE::InventoryEntryData* a_entry,
                                std::vector<UnitRef>& a_out, bool a_skipWorn = true,
                                const std::string& a_base = {})
@@ -3895,62 +3951,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // every capacity gate reads this walk: space used, overload,
                     // the pickup bounce, the buy clamp. The two walks have to
                     // produce the same keys or they disagree about the board.
-                    std::map<std::pair<std::uint16_t, std::uint16_t>, int> pools;
                     int signedUnits = 0;
-                    if (entry && entry->extraLists) {
-                        for (auto* xl : *entry->extraLists) {
-                            if (!xl) continue;
-                            if (xl->HasType<RE::ExtraWorn>() ||
-                                xl->HasType<RE::ExtraWornLeft>()) {
-                                continue;
-                            }
-                            std::uint16_t xuid = 0;
-                            if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
-                                xuid = xu->uniqueID;
-                            }
-                            const std::uint16_t sg = InstanceSig(xl);
-                            if (xuid == 0 && sg == 0) continue;   // plain
-                            const int n = (std::max)(1, xl->GetCount());
-                            pools[{ xuid, sg }] += n;
-                            signedUnits += n;
-                        }
-                    }
-                    // ★★The two form-wide subtractions above have to be given
-                    // back to the pools they actually came from, or they all land
-                    // on the plain remainder's clamp and the sim models a board
-                    // the player is not looking at.
-                    //   removals  queued sells/stores -- per-pool since GI22
-                    //   trashed   parking is a UI idea with no trace on an xl, so
-                    //             the layout is the only place that knows whose
-                    //             units are in the bin
-                    // Getting this wrong is not cosmetic here: every capacity
-                    // gate reads this walk, so a pickup bounces or a buy clamps
-                    // against a board that does not exist.
-                    for (auto& [pk, n] : pools) {
-                        const std::string pfx = PoolPrefix(baseKey, pk.first, pk.second);
-                        if (const auto pi = g_pendingRemovePool.find(pfx);
-                            pi != g_pendingRemovePool.end()) {
-                            const int gone = (std::min)(n, pi->second);
-                            n -= gone;
-                            signedUnits -= gone;
-                        }
-                        int parked = 0;
-                        for (const auto& [k, le] : g_layout) {
-                            if (le.bag == kTrashKey && PoolOfKey(k) == pfx) {
-                                parked += (std::max)(1, le.count);
-                            }
-                        }
-                        const int binned = (std::min)(n, parked);
-                        n -= binned;
-                        signedUnits -= binned;   // TrashedUnits took it form-wide
-                    }
-                    pools[{ 0, 0 }] += (std::max)(0, units - signedUnits);
-                    for (const auto& [pk, n] : pools) {
+                    auto pools = SignedPools(entry, baseKey, signedUnits,
+                                             /*countTrashed=*/true);
+                    pools[baseKey] += (std::max)(0, units - signedUnits);
+                    // ★Keys built from the POOL PREFIX, which is what the
+                    // board's NextTileKey produces too -- same strings, or the
+                    // two walks are modelling different boards.
+                    for (const auto& [pfx, n] : pools) {
                         if (n <= 0) continue;
                         const int tiles = (n + cap - 1) / cap;
                         for (int k = 0; k < tiles; ++k) {
                             unitKeys.push_back(
-                                { TileKey(baseKey, pk.first, pk.second, k), -1 });
+                                { k == 0 ? pfx : pfx + "#" + std::to_string(k), -1 });
                         }
                     }
                 }
@@ -4660,47 +4673,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // health, enchantment, charge, poison, soul). Everything with no
                 // list, which is nearly every stack in the game, stays in the
                 // plain pool and is keyed exactly as before.
-                std::map<std::string, int> poolUnits;   // pool prefix -> units
                 int signedUnits = 0;
-                if (entry && entry->extraLists) {
-                    for (auto* xl : *entry->extraLists) {
-                        if (!xl) continue;
-                        // worn units are off the board entirely; `units` above
-                        // has already taken them out of the total
-                        if (xl->HasType<RE::ExtraWorn>() ||
-                            xl->HasType<RE::ExtraWornLeft>()) {
-                            continue;
-                        }
-                        std::uint16_t xuid = 0;
-                        if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
-                            xuid = xu->uniqueID;
-                        }
-                        const std::string p = PoolPrefix(baseKey, xuid, InstanceSig(xl));
-                        if (p == baseKey) continue;   // plain: the remainder below
-                        const int n = (std::max)(1, xl->GetCount());
-                        poolUnits[p] += n;
-                        signedUnits += n;
-                    }
-                }
-                // ★★★A QUEUED REMOVAL BELONGS TO THE POOL IT LEFT. The walk above
-                // reads LIVE extraLists, so units that have been sold but whose
-                // engine removal has not landed are still counted in their pool;
-                // `units` meanwhile already has them out, form-wide. Without this
-                // the whole difference lands on the plain pool's clamp below --
-                // sell five stolen gems while holding five clean ones and the
-                // CLEAN stack is drained and erased, while the sold tile is
-                // re-minted as a fresh (and shortly orphaned) one.
-                // ★The per-pool figure is not new work: NotePendingRemove has
-                // recorded it in g_pendingRemovePool since GI22. Only the gear
-                // branch was reading it.
-                for (auto& [p, n] : poolUnits) {
-                    if (const auto pi = g_pendingRemovePool.find(p);
-                        pi != g_pendingRemovePool.end()) {
-                        const int gone = (std::min)(n, pi->second);
-                        n -= gone;
-                        signedUnits -= gone;   // ...so the plain remainder gets it back
-                    }
-                }
+                auto poolUnits = SignedPools(entry, baseKey, signedUnits,
+                                             /*countTrashed=*/false);
                 // ★★Every pool the LAYOUT knows about, seeded at zero. A signed
                 // pool is otherwise only created from a live extraList, so when
                 // the last unit of one leaves (a quest script reclaiming its
@@ -4813,6 +4788,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // cuts at the first '#' after it -- so nothing downstream
                         // needed teaching.
                         ns.key = NextTileKey(poolKey);
+                        // ★★A signed tile minted while the layout still holds
+                        // plain keys for this form is the ONE-TIME migration off
+                        // `base#n` -- the units were always in that pool, the
+                        // keys just could not say so before 1.2.0. It is
+                        // otherwise indistinguishable from a signature DRIFTING
+                        // (a charge spent, a poison applied), which reshuffles a
+                        // tile for real and is worth knowing about. Logged once
+                        // per form so the two can be told apart in a report.
+                        if (g_poolTrace && poolKey != baseKey) {
+                            static std::set<std::string> s_said;
+                            if (s_said.insert(poolKey).second) {
+                                SKSE::log::info(
+                                    "[POOL] first signed tile for '{}' -> '{}' "
+                                    "(migration off base#n, or a signature drifted)",
+                                    baseKey, ns.key);
+                            }
+                        }
                         ns.le.col = -1; ns.le.row = -1; ns.le.count = cnt;
                         // B2: partner-drop hint — the first NEW tile of this form
                         // lands at the drop cell (one-shot, then back to first-fit)
@@ -7037,15 +7029,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // (MGEF > DNAM) with its <mag> / <dur> / <area> tags filled in. Replace
         // every occurrence; the tags are lowercase in the game data, but match
         // case-insensitively so hand-edited mod records still resolve.
+        // ★One case-insensitive char compare for this file. Both tag fillers
+        // carried their own identical copy of it -- the tags are lowercase in
+        // the game data, and matching loosely is what lets a hand-edited mod
+        // record resolve anyway.
+        [[nodiscard]] bool IEq(char a_l, char a_r)
+        {
+            return std::tolower(static_cast<unsigned char>(a_l)) ==
+                   std::tolower(static_cast<unsigned char>(a_r));
+        }
+
         void FillTag(std::string& a_s, std::string_view a_tag, std::string_view a_val)
         {
-            const auto same = [](char a_l, char a_r) {
-                return std::tolower(static_cast<unsigned char>(a_l)) ==
-                       std::tolower(static_cast<unsigned char>(a_r));
-            };
             std::size_t i = 0;
             while (a_tag.size() <= a_s.size() && i <= a_s.size() - a_tag.size()) {
-                if (std::equal(a_tag.begin(), a_tag.end(), a_s.begin() + i, same)) {
+                if (std::equal(a_tag.begin(), a_tag.end(), a_s.begin() + i, IEq)) {
                     a_s.replace(i, a_tag.size(), a_val);
                     i += a_val.size();
                 } else {
@@ -7072,16 +7070,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // paying for a rebuilt string. The '[' scan is the same work the
             // loop below would do anyway.
             if (a_s.find('[') == std::string::npos) return;
-            const auto same = [](char a_l, char a_r) {
-                return std::tolower(static_cast<unsigned char>(a_l)) ==
-                       std::tolower(static_cast<unsigned char>(a_r));
-            };
             std::string out;
             out.reserve(a_s.size());
             std::size_t i = 0;
             while (i < a_s.size()) {
                 const bool hit = a_s.size() - i >= kOpen.size() &&
-                                 std::equal(kOpen.begin(), kOpen.end(), a_s.begin() + i, same);
+                                 std::equal(kOpen.begin(), kOpen.end(), a_s.begin() + i, IEq);
                 if (!hit) {
                     out.push_back(a_s[i++]);
                     continue;
@@ -7462,16 +7456,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const std::uint32_t area = a_e->GetArea();
 
             std::string line;
-            // ★★Whether the effect HAD a description, which is a different
-            // question from what is LEFT of one. A Survival-only description
-            // resolves to nothing once its block is dropped, and vanilla then
-            // prints no line at all -- falling through to the name form below
-            // would invent one ("Restore Hunger 2") that the game never shows.
-            // That fallback is for effects with no description to begin with.
-            bool hadDesc = false;
-            if (const char* d = base->magicItemDescription.c_str(); d && *d) {
-                hadDesc = true;
-                line = d;
+            // ★★HAD a description is a different question from what is LEFT of
+            // one, and the two branches keep them apart. A Survival-only
+            // description resolves to nothing once its block is dropped, and
+            // vanilla then prints no line at all -- so this branch returns
+            // rather than falling through and inventing "Restore Hunger 2".
+            // The name form below is for effects that never had a description.
+            // ★if/else, not a flag: a `hadDesc` bool mirrored which branch had
+            // been taken, and a mirror is a second thing to keep true.
+            const char* const desc = base->magicItemDescription.c_str();
+            if (desc && *desc) {
+                line = desc;
                 char v[32];
                 std::snprintf(v, sizeof(v), "%.0f", mag);
                 FillTag(line, "<mag>", v);
@@ -7484,9 +7479,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 StripSurvivalBlocks(line, survivalOn);
                 UnwrapNumericTags(line);
                 TrimInPlace(line);
-            }
-            if (line.empty()) {
-                if (hadDesc) return;
+                if (line.empty()) return;   // resolved to nothing: vanilla shows none
+            } else {
                 // No description (common on crafted and mod-added effects):
                 // fall back to the old "Name 50 (10s)" form.
                 const char* n = base->GetName();
@@ -8154,9 +8148,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // for it in the window's height (Theme::TitleTopPad).
                 const float lineH = ImGui::GetTextLineHeight();
                 const float btnH = lineH + 6.0f * S;
-                const float textTop = ImGui::GetWindowPos().y +
-                                      Theme::FrameInsetY() * 0.5f + topPad +
-                                      (WinManager::TitleBarH() - lineH) * 0.5f;
+                const float textTop = WinManager::TitleTextY(v.bagKey, lineH);
                 // ★Same right margin as the main window's x and the FIND box
                 // (Theme::TopControlRightPad). This was the odd one out at 6px
                 // -- with bags docked along the main window's edge, three

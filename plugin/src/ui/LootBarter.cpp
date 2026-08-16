@@ -953,6 +953,28 @@ namespace FUI::LootBarter
         }
     }
 
+    // ★★★WHAT TO PUT IN A POPUP'S TITLE, coins included. The coin forms carry NO
+    // name on purpose (the esp blanks them so TrueHUD skips them, and the grid
+    // shows the amount badge instead), so the "?" fallback -- meant for a form
+    // with a genuinely missing name -- is what the player saw when splitting
+    // gold. Name it what the rest of the UI calls it; Lang::Str::Gold follows
+    // the language setting.
+    // ★SentenceCase because that string is the stats panel's LABEL and is
+    // spelled "GOLD" for that row. Every other title here is an item name in
+    // ordinary case, so the shout stood out as the one word in caps. Non-ASCII
+    // scripts pass through untouched.
+    // ★One function because it was two copies, and the second one's comment
+    // ("Same nameless-coin case as the slider above") was the tell.
+    [[nodiscard]] std::string PopupTitleOf(RE::TESBoundObject* a_obj)
+    {
+        if (a_obj && GoldCoins::IsCoinForm(a_obj->GetFormID()) &&
+            !GoldCoins::IsPouch(a_obj->GetFormID())) {
+            return Lang::SentenceCase(Lang::T(Lang::Str::Gold));
+        }
+        const char* n = a_obj ? a_obj->GetName() : nullptr;
+        return (n && *n) ? n : "?";
+    }
+
     void DrawSlider()
     {
         if (!g_slider.active) return;
@@ -972,23 +994,8 @@ namespace FUI::LootBarter
         const float btnRow = 3.0f * btnW + 16.0f * S;   // GI46: MAX | OK | Cancel
         const float sliderW = 220.0f * S;
 
-        const char* name = g_slider.obj ? g_slider.obj->GetName() : "";
-        // ★★The coin forms carry NO name on purpose (the esp blanks them so
-        // TrueHUD skips them, and the grid shows the amount badge instead), so
-        // the "?" fallback -- meant for a form with a genuinely missing name --
-        // is what the player saw when splitting gold. Name it what the rest of
-        // the UI calls it; Lang::Str::Gold follows the language setting.
-        // ★SentenceCase because that string is the stats panel's LABEL and is
-        // spelled "GOLD" for that row. Every other title here is an item name
-        // in ordinary case, so the shout stood out as the one word in caps.
-        // Non-ASCII scripts pass through untouched.
-        std::string coinName;
-        if (g_slider.obj && GoldCoins::IsCoinForm(g_slider.obj->GetFormID()) &&
-            !GoldCoins::IsPouch(g_slider.obj->GetFormID())) {
-            coinName = Lang::SentenceCase(Lang::T(Lang::Str::Gold));
-            name = coinName.c_str();
-        }
-        if (!name || !*name) name = "?";
+        const std::string title = PopupTitleOf(g_slider.obj);
+        const char* const name = title.c_str();
         const char* lbl = Lang::T(Lang::Str::TakeLabel);
         switch (g_slider.dir) {
         case XferDir::kStore:     lbl = Lang::T(Lang::Str::StoreLabel); break;
@@ -1207,15 +1214,8 @@ namespace FUI::LootBarter
         const float btnW = 96.0f * S;
         const float btnRow = 2.0f * btnW + 8.0f * S;
 
-        const char* name = g_confirm.obj ? g_confirm.obj->GetName() : "";
-        // Same nameless-coin case as the slider above.
-        std::string coinName;
-        if (g_confirm.obj && GoldCoins::IsCoinForm(g_confirm.obj->GetFormID()) &&
-            !GoldCoins::IsPouch(g_confirm.obj->GetFormID())) {
-            coinName = Lang::SentenceCase(Lang::T(Lang::Str::Gold));
-            name = coinName.c_str();
-        }
-        if (!name || !*name) name = "?";
+        const std::string title = PopupTitleOf(g_confirm.obj);
+        const char* const name = title.c_str();
         const char* question = Lang::T(Lang::Str::SellFavoriteConfirm);
         char priceLine[32];
         std::snprintf(priceLine, sizeof(priceLine), "%d G", g_confirm.price);
@@ -2198,8 +2198,7 @@ namespace FUI::LootBarter
                     // (The cell's InvisibleButton is not available here: it is
                     // only submitted while nothing is being carried.)
                     const bool hov =
-                        ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
-                        !UIRoot::MouseInOverlay() &&
+                        UIRoot::CursorOwnsWindow() &&
                         ImGui::IsMouseHoveringRect(
                             p0, ImVec2(p0.x + bw, p0.y + bh), false);
                     Badges::Draw(dl, p0, bw, bh, shape,
@@ -2551,9 +2550,8 @@ namespace FUI::LootBarter
             const bool onBoard = m.x >= g_partnerClipMin.x && m.x < g_partnerClipMax.x &&
                                  m.y >= g_partnerClipMin.y && m.y < g_partnerClipMax.y;
             g_partnerHovered =
-                onBoard && !UIRoot::MouseInOverlay() &&
-                ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows |
-                                       ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+                onBoard &&
+                UIRoot::CursorOwnsWindow(ImGuiHoveredFlags_RootAndChildWindows);
         }
         ImGui::End();
         ImGui::PopStyleVar();

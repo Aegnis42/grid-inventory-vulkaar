@@ -71,6 +71,28 @@ namespace FUI::UIRoot
     void NoteOverlayRect();   // call INSIDE the overlay window's Begin scope
     bool MouseInOverlay();    // previous frame's rects (draw-order safe)
 
+    // ★★★"Does the cursor belong to the window being drawn right now?" -- the
+    // two-term question every board has to answer before it reacts, and it must
+    // be ONE term because the two halves protect against different things and
+    // both are easy to forget:
+    //   IsWindowHovered  z-order. Geometry alone cannot see the window in
+    //                    front, which is how a drop landed in the bag hidden
+    //                    behind a merchant.
+    //   MouseInOverlay   the chrome a popup / settings / EDIT draws OUTSIDE its
+    //                    ImGui rect. z-order does not cover that band, so a
+    //                    pickup was refused there while a drop went through.
+    // ★AllowWhenBlockedByActiveItem is not optional: the click that resolves a
+    // drop activates whatever item is under the cursor, and a plain hover test
+    // then reports "no window" on the one frame the answer is needed.
+    // It was written out by hand in three places and the partner window's copy
+    // had only the first half.
+    // a_extra: ImGuiHoveredFlags. RootAndChildWindows for a window whose
+    // content lives in a scrolling child (the partner's goods do) -- the claim
+    // is the window's either way, but ImGui hands the hover to the child.
+    // ★Typed as int: this header is included by files that do not pull in
+    // imgui.h, and ImGuiHoveredFlags IS an int there.
+    [[nodiscard]] bool CursorOwnsWindow(int a_extra = 0);
+
     // INSPECT overlay — C key, matching vanilla's "Item Zoom" binding
     // (controlmap Item Zoom = 0x2E). Rotatable full-size view of the engine's
     // own model render: the ONLY way to read detail that lives on the model

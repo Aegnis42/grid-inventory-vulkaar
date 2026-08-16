@@ -2169,19 +2169,15 @@ namespace FUI::UIRoot
         // right-aligned titlebar controls (F1): … EDIT SETTINGS ✕ — the close
         // button sits at the right edge and closes EVERYTHING at once (no
         // sub-window cascade), with the close sound played up front.
-        void DrawTitleBarControls(const ImVec2& a_mainSize, float a_barH,
-                                  float a_insY, float a_topPad,
+        void DrawTitleBarControls(const ImVec2& a_mainSize,
                                   const char* a_editLbl, const char* a_setLbl,
                                   float a_editW, float a_setW, float a_btnGap)
         {
             const ImVec2 wp = ImGui::GetWindowPos();
-            // half the inset, matching the title itself (see WinManager)
-            // ★...and the WHOLE top pad, also matching it. EDIT / SETTINGS / x
-            // sit on the title's line, so they take the same two terms in the
-            // same proportions -- give this one a half and they float 7px above
-            // the name they are aligned to.
-            const float ty = wp.y + a_insY * 0.5f + a_topPad +
-                             (a_barH - ImGui::GetTextLineHeight()) * 0.5f;
+            // ★On the TITLE's own line, from the one accessor that knows how
+            // that line is built -- these controls drifted off it twice while
+            // the formula was copied here by hand.
+            const float ty = WinManager::TitleTextY("main", ImGui::GetTextLineHeight());
             const char* closeLbl = "\xC3\x97";   // × (U+00D7, already baked)
             // ★The x is capped at the TITLE size. The old 1.55 multiplier was
             // set against a 17px body and silently became 31px — bigger than
@@ -2799,8 +2795,7 @@ namespace FUI::UIRoot
 
             const ImVec2 bodyTop = ImGui::GetCursorScreenPos();
 
-            DrawTitleBarControls(mainSize, barH, insY, topPad,
-                editLbl, setLbl, editW, setW, btnGap);
+            DrawTitleBarControls(mainSize, editLbl, setLbl, editW, setW, btnGap);
             ParkPreviewModel(mainSize);
 
             // controls moved the cursor — body starts back under the titlebar
@@ -3454,6 +3449,15 @@ namespace FUI::UIRoot
         const ImVec2 s = ImGui::GetWindowSize();
         const float m = 14.0f * Theme::Scale();   // torn-frame chrome margin
         g_overlayNow.emplace_back(p.x - m, p.y - m, p.x + s.x + m, p.y + s.y + m);
+    }
+
+    bool CursorOwnsWindow(int a_extra)
+    {
+        // See the header for why both halves are here and why the flag is not
+        // optional. Call from INSIDE the window whose claim is being tested.
+        return ImGui::IsWindowHovered(static_cast<ImGuiHoveredFlags>(a_extra) |
+                                      ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+               !MouseInOverlay();
     }
 
     bool MouseInOverlay()

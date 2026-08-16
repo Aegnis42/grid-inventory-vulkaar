@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <functional>
@@ -132,6 +132,16 @@ namespace FUI
         // against this — hardcoding the number at each call site is how those
         // controls drifted off the title's line.
         [[nodiscard]] static float TitleBarH();
+
+        // ★★Where a glyph of this height sits on the title's LINE, for the
+        // window named by a_key. Three call sites derived it by hand -- the
+        // title itself, the main window's EDIT / SETTINGS / x, and a bag's
+        // COLLECT -- and the third took the frame inset WHOLE where the other
+        // two take half, so it sat 12px low on every torn skin and 3px low on
+        // every translucent one. Two terms, both easy to get wrong: HALF the
+        // frame inset (the title belongs to the bar, not under the frame) and
+        // ALL of the top pad (the window's height already paid for it).
+        [[nodiscard]] static float TitleTextY(const std::string& a_key, float a_glyphH);
 
         // Phase 2: shared chrome for the centred confirm-style popups
         // (quantity slider / sell-confirm / loadout buy / delete):

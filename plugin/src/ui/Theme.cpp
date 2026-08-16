@@ -1,4 +1,4 @@
-#include "ui/Theme.h"
+﻿#include "ui/Theme.h"
 
 #include <SKSE/SKSE.h>
 
@@ -1401,10 +1401,17 @@ namespace FUI::Theme
         {
             if (!a_dl || !a_ic) return;
             const float f = std::clamp(a_fade, 0.01f, 0.49f);
-            const float knot[4] = { 0.0f, f, 1.0f - f, 1.0f };
-            const float mul[4]  = { 0.0f, 1.0f, 1.0f, 0.0f };
-            ImVec2 pos[4][2], uvs[4][2];
-            for (int i = 0; i < 4; ++i) {
+            // ★One fact, one place. The knot count decides the array sizes, both
+            // loop bounds AND the two numbers PrimReserve is handed -- and those
+            // last two are the ones that break SILENTLY if they disagree with
+            // what is actually written (a mis-sized reserve corrupts the draw
+            // list rather than failing). Derived, so they cannot.
+            constexpr int kKnots = 4;                 // 0, fade, 1-fade, 1
+            constexpr int kQuads = kKnots - 1;
+            const float knot[kKnots] = { 0.0f, f, 1.0f - f, 1.0f };
+            const float mul[kKnots]  = { 0.0f, 1.0f, 1.0f, 0.0f };
+            ImVec2 pos[kKnots][2], uvs[kKnots][2];
+            for (int i = 0; i < kKnots; ++i) {
                 const float t = knot[i];
                 const float u = a_u0 + (a_u1 - a_u0) * t;
                 if (!a_vert) {
@@ -1424,14 +1431,14 @@ namespace FUI::Theme
             const ImU32 rgb = a_col & ~IM_COL32_A_MASK;
             const auto  al  = static_cast<float>((a_col >> IM_COL32_A_SHIFT) & 0xFF);
             a_dl->PushTexture(tex);
-            a_dl->PrimReserve(18, 8);
+            a_dl->PrimReserve(kQuads * 6, kKnots * 2);
             const unsigned int base = a_dl->_VtxCurrentIdx;
-            for (int i = 0; i < 4; ++i) {
+            for (int i = 0; i < kKnots; ++i) {
                 const ImU32 c = rgb | (static_cast<ImU32>(al * mul[i]) << IM_COL32_A_SHIFT);
                 a_dl->PrimWriteVtx(pos[i][0], uvs[i][0], c);
                 a_dl->PrimWriteVtx(pos[i][1], uvs[i][1], c);
             }
-            for (unsigned int s = 0; s < 3; ++s) {
+            for (unsigned int s = 0; s < kQuads; ++s) {
                 const auto a = static_cast<ImDrawIdx>(base + s * 2);
                 a_dl->PrimWriteIdx(a);
                 a_dl->PrimWriteIdx(static_cast<ImDrawIdx>(a + 2));

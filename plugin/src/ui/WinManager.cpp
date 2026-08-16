@@ -949,6 +949,13 @@ namespace FUI
 
     float WinManager::TitleBarH() { return 34.0f * Theme::Scale(); }
 
+    float WinManager::TitleTextY(const std::string& a_key, float a_glyphH)
+    {
+        auto* const w = GetSingleton()->Find(a_key);
+        return (w ? w->pos.y : ImGui::GetWindowPos().y) + Theme::FrameInsetY() * 0.5f +
+               (w ? w->topPad : 0.0f) + (TitleBarH() - a_glyphH) * 0.5f;
+    }
+
     void WinManager::TitleBar(const std::string& a_key, const char* a_label, float a_reserveRight,
                               bool a_centerTitle)
     {
@@ -1147,7 +1154,7 @@ namespace FUI
         // far the frame eats in (the title belongs to the bar, so it only
         // clears half of it); this is clearance the caller has already paid for
         // in its window height, so every pixel of it goes above the name.
-        const float ty = wp.y + insY * 0.5f + a_topPad + (barH - fontSize) * 0.5f;
+        const float ty = TitleTextY(a_key, fontSize);
         float tx = a_centerTitle ? wp.x + (w.size.x - textW) * 0.5f
                                  : wp.x + 12.0f * S + insX;
         // ★★INK: a brush mark laid UNDER the name, in the accent at half
