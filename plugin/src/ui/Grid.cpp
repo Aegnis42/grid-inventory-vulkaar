@@ -843,46 +843,46 @@ namespace FUI::Grid
         // load order may put Skyrim.esm wherever it likes.
         // ★Rebuilt until the handler exists: caching an empty set on a call
         // that happened before data load would make the list permanently dead.
-        [[nodiscard]] bool IsNamedUnique(RE::TESBoundObject* a_obj)
-        {
-            static std::set<RE::FormID> s_ids;
-            static bool                 s_built = false;
-            if (!s_built) {
-                if (auto* dh = RE::TESDataHandler::GetSingleton()) {
-                    for (const RE::FormID local : { 0x01C492u,     // T03Nettlebane
-                                                    0x09CCDCu,     // DBBladeOfWoeReward
-                                                    0x0964C9u }) { // DBBladeOfWoeAstrid
-                        if (auto* f = dh->LookupForm(local, "Skyrim.esm")) {
-                            s_ids.insert(f->GetFormID());
-                        }
-                    }
-                    s_built = true;
-                }
-            }
-            return a_obj && s_ids.contains(a_obj->GetFormID());
-        }
+        // Declared in GridInventory_unique.ini and pushed in by main.cpp.
+        std::unordered_map<RE::FormID, bool> g_uniqueOverride;
+        bool                                 g_uniqueLoaded = false;
+        // ★The verdict, cached per form. At namespace scope rather than inside
+        // the query, because a reload of the file has to be able to drop it.
+        std::unordered_map<RE::FormID, bool> g_uniqueCache;
+        void InvalidateUniqueCache() { g_uniqueCache.clear(); }
 
         bool IsUniqueCached(RE::TESBoundObject* a_obj)
         {
-            static std::unordered_map<RE::FormID, bool> s_cache;
-            if (const auto it = s_cache.find(a_obj->GetFormID()); it != s_cache.end()) {
+            if (const auto it = g_uniqueCache.find(a_obj->GetFormID());
+                it != g_uniqueCache.end()) {
                 return it->second;
             }
             const auto* ef = a_obj->As<RE::TESEnchantableForm>();
             const auto* en = ef ? ef->formEnchanting : nullptr;
             bool uniq = en && !en->data.baseEnchantment;
             if (uniq) {
-                if (const auto* w = a_obj->As<RE::TESObjectWEAP>();
-                    w && w->GetWeaponType() == RE::WEAPON_TYPE::kStaff) {
-                    uniq = false;
+                if (const auto* w = a_obj->As<RE::TESObjectWEAP>()) {
+                    // staves: all 64 are undisenchantable, so the signal is
+                    // constant among them and says nothing
+                    if (w->GetWeaponType() == RE::WEAPON_TYPE::kStaff) uniq = false;
+                    // ★BOUND weapons pass the test for a reason that has nothing
+                    // to do with rarity -- a conjured sword's enchantment is not
+                    // one you could ever learn. Six of them (sword / bow /
+                    // battleaxe, each with a Mystic variant) were coming up red.
+                    if (w->IsBound()) uniq = false;
                 }
             }
-            if (!uniq) uniq = IsNamedUnique(a_obj);
-            // ★Only cache an answer the named list could actually contribute to.
-            // Asked before the data handler exists, the list is empty and every
-            // exception would come back "ordinary" -- and STAY that way, which
-            // is the exact failure the list's own retry was written to avoid.
-            if (RE::TESDataHandler::GetSingleton()) s_cache.emplace(a_obj->GetFormID(), uniq);
+            // ★The FILE wins, both ways: it can name a unique the record cannot
+            // describe, and it can switch off one the rule got wrong.
+            if (const auto ov = g_uniqueOverride.find(a_obj->GetFormID());
+                ov != g_uniqueOverride.end()) {
+                uniq = ov->second;
+            }
+            // ★Nothing is cached until the overrides have been loaded. Asked
+            // before that, every declared unique would come back "ordinary" --
+            // and STAY that way for the session, which is the whole failure the
+            // file exists to prevent.
+            if (g_uniqueLoaded) g_uniqueCache.emplace(a_obj->GetFormID(), uniq);
             return uniq;
         }
 
@@ -3108,6 +3108,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     void SetDefResolver(DefResolver a_resolver)
     {
         g_resolver = std::move(a_resolver);
+    }
+
+    void SetUniqueOverrides(std::unordered_map<RE::FormID, bool> a_map)
+    {
+        g_uniqueOverride = std::move(a_map);
+        g_uniqueLoaded = true;
+        // ★The verdict is cached per form, so a reload has to drop the cache or
+        // the file would only take effect on a restart -- and the file is
+        // hot-reloaded on every inventory open, which is the whole point.
+        InvalidateUniqueCache();
     }
 
     GridDef ResolveDef(RE::TESBoundObject* a_obj)

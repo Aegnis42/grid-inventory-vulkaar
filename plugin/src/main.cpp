@@ -465,6 +465,7 @@ namespace
     std::unordered_map<std::string, ItemDef> g_itemDefs;   // user overrides
 
     constexpr const char* kDefsPath = "Data/SKSE/Plugins/GridInventory_items.ini";
+    constexpr const char* kUniquePath = "Data/SKSE/Plugins/GridInventory_unique.ini";
 
     // Stable item key across load orders: "Plugin.esp|0xLocalID"
     //
@@ -861,6 +862,49 @@ namespace
             }
         }
         return DefaultDef(a_obj);
+    }
+
+    // ★★WHICH ITEMS WEAR THE UNIQUE MARK, beyond what the record can say.
+    // The built-in rule is "its enchantment has no base enchantment", i.e. one
+    // the player can never learn -- that finds the Daedric artifacts and the
+    // named uniques that carry a bespoke enchantment, and nothing else. A
+    // unique that is unenchanted (the Longhammer, Valdr's Lucky Dagger),
+    // scripted (Nettlebane, the Bloodskal Blade) or plainly disenchantable
+    // (Grimsever, Okin, Eduj) is indistinguishable from ordinary gear in the
+    // data, and a MOD's artifacts are invisible to any rule at all.
+    // One form per line, in the same key the rest of this file uses:
+    //     Skyrim.esm|0x01C492          ; on
+    //     Skyrim.esm|0x01C492 = 0      ; off -- overrides the rule the other way
+    void LoadUniqueDefs()
+    {
+        std::unordered_map<RE::FormID, bool> out;
+        std::ifstream in(kUniquePath);
+        std::string   line;
+        while (in && std::getline(in, line)) {
+            if (const auto c = line.find_first_of(";#"); c != std::string::npos) {
+                line.erase(c);
+            }
+            std::string key = line;
+            bool        on = true;
+            if (const auto eq = key.find('='); eq != std::string::npos) {
+                std::string val = key.substr(eq + 1);
+                key.erase(eq);
+                val.erase(0, val.find_first_not_of(" 	"));
+                on = !val.empty() && val[0] != '0';
+            }
+            key.erase(0, key.find_first_not_of(" 	"));
+            if (const auto e = key.find_last_not_of(" 	"); e != std::string::npos) {
+                key.erase(e + 1);
+            } else {
+                continue;
+            }
+            if (key.empty()) continue;
+            // ★Resolved through the data handler, so the load order may put the
+            // plugin anywhere -- and a line naming a plugin the player does not
+            // have is simply skipped rather than being an error.
+            if (auto* obj = FormFromKey(key)) out[obj->GetFormID()] = on;
+        }
+        FUI::Grid::SetUniqueOverrides(std::move(out));
     }
 
     // User override file, one line per item (hot-reloaded on every inventory open):
@@ -1572,6 +1616,7 @@ namespace
 
         LoadCategoryDefs();
         LoadItemDefs();
+        LoadUniqueDefs();
         LoadFlatIconDefs();
 
         // ★★★AND THE UI INI, HERE -- not when a window first asks for its
@@ -1599,6 +1644,7 @@ namespace
             []() {   // menu shown
                 LoadCategoryDefs();   // hot-reload category defaults (H7)
                 LoadItemDefs();       // hot-reload user overrides (same as legacy path)
+                LoadUniqueDefs();     // ...and the unique declarations beside them
                 LoadFlatIconDefs();   // hot-reload IconStudio's drawn-icon edits
                 // typed bags phase 0: classify what the player is carrying and
                 // write the tally out. ONCE per session — this is an

@@ -7,6 +7,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 namespace FUI::Grid
 {
@@ -14,6 +15,18 @@ namespace FUI::Grid
     // resolved by main.cpp through the ini-override -> category-preset path.
     using DefResolver = std::function<GridDef(RE::TESBoundObject*)>;
     void SetDefResolver(DefResolver a_resolver);
+
+    // ★★USER-DECLARED UNIQUES, by FormID, true = force the mark on / false = off.
+    // The built-in rule ("its enchantment has no base, so it can never be
+    // learned") finds the Daedric artifacts and little else: a unique that is
+    // unenchanted (the Longhammer, Valdr's Lucky Dagger), scripted (Nettlebane,
+    // the Bloodskal Blade) or simply disenchantable (Grimsever, Okin, Eduj)
+    // carries nothing in its record to separate it from ordinary gear, and a
+    // mod's artifacts carry nothing either. Naming them in code meant a rebuild
+    // per item and gave mod users no way in at all.
+    // Overrides win over the rule in both directions, so a false positive can
+    // be switched off as well.
+    void SetUniqueOverrides(std::unordered_map<RE::FormID, bool> a_map);
 
     // Resolve an item's footprint def via the registered resolver (same path
     // the main grid uses). LootBarter reuses this so the partner window draws
