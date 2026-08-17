@@ -833,23 +833,57 @@ namespace FUI::Grid
         // ★Known misses, and they are structural: Nettlebane has NO enchantment
         // (its effect is scripted) and the Blade of Woe's enchantment does have
         // a base. Nothing in the record separates those from ordinary gear.
+        // ★★NAMED EXCEPTIONS, because some artifacts carry NOTHING in their
+        // record that separates them from ordinary gear:
+        //   Nettlebane      no enchantment at all -- its effect is scripted
+        //   Blade of Woe    its enchantment does have a base (x2: the reward
+        //                   copy and the one Astrid carries)
+        // No test over the record can reach these, so they are named. Resolved
+        // through the data handler rather than compared as raw FormIDs, so the
+        // load order may put Skyrim.esm wherever it likes.
+        // ★Rebuilt until the handler exists: caching an empty set on a call
+        // that happened before data load would make the list permanently dead.
+        [[nodiscard]] bool IsNamedUnique(RE::TESBoundObject* a_obj)
+        {
+            static std::set<RE::FormID> s_ids;
+            static bool                 s_built = false;
+            if (!s_built) {
+                if (auto* dh = RE::TESDataHandler::GetSingleton()) {
+                    for (const RE::FormID local : { 0x01C492u,     // T03Nettlebane
+                                                    0x09CCDCu,     // DBBladeOfWoeReward
+                                                    0x0964C9u }) { // DBBladeOfWoeAstrid
+                        if (auto* f = dh->LookupForm(local, "Skyrim.esm")) {
+                            s_ids.insert(f->GetFormID());
+                        }
+                    }
+                    s_built = true;
+                }
+            }
+            return a_obj && s_ids.contains(a_obj->GetFormID());
+        }
+
         bool IsUniqueCached(RE::TESBoundObject* a_obj)
         {
             static std::unordered_map<RE::FormID, bool> s_cache;
-            const auto [itc, fresh] = s_cache.try_emplace(a_obj->GetFormID(), false);
-            if (fresh) {
-                const auto* ef = a_obj->As<RE::TESEnchantableForm>();
-                const auto* en = ef ? ef->formEnchanting : nullptr;
-                bool uniq = en && !en->data.baseEnchantment;
-                if (uniq) {
-                    if (const auto* w = a_obj->As<RE::TESObjectWEAP>();
-                        w && w->GetWeaponType() == RE::WEAPON_TYPE::kStaff) {
-                        uniq = false;
-                    }
-                }
-                itc->second = uniq;
+            if (const auto it = s_cache.find(a_obj->GetFormID()); it != s_cache.end()) {
+                return it->second;
             }
-            return itc->second;
+            const auto* ef = a_obj->As<RE::TESEnchantableForm>();
+            const auto* en = ef ? ef->formEnchanting : nullptr;
+            bool uniq = en && !en->data.baseEnchantment;
+            if (uniq) {
+                if (const auto* w = a_obj->As<RE::TESObjectWEAP>();
+                    w && w->GetWeaponType() == RE::WEAPON_TYPE::kStaff) {
+                    uniq = false;
+                }
+            }
+            if (!uniq) uniq = IsNamedUnique(a_obj);
+            // ★Only cache an answer the named list could actually contribute to.
+            // Asked before the data handler exists, the list is empty and every
+            // exception would come back "ordinary" -- and STAY that way, which
+            // is the exact failure the list's own retry was written to avoid.
+            if (RE::TESDataHandler::GetSingleton()) s_cache.emplace(a_obj->GetFormID(), uniq);
+            return uniq;
         }
 
         // G3: Mabinogi stacking — units per TILE. 1 = never stacks (equipment
