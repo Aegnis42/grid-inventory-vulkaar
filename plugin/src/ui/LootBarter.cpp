@@ -2155,15 +2155,30 @@ namespace FUI::LootBarter
                             IM_COL32(6, 6, 10, 168));
                     }
                     // ★1.0.5: the shared marker tray, so poison keeps showing
-                    // here now that DrawGlow no longer draws it. Favourite and
-                    // stolen stay off: a PartnerCell is a container's item, not
-                    // the player's, and carries neither flag.
+                    // here now that DrawGlow no longer draws it. Favourite
+                    // stays off -- a PartnerCell is a container's item, not the
+                    // player's, and carries no star.
                     // ★"On the body" joins them rather than being drawn beside
                     // them: it used to own the same corner the tray starts from
                     // and covered the poison droplet outright. Not while LOCKED
                     // -- the lock already means worn and owns that square.
+                    // ★★★STOLEN IS ON IN kSteal, and the mode is what says so --
+                    // the cell carries no flag of its own because nothing has
+                    // been taken yet. An owned container is owned WHOLE, so
+                    // every item in it will become stolen goods the moment it
+                    // moves, and the mark says that in advance.
+                    // This is vanilla's own economy of symbols: the hand it puts
+                    // beside an item in a stealable container is the SAME hand
+                    // it puts beside that item once it is in your pack. One
+                    // mark, one meaning -- "someone else's". Ours is the crimson
+                    // dot, and it now works the same way on both sides.
+                    // ★A per-item mark rather than the window's STEAL label
+                    // alone, because the label did not reach the person who
+                    // designed it: the behaviour (goods turning stolen) was
+                    // noticed, the label was not.
                     Grid::DrawMarkerTray(dl, p0, ImVec2(p0.x + bw, p0.y + bh),
-                                         false, false, (it.glow & 0x4) != 0,
+                                         false, g_mode == Mode::kSteal,
+                                         (it.glow & 0x4) != 0,
                                          it.worn && !it.locked);
                 }
                 // ★The EDIT selection ring, so the partner board can say WHICH
