@@ -810,16 +810,44 @@ namespace FUI::Grid
 
         // "unique" = has a DESC description (artifacts). The lookup walks the
         // string tables, so cache the verdict per form for the session.
-        bool HasDescCached(RE::TESBoundObject* a_obj)
+        // ★★★"UNIQUE" IS "CANNOT BE DISENCHANTED". Measured against Skyrim.esm
+        // rather than assumed, because the old test -- "has a non-empty DESC" --
+        // was picking a set that has nothing to do with artifacts:
+        //
+        //   criterion                    weapons hit (of 2484)   Dawnbreaker
+        //   DESC non-empty (old)                33                   NO
+        //   enchanted, no base ench            113                   YES
+        //
+        // Every WEAP record HAS a DESC subrecord and its string id is 0 --
+        // Dawnbreaker, Volendrung and a plain iron dagger are indistinguishable
+        // by it. The 33 it did hit are silver swords, the Akaviri katanas and
+        // Nightingale gear: Skyrim uses DESC for "this item needs a sentence of
+        // explanation", not for "this item is an artifact".
+        // The new test catches Dawnbreaker, Volendrung, Mehrunes' Razor, the
+        // Mace of Molag Bal, the Ebony Blade, Chillrend, Keening and the
+        // Nightingale weapons. A player-made enchantment always has a base
+        // (the one they learned), so it never qualifies.
+        // ★STAVES ARE EXCLUDED. All 64 of them are undisenchantable, so among
+        // staves the signal carries no information at all -- it would light up
+        // every staff in the game to flag the handful that are special.
+        // ★Known misses, and they are structural: Nettlebane has NO enchantment
+        // (its effect is scripted) and the Blade of Woe's enchantment does have
+        // a base. Nothing in the record separates those from ordinary gear.
+        bool IsUniqueCached(RE::TESBoundObject* a_obj)
         {
             static std::unordered_map<RE::FormID, bool> s_cache;
             const auto [itc, fresh] = s_cache.try_emplace(a_obj->GetFormID(), false);
             if (fresh) {
-                if (auto* d = a_obj->As<RE::TESDescription>()) {
-                    RE::BSString out;
-                    d->GetDescription(out, a_obj->As<RE::TESForm>());
-                    itc->second = out.size() > 0 && out.c_str() && *out.c_str();
+                const auto* ef = a_obj->As<RE::TESEnchantableForm>();
+                const auto* en = ef ? ef->formEnchanting : nullptr;
+                bool uniq = en && !en->data.baseEnchantment;
+                if (uniq) {
+                    if (const auto* w = a_obj->As<RE::TESObjectWEAP>();
+                        w && w->GetWeaponType() == RE::WEAPON_TYPE::kStaff) {
+                        uniq = false;
+                    }
                 }
+                itc->second = uniq;
             }
             return itc->second;
         }
@@ -4253,7 +4281,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     ef && ef->formEnchanting) {
                     glow |= 1;
                 }
-                if (!obj->Is(RE::FormType::Book) && HasDescCached(obj)) glow |= 2;
+                if (IsUniqueCached(obj)) glow |= 2;
 
                 // COIN tiles: a coin's VALUE is bound to its ordinal (InstanceValue:
                 // low index = 1000, top index = remainder). If the value stayed
@@ -6672,7 +6700,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 glow |= 1;
             }
         }
-        if (!a_obj->Is(RE::FormType::Book) && HasDescCached(a_obj)) glow |= 2;
+        if (IsUniqueCached(a_obj)) glow |= 2;
         // GI66: per-unit STATUS bit. Poison is drawn as the top-right droplet,
         // NOT as a halo -- the switch above must never see this bit.
         if (a_xl) {
