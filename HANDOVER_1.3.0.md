@@ -4,7 +4,18 @@
 
 ---
 
-## 0. 지금 상태 한 줄
+## ★ 2026-08-18 완료 추록 (이 문서의 §3~§4는 역사 기록)
+
+**§3의 (A)(B)(C)(D) 전부 구현·인게임 검증 완료, `[LOOTDIAG]` 제거, 빌드가 `H:\Game\Fablerim\mods\Grid Inventory`에 배포됨.** 상세는 메모리 `project_fablerimui_imgui_inventory` 1.3.0 항목 참조. 핵심 요지:
+- (A) 진범은 §3-5의 용의자 3곳이 아니라 **레이아웃 pass 3(매 프레임 재작성)의 브레이스 초기화 gold 누락**. 이후 규칙: ContSpot 재작성은 전부 필드 단위 대입(집합 대입=gold/bundle 소실).
+- (B) 회수는 `ConsumeActingSpot(a_obj)`(가져가기 3형제+take-all 공통 은퇴점) 한 곳. 꼬리 슬롯 삭제도 회수, LRU 축출은 골드 보유 레이아웃 제외.
+- (C) `NotePendingRemove`→`NotePouchLeaving(key)` 원샷 힌트. 복귀 금액은 신규 타일 우선+유예 4회(`ClaimReturned(fresh, known)`), `FullestPouch`는 예약 키 제외.
+- (D) 가방 번들=파우치 골드와 같은 "슬롯 거주" 모델. 코세이브 GCLY **v4**. 한계: 스택 병합분 재귀속 불가(무손실)·동일 폼 가방 2개 같은 상자=번들 섞임·판매=쏟아짐(사양).
+- **남은 것**: `release/stage` 반영 + 1.3.0 패키징(CHANGELOG/README), 커밋, §7의 4K 테스터(h:4 대형템) 답변 대기.
+
+---
+
+## 0. 지금 상태 한 줄 (구판)
 
 **1.2.1 수정 3건은 끝났고 검증됐다. 1.3.0 파우치 작업은 절반이 되고 절반이 안 된다. 배포하면 안 된다.**
 

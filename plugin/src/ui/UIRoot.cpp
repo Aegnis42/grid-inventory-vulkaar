@@ -3305,7 +3305,7 @@ namespace FUI::UIRoot
         // closing out of turn.
         enum class Layer : std::uint8_t {
             kInspect, kTrashConfirm, kLootPopup, kEquipPopup,
-            kTrash, kPouch, kSettings, kEdit, kSearch, kCount
+            kTrash, kPouch, kRecharge, kSettings, kEdit, kSearch, kCount
         };
 
         [[nodiscard]] bool LayerOpen(Layer a_l)
@@ -3317,6 +3317,7 @@ namespace FUI::UIRoot
             case Layer::kEquipPopup:   return Equip::IsPopupOpen();
             case Layer::kTrash:        return Grid::IsTrashOpen();
             case Layer::kPouch:        return Grid::IsPouchOpen();
+            case Layer::kRecharge:     return Grid::IsRechargeOpen();
             case Layer::kSettings:     return g_showSettings.load();
             case Layer::kEdit:         return Editor::IsEditMode();
             case Layer::kSearch:       return Grid::SearchActive();
@@ -3333,6 +3334,7 @@ namespace FUI::UIRoot
             case Layer::kEquipPopup:   return Equip::CloseTopPopup();
             case Layer::kTrash:        return Grid::CloseTrash();
             case Layer::kPouch:        return Grid::ClosePouch();
+            case Layer::kRecharge:     return Grid::CloseRecharge();
             case Layer::kSettings:
                 if (!g_showSettings.load()) return false;
                 g_showSettings.store(false);
@@ -3364,6 +3366,31 @@ namespace FUI::UIRoot
                 g_layerStack.push_back(l);
             }
         }
+    }
+
+    void LogHudModes(const char* a_tag)
+    {
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui) return;
+        const auto hud = ui->GetMenu(RE::HUDMenu::MENU_NAME);
+        if (!hud || !hud->uiMovie) return;
+        RE::GFxValue modes;
+        if (!hud->uiMovie->GetVariable(&modes,
+                "_root.HUDMovieBaseInstance.HUDModes") ||
+            !modes.IsArray()) {
+            SKSE::log::info("[HUDMODE] {}: no HUDModes array", a_tag);
+            return;
+        }
+        std::string s;
+        const auto n = modes.GetArraySize();
+        for (std::uint32_t i = 0; i < n; ++i) {
+            RE::GFxValue v;
+            if (modes.GetElement(i, &v) && v.IsString()) {
+                s += v.GetString();
+                if (i + 1 < n) s += ' ';
+            }
+        }
+        SKSE::log::info("[HUDMODE] {}: [{}] ({})", a_tag, s, n);
     }
 
     bool CloseTopWindow()
@@ -3766,6 +3793,9 @@ namespace FUI::UIRoot
         DrawSettingsWindow();     // ⚙ popup (scale / skin / language)
         Equip::DrawLoadoutWindows();   // L2: loadout +buy / delete confirm (top level)
         Grid::DrawPouchWindow();       // G2: coin-pouch withdraw (top level)
+        Grid::DrawRechargeWindow();    // (1.3.1) soul-gem recharge (top level)
+        LootBarter::DrawShelfBag();    // (1.3.1) opened shelf-bag windows (top level)
+        LootBarter::DrawShelfPouch();  // (1.3.2a) shelf-pouch withdraw (top level)
         Grid::DrawTrashConfirm();      // F2: favorite-intake confirm (top level)
         LootBarter::DrawSlider();      // loot/barter quantity slider (top level)
         LootBarter::DrawConfirm();     // favorite-sale confirm popup (top level)
@@ -3807,6 +3837,7 @@ namespace FUI::UIRoot
     {
         Grid::ProcessBookRead();   // raise the Book Menu OUTSIDE the render pass
         Grid::ProcessFavorites();  // GI32: favourites, same reason
+        Grid::ProcessRecharge();   // (1.3.1) soul-gem recharge, same reason
         Equip::ProcessPending();   // equip/unequip OUTSIDE the render pass
         Loadout::ProcessPending();  // L1: deferred loadout tab switch
         // ★After the switch, not before: switching changes what is worn, and

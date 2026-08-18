@@ -960,6 +960,36 @@ namespace FUI::Grid
         std::map<std::string, LayoutEntry>             g_layout;
         std::map<std::string, LayoutEntry>& Layout() { return g_layout; }
 
+        // ★(1.3.0-D) a bag committed to a container takes its CONTENTS along:
+        // queue each content tile's store and hand the manifest to the shelf
+        // (LootBarter parks it until the bag's spot is born). Coin tiles are
+        // mirror artefacts and never travel; a nested bag stays behind,
+        // matching the "no bag inside a bag" rule everywhere else.
+        // g_stolen lives further down (it is built by the rebuild); this is
+        // the one reader that runs above it
+        [[nodiscard]] bool IsStolenPool(const std::string& a_key);
+
+        void StoreBagContents(const std::string& a_bagKey, RE::TESBoundObject* a_bagObj)
+        {
+            std::vector<LootBarter::BundleItem> manifest;
+            for (auto& it : g_items) {
+                if (it.inBag != a_bagKey || !it.obj) continue;
+                if (it.def.bag != 0) continue;
+                if (it.coinValue >= 0) continue;   // pinned purses stay home
+                LootBarter::RequestStore(it.obj, it.count, it.uid, it.sig, it.fav);
+                NotePendingRemove(it.obj, it.key, it.count);
+                // ★(1.3.2) the tile's marker bits ride along; the favourite
+                // star does NOT -- RequestStore's fav argument strips it as
+                // the unit leaves, so a stored item is never starred.
+                manifest.push_back({ it.obj->GetFormID(), it.count, it.sig,
+                                     -1, -1, it.rot & 3, it.glow,
+                                     IsStolenPool(it.key) });
+            }
+            if (!manifest.empty() && a_bagObj) {
+                LootBarter::NoteBagBundle(a_bagObj->GetFormID(), std::move(manifest));
+            }
+        }
+
         // E4b: bags may nest inside GENERAL bags (manual placement only).
         // The one thing that must never form is a containment loop — walk
         // a_outer's chain of containers upward; hitting a_inner means the
@@ -977,6 +1007,14 @@ namespace FUI::Grid
         // just entered the inventory. Rebuilt every pass, never persisted:
         // being new is a property of this frame, not of the save.
         std::vector<std::string>                       g_freshTiles;
+        // ★(1.3.2) EVERY tile minted this rebuild, hand-placed ones included.
+        // g_freshTiles is the ROUTING list and a tile placed by the player's
+        // own hand is struck off it (the drop hint wins over the filters) --
+        // but "did this just arrive" is a different question, and the bundle
+        // claim asks that one. Dragging a stored bag home always sets a drop
+        // hint, so the bag was never in g_freshTiles and its contents spilled
+        // onto the main board instead of going back inside it.
+        std::vector<std::string>                       g_arrivedTiles;
         // ★Typed bags: which filters the player currently has a USABLE bag for
         // — a copy parked in the trash or riding the cursor does not count
         // (no slot can route to it, so treating it as held just fragments the
@@ -1053,6 +1091,11 @@ namespace FUI::Grid
         // Phase 7 / GI26: quest object, keyed by POOL like g_stolen. Form-keyed,
         // a single quest-flagged copy locked every copy of that form -- the
         // player could not drop, sell, store or trash any of them.
+        bool IsStolenPool(const std::string& a_key)
+        {
+            return g_stolen.contains(PoolOfKey(a_key));
+        }
+        // Phase 7 / GI26: quest object, keyed by POOL like g_stolen.
         std::unordered_map<std::string, bool>          g_questItem;
         int                                            g_gold = 0;
         std::optional<Held>                            g_held;
@@ -2585,6 +2628,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 it.uid, it.xlIdx, 0, 0,
                                 TileContext{ it.key, it.def.bag != 0,
                                              it.inBag == kTrashKey, false, false });
+                            // (1.3.1) T = recharge, the vanilla ChargeItem key.
+                            // OpenRecharge validates (enchanted weapon, not
+                            // already full) and stays silent otherwise.
+                            if (ImGui::IsKeyPressed(ImGuiKey_T, false) &&
+                                !ImGui::GetIO().WantTextInput) {
+                                OpenRecharge(it.obj, it.uid, it.sig, false, 0);
+                            }
                         } else {
                             // ★GI63: a coin draws no tooltip on purpose -- the
                             // amount badge already says everything a card could.
@@ -2737,11 +2787,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
                                 if (g_questItem.contains(PoolOfKey(it.key))) {   // Phase 7: locked
                                     Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
+                                } else if (!LootBarter::PartnerHasRoomFor(it.obj, it.count)) {
+                                    Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));   // (1.3.3)
                                 } else if (it.count > 1) {
                                     LootBarter::OpenSlider(it.obj, it.count,
                                         LootBarter::XferDir::kStore, it.key, 0, it.uid, it.sig,
                                         false, it.fav);
                                 } else {
+                                    // (bags never reach this branch: their
+                                    // right-click is the window toggle above,
+                                    // and their storage is DRAG-only -- the
+                                    // drop path (WholeStore) bundles contents)
                                     LootBarter::RequestStore(it.obj, it.count,
                                                              it.uid, it.sig, it.fav);
                                     NotePendingRemove(it.obj, it.key, it.count);
@@ -2955,9 +3011,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // practice (the slider resolves BEFORE a fragment reaches the
             // cursor), but one keypress must never mean two things.
             if (LootBarter::SliderActive()) return;
-            const bool ccw = ImGui::IsKeyPressed(ImGuiKey_A, false);
-            const bool cw  = ImGui::IsKeyPressed(ImGuiKey_D, false);
+            // ★(1.3.2) REPORTED: "A/D do nothing". With the Korean IME in
+            // hangul mode the OS routes the letter into composition and the
+            // WM_KEYDOWN that feeds ImGui never arrives -- the PHYSICAL key
+            // state does not lie (same trick the arrow keys use during text
+            // input), so it backs the ImGui read up. A same-frame OR is one
+            // press; the 2-frame guard stops the two paths double-firing
+            // when they disagree by a frame.
+            static bool s_aWas = false, s_dWas = false;
+            static int  s_lastRotFrame = -1000;
+            const bool aNow = (GetAsyncKeyState('A') & 0x8000) != 0;
+            const bool dNow = (GetAsyncKeyState('D') & 0x8000) != 0;
+            const bool aEdge = aNow && !s_aWas;
+            const bool dEdge = dNow && !s_dWas;
+            s_aWas = aNow;
+            s_dWas = dNow;
+            const bool ccw = ImGui::IsKeyPressed(ImGuiKey_A, false) || aEdge;
+            const bool cw  = ImGui::IsKeyPressed(ImGuiKey_D, false) || dEdge;
             if (ccw == cw) return;   // neither, or both in the same frame
+            if (ImGui::GetFrameCount() - s_lastRotFrame < 2) return;
+            s_lastRotFrame = ImGui::GetFrameCount();
             const auto def = Grid::ResolveDef(held.obj);
             if (!CanRotate(def)) return;   // square footprint: nothing would move
             held.rotPrev = held.rot;
@@ -3892,6 +3965,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // (col < 0, empty bag) is also true of a tile the
                             // user is merely carrying.
                             g_freshTiles.push_back(key);
+                            g_arrivedTiles.push_back(key);   // (1.3.2)
                         }
                     }
                     if (a_mutate && g_poolTrace) {
@@ -4910,6 +4984,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // hand choosing a cell — routing must not override
                         // that, so it never counts as fresh.
                         if (!viaHint) g_freshTiles.push_back(ns.key);
+                        g_arrivedTiles.push_back(ns.key);   // (1.3.2) hint or not
                         slots.push_back(std::move(ns));
                         diff -= cnt;
                     }
@@ -5163,6 +5238,47 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return moved;
         }
 
+        // ★(1.3.0-D) a bag that just walked back in claims its bundled
+        // contents: fresh tiles matching the manifest move INTO the bag.
+        // Runs BEFORE the typed-bag claim so the bundle outranks filters.
+        // A stack that merged into a pre-existing loose tile minted no
+        // fresh tile and stays on the main board -- lossless, just not
+        // re-bagged (the typed claim may still route it later).
+        void ClaimIncomingBundles()
+        {
+            if (g_arrivedTiles.empty()) return;
+            for (const auto& bagKey : g_arrivedTiles) {
+                auto bt = std::find_if(g_items.begin(), g_items.end(),
+                    [&](const Item& t) { return t.key == bagKey; });
+                if (bt == g_items.end() || !bt->obj || bt->def.bag == 0) continue;
+                const auto manifest =
+                    LootBarter::TakeIncomingBundle(bt->obj->GetFormID());
+                if (manifest.empty()) continue;
+                for (const auto& b : manifest) {
+                    int remaining = b.count;
+                    // two passes: the matching sub-stack first, then any unit
+                    for (int pass = 0; pass < 2 && remaining > 0; ++pass) {
+                        for (const auto& key : g_arrivedTiles) {
+                            if (remaining <= 0) break;
+                            if (key == bagKey) continue;
+                            auto it = std::find_if(g_items.begin(), g_items.end(),
+                                [&](const Item& t) { return t.key == key; });
+                            if (it == g_items.end() || !it->obj) continue;
+                            if (it->obj->GetFormID() != b.form) continue;
+                            if (!it->inBag.empty() || it->def.bag != 0) continue;
+                            if (pass == 0 && it->sig != b.sig) continue;
+                            it->inBag = bagKey;
+                            g_layout[it->key].bag = bagKey;
+                            remaining -= it->count;
+                            SKSE::log::info("[BAGCLAIM] bundle: '{}' x{} -> '{}'",
+                                it->obj->GetName() ? it->obj->GetName() : "?",
+                                it->count, bagKey);
+                        }
+                    }
+                }
+            }
+        }
+
         void ClaimIntoTypedBags(const std::vector<BagSlot>& a_slots)
         {
             std::vector<const BagSlot*> typed;
@@ -5256,6 +5372,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the existing per-view pass below is what actually seats the tile
             // — including bouncing it back to main when the bag is full, which
             // is exactly decision 1 and needs no code of its own.
+            ClaimIncomingBundles();   // (1.3.0-D) the bundle outranks the filter
             ClaimIntoTypedBags(slots);
             // re-derive "which typed bags are full" from THIS pass's placement;
             // the stackable fill loop read the previous pass's answer earlier
@@ -5602,8 +5719,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
             // ★Now that the pouch tiles are known, hand over any gold that
             // was waiting without one -- a pre-1.3.0 save, or a pouch that
-            // has just walked back into the inventory.
-            GoldCoins::ClaimReturned(PouchTiles());
+            // has just walked back into the inventory. (1.3.0: the helper
+            // splits fresh tiles from known ones so the returner claims.)
+            ClaimIncomingPouchGold();
             SKSE::log::info("[GRID] rebuilt: {} items, {} views, gold {}",
                 g_items.size(), g_views.size(), g_gold);
             // ★DIAG: a tile with no column, or parked in the overflow zone, is
@@ -5631,6 +5749,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // typed bags: "arrived this pass" is per-rebuild state and must not
         // survive into the next one, or a tile keeps being re-routed forever
         g_freshTiles.clear();
+        g_arrivedTiles.clear();   // (1.3.2) same lifetime: one rebuild
         // ★g_typedBagFull is deliberately NOT cleared here. The fill loop reads
         // it EARLY in this rebuild and the bag placement writes it LATE, so
         // clearing at the top would guarantee the fill loop never sees a full
@@ -6089,6 +6208,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         NoteVacated(a_key, a_obj);   // GI28: flash the cell we aimed at
         const RE::FormID fid = a_obj->GetFormID();
         if (GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid)) return;   // coins: own system
+        // ★(1.3.0-C) every UI exit path (store / sell / pick-store / trash)
+        // funnels through here WITH its tile key -- name the leaving pouch
+        // for the container sink, whose event only carries the form.
+        if (GoldCoins::IsPouch(fid) && !a_key.empty()) GoldCoins::NotePouchLeaving(a_key);
         g_pendingRemoveForm[fid] += a_count;
         g_pendingRemoveWhen[fid] = std::chrono::steady_clock::now();   // B3
         if (!a_key.empty()) g_pendingRemovePool[PoolOfKey(a_key)] += a_count;   // GI22
@@ -6534,7 +6657,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
     void MarkCapacityDirty() { g_capacityDirty = true; }
 
-    void ClaimIncomingPouchGold() { GoldCoins::ClaimReturned(PouchTiles()); }
+    namespace
+    {
+        // ★(1.3.0) pouch tiles this board has already answered for. A tile
+        // absent from here on the next claim pass was born THIS rebuild --
+        // i.e. the pouch that just walked in, which is who returning gold
+        // belongs to. Cleared on load (keys from another save are lies).
+        std::set<std::string> g_knownPouchTiles;
+    }
+
+    void ClaimIncomingPouchGold()
+    {
+        const auto tiles = PouchTiles();
+        std::vector<std::string> fresh, known;
+        for (const auto& k : tiles) {
+            (g_knownPouchTiles.contains(k) ? known : fresh).push_back(k);
+        }
+        GoldCoins::ClaimReturned(fresh, known);
+        g_knownPouchTiles.clear();
+        g_knownPouchTiles.insert(tiles.begin(), tiles.end());
+    }
 
     namespace
     {
@@ -8207,6 +8349,344 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         ImGui::End();
     }
 
+    // ---- (1.3.1) soul-gem recharge (hover + T) ----------------------------
+    namespace
+    {
+        struct RechargeUI
+        {
+            bool          open = false;
+            RE::FormID    obj = 0;    // the enchanted weapon's form
+            std::uint16_t uid = 0;
+            std::uint16_t sig = 0;
+            bool          worn = false;
+            int           hand = 0;   // 1 = right (ExtraWorn), 2 = left
+        };
+        RechargeUI g_rechargeUI;
+
+        // a clicked row, applied on the Tick (engine mutations off the render
+        // pass, same rule as every other transfer)
+        struct RechargePick
+        {
+            bool           want = false;
+            RE::FormID     gem = 0;
+            RE::SOUL_LEVEL soul = RE::SOUL_LEVEL::kNone;
+            bool           fromBase = false;   // prefilled form, no ExtraSoul
+        };
+        RechargePick g_rechargePick;
+
+        // charge points one soul restores -- the engine's own GMSTs, vanilla
+        // table as fallback when a setting is missing
+        [[nodiscard]] int SoulChargePoints(RE::SOUL_LEVEL a_lv)
+        {
+            static const char* kNames[5] = {
+                "iSoulLevelValuePetty", "iSoulLevelValueLesser",
+                "iSoulLevelValueCommon", "iSoulLevelValueGreater",
+                "iSoulLevelValueGrand"
+            };
+            static constexpr int kFallback[5] = { 250, 500, 1000, 2000, 3000 };
+            const int i = static_cast<int>(a_lv) - 1;
+            if (i < 0 || i > 4) return 0;
+            if (auto* gs = RE::GameSettingCollection::GetSingleton()) {
+                if (auto* s = gs->GetSetting(kNames[i]); s && s->GetSInt() > 0) {
+                    return s->GetSInt();
+                }
+            }
+            return kFallback[i];
+        }
+
+        // the unit's current / max charge. false = not a chargeable unit.
+        // ★Worn charge lives in the HAND's actor value while equipped (the
+        // engine drains it there and writes ExtraCharge back on unequip), so
+        // a worn unit is read from the AV, never from the list.
+        bool UnitCharge(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl,
+                        bool a_worn, int a_hand, float& a_cur, float& a_max)
+        {
+            auto* enchBase = a_obj ? a_obj->As<RE::TESEnchantableForm>() : nullptr;
+            const RE::ExtraEnchantment* xEnch =
+                a_xl ? a_xl->GetByType<RE::ExtraEnchantment>() : nullptr;
+            if (xEnch && xEnch->enchantment && xEnch->charge != 0) {
+                a_max = static_cast<float>(xEnch->charge);
+            } else if (enchBase && enchBase->formEnchanting &&
+                       enchBase->amountofEnchantment != 0) {
+                a_max = static_cast<float>(enchBase->amountofEnchantment);
+            } else {
+                return false;   // not enchanted (or a cost-free enchant)
+            }
+            if (a_worn) {
+                auto* p = RE::PlayerCharacter::GetSingleton();
+                if (!p) return false;
+                a_cur = p->AsActorValueOwner()->GetActorValue(
+                    a_hand == 2 ? RE::ActorValue::kLeftItemCharge
+                                : RE::ActorValue::kRightItemCharge);
+            } else if (const auto* xc =
+                           a_xl ? a_xl->GetByType<RE::ExtraCharge>() : nullptr) {
+                a_cur = xc->charge;
+            } else {
+                a_cur = a_max;   // no ExtraCharge = never fired = full
+            }
+            return true;
+        }
+
+        // the target unit's list, resolved FRESH (never cached across frames)
+        [[nodiscard]] RE::ExtraDataList* RechargeUnitList(RE::PlayerCharacter* a_p,
+                                                          RE::TESBoundObject* a_obj)
+        {
+            auto* entry = LiveEntry(a_p, a_obj);
+            if (!entry) return nullptr;
+            if (g_rechargeUI.worn) {
+                return WornExtraMatching(entry, g_rechargeUI.uid, g_rechargeUI.sig,
+                                         g_rechargeUI.hand);
+            }
+            return ExtraForPoolImpl(entry, g_rechargeUI.uid, g_rechargeUI.sig);
+        }
+
+        struct GemRow
+        {
+            RE::TESBoundObject* obj = nullptr;
+            RE::SOUL_LEVEL      soul = RE::SOUL_LEVEL::kNone;
+            int                 count = 0;
+            bool                fromBase = false;
+        };
+
+        [[nodiscard]] std::vector<GemRow> CollectFilledGems()
+        {
+            std::vector<GemRow> out;
+            auto* p = RE::PlayerCharacter::GetSingleton();
+            if (!p) return out;
+            auto inv = p->GetInventory([](RE::TESBoundObject& a_o) {
+                return a_o.Is(RE::FormType::SoulGem);
+            });
+            for (auto& [obj, data] : inv) {
+                const int total = data.first;
+                if (total <= 0) continue;
+                auto* gem = obj->As<RE::TESSoulGem>();
+                if (!gem) continue;
+                int listed = 0;
+                if (auto* entry = data.second.get(); entry && entry->extraLists) {
+                    for (auto* xl : *entry->extraLists) {
+                        if (!xl) continue;
+                        const int n = (std::max)(1, static_cast<int>(xl->GetCount()));
+                        listed += n;
+                        const auto lv = xl->GetSoulLevel();
+                        if (lv == RE::SOUL_LEVEL::kNone) continue;
+                        const auto it = std::find_if(out.begin(), out.end(),
+                            [&](const GemRow& r) {
+                                return r.obj == obj && r.soul == lv && !r.fromBase;
+                            });
+                        if (it != out.end()) it->count += n;
+                        else out.push_back({ obj, lv, n, false });
+                    }
+                }
+                // prefilled forms (soul on the record, no list)
+                const int plain = total - listed;
+                if (plain > 0 && gem->GetContainedSoul() != RE::SOUL_LEVEL::kNone) {
+                    out.push_back({ obj, gem->GetContainedSoul(), plain, true });
+                }
+            }
+            // smallest soul first -- the thrifty pick sits on top
+            std::sort(out.begin(), out.end(), [](const GemRow& a_x, const GemRow& a_y) {
+                return a_x.soul < a_y.soul;
+            });
+            return out;
+        }
+    }
+
+    void OpenRecharge(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                      std::uint16_t a_sig, bool a_worn, int a_hand)
+    {
+        auto* p = RE::PlayerCharacter::GetSingleton();
+        // vanilla scope: enchanted WEAPONS carry a charge; armor does not
+        if (!p || !a_obj || !a_obj->Is(RE::FormType::Weapon)) return;
+        g_rechargeUI = { false, a_obj->GetFormID(), a_uid, a_sig, a_worn, a_hand };
+        auto* xl = RechargeUnitList(p, a_obj);
+        float cur = 0.0f, max = 0.0f;
+        if (!UnitCharge(a_obj, xl, a_worn, a_hand, cur, max)) return;   // not enchanted: T is silent
+        if (max - cur < 0.5f) {
+            Sfx::FailNote(Lang::T(Lang::Str::RechargeFull));
+            return;
+        }
+        g_rechargeUI.open = true;
+        g_rechargePick = {};
+        Sfx::SelectOn();
+    }
+
+    bool IsRechargeOpen() { return g_rechargeUI.open; }
+
+    bool CloseRecharge()
+    {
+        if (!g_rechargeUI.open) return false;
+        g_rechargeUI.open = false;
+        return true;
+    }
+
+    void DrawRechargeWindow()
+    {
+        if (!g_rechargeUI.open) return;
+        auto* p = RE::PlayerCharacter::GetSingleton();
+        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(g_rechargeUI.obj);
+        if (!p || !obj) { g_rechargeUI.open = false; return; }
+        auto* xl = RechargeUnitList(p, obj);
+        float cur = 0.0f, max = 0.0f;
+        if (!UnitCharge(obj, xl, g_rechargeUI.worn, g_rechargeUI.hand, cur, max)) {
+            g_rechargeUI.open = false;   // the unit left (sold, dropped)
+            return;
+        }
+        const auto rows = CollectFilledGems();
+
+        auto* wm = WinManager::GetSingleton();
+        const auto& sk = Theme::S();
+        const float S = Theme::Scale();
+        const ImVec2 disp = ImGui::GetIO().DisplaySize;
+        const float insX = Theme::FrameInsetX();
+        const float insY = Theme::FrameInsetY();
+        const float barH = 34.0f * S;
+        const float rowW = 280.0f * S;
+
+        char line[64];
+        std::snprintf(line, sizeof(line), "%s: %s / %s",
+            Lang::T(Lang::Str::ChargeLabel),
+            Commas(static_cast<int>(cur + 0.5f)).c_str(),
+            Commas(static_cast<int>(max + 0.5f)).c_str());
+
+        const float lineH = ImGui::GetTextLineHeightWithSpacing();
+        const float sp = ImGui::GetStyle().ItemSpacing.y;
+        const float topPad = Theme::TitleTopPad();
+        const int   nRows = rows.empty() ? 1 : static_cast<int>(rows.size());
+        const ImVec2 size(
+            rowW + 30.0f * S + 2.0f * insX,
+            barH + 8.0f * S + lineH + sp +
+                nRows * (ImGui::GetFrameHeight() + sp) + 18.0f * S + 2.0f * insY);
+        wm->ApplyNext("recharge",
+            ImVec2((disp.x - size.x) * 0.5f, (disp.y - size.y) * 0.5f), size,
+            WinManager::Anchor::kTopLeft, topPad);
+        ImGui::Begin("##grid_recharge", nullptr, kManagedWinFlags);
+        UIRoot::NoteOverlayRect();
+        wm->TitleBar("recharge",
+            obj->GetName() && *obj->GetName() ? obj->GetName() : "?", 0.0f, true);
+
+        if (!ImGui::IsWindowAppearing() &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsWindowHovered()) {
+            g_rechargeUI.open = false;
+            Sfx::SelectOff();
+        }
+
+        auto center = [](float a_w) {
+            const float w = ImGui::GetWindowSize().x;
+            ImGui::SetCursorPosX((std::max)(0.0f, (w - a_w) * 0.5f));
+        };
+
+        center(ImGui::CalcTextSize(line).x);
+        ImGui::TextColored(sk.ink, "%s", line);
+
+        if (rows.empty()) {
+            const char* none = Lang::T(Lang::Str::RechargeNoGems);
+            center(ImGui::CalcTextSize(none).x);
+            ImGui::TextColored(sk.inkDim, "%s", none);
+        }
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            const auto& r = rows[i];
+            const int pts = SoulChargePoints(r.soul);
+            char label[128];
+            std::snprintf(label, sizeof(label), "%s x%d   +%s##rc%zu",
+                r.obj->GetName() ? r.obj->GetName() : "?", r.count,
+                Commas(pts).c_str(), i);
+            center(rowW);
+            if (Sfx::Button(label, ImVec2(rowW, 0))) {
+                g_rechargePick = { true, r.obj->GetFormID(), r.soul, r.fromBase };
+                g_rechargeUI.open = false;   // identity fields stay for the apply
+            }
+        }
+        ImGui::End();
+    }
+
+    void ProcessRecharge()
+    {
+        if (!g_rechargePick.want) return;
+        const auto pick = g_rechargePick;
+        g_rechargePick = {};
+        auto* p = RE::PlayerCharacter::GetSingleton();
+        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(g_rechargeUI.obj);
+        auto* gemObj = RE::TESForm::LookupByID<RE::TESBoundObject>(pick.gem);
+        if (!p || !obj || !gemObj) return;
+
+        auto* xl = RechargeUnitList(p, obj);
+        float cur = 0.0f, max = 0.0f;
+        if (!UnitCharge(obj, xl, g_rechargeUI.worn, g_rechargeUI.hand, cur, max)) {
+            return;
+        }
+        float amount = static_cast<float>(SoulChargePoints(pick.soul));
+        // Soul Squeezer et al. -- the engine's own perk entry point (add ops)
+        RE::BGSEntryPoint::HandleEntryPoint(
+            RE::BGSEntryPoint::ENTRY_POINT::kModSoulGemRecharge, p, gemObj, &amount);
+        const float next = (std::min)(max, cur + amount);
+        if (next - cur < 0.5f) {
+            Sfx::FailNote(Lang::T(Lang::Str::RechargeFull));
+            return;
+        }
+
+        // write BOTH homes: the list (survives unequip / the unworn case) and,
+        // for a worn unit, the hand's AV -- the drain while equipped is DAMAGE
+        // on that AV, so restoring the damage is the exact inverse (caps at
+        // the base value = full charge).
+        if (auto* xc = xl ? xl->GetByType<RE::ExtraCharge>() : nullptr) {
+            xc->charge = next;
+        }
+        if (g_rechargeUI.worn) {
+            p->AsActorValueOwner()->RestoreActorValue(
+                RE::ACTOR_VALUE_MODIFIER::kDamage,
+                g_rechargeUI.hand == 2 ? RE::ActorValue::kLeftItemCharge
+                                       : RE::ActorValue::kRightItemCharge,
+                next - cur);
+        }
+
+        // consume the gem: reusable (Azura's Star) empties, the rest shatter
+        // (vanilla behaviour -- no empty gem comes back)
+        const auto* kwf = gemObj->As<RE::BGSKeywordForm>();
+        const bool reusable = kwf && kwf->HasKeywordString("ReusableSoulGem");
+        auto ginv = p->GetInventory([&](RE::TESBoundObject& a_o) {
+            return &a_o == gemObj;
+        });
+        RE::InventoryEntryData* gentry = nullptr;
+        for (auto& [o2, d2] : ginv) {
+            gentry = d2.second.get();
+            break;
+        }
+        RE::ExtraDataList* gxl = nullptr;
+        if (!pick.fromBase && gentry && gentry->extraLists) {
+            for (auto* x : *gentry->extraLists) {
+                if (x && x->GetSoulLevel() == pick.soul) { gxl = x; break; }
+            }
+        }
+        if (reusable) {
+            if (gxl) {
+                if (auto* xs = gxl->GetByType<RE::ExtraSoul>()) {
+                    xs->soul = RE::SOUL_LEVEL::kNone;   // emptied, gem kept
+                }
+            } else if (auto* sg = gemObj->As<RE::TESSoulGem>();
+                       sg && sg->linkedSoulGem) {
+                // prefilled reusable (modded): swap to its linked empty form
+                p->RemoveItem(gemObj, 1, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+                p->AddObjectToContainer(sg->linkedSoulGem, nullptr, 1, nullptr);
+            }
+        } else {
+            p->RemoveItem(gemObj, 1, RE::ITEM_REMOVE_REASON::kRemove, gxl, nullptr);
+        }
+
+        // ★XP: vanilla grants Enchanting XP by SOUL SIZE, regardless of the
+        // charge actually restored (UESP). The exact multiplier is not
+        // documented anywhere reachable -- 5% of the soul's charge points
+        // (petty 12.5 .. grand 150) sits in the "small-to-moderate" band the
+        // wiki describes. Approximation; tune on feedback.
+        p->AddSkillExperience(RE::ActorValue::kEnchanting,
+            static_cast<float>(SoulChargePoints(pick.soul)) * 0.05f);
+        p->PlayPickUpSound(gemObj, false, false);
+        SKSE::log::info("[RECHARGE] '{}' {:.0f} -> {:.0f} (+{:.0f}, soul {})",
+            obj->GetName() ? obj->GetName() : "?", cur, next, next - cur,
+            static_cast<int>(pick.soul));
+        RequestRebuild();
+        MarkCapacityDirty();
+    }
+
     void DrawBagWindows()
     {
         auto* wm = WinManager::GetSingleton();
@@ -8397,8 +8877,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const ImVec2 a(io.MousePos.x - a_held.offX, io.MousePos.y - a_held.offY);
             RE::TESBoundObject* heldIconObj = a_held.obj;
             if (GoldCoins::IsPouch(a_held.obj->GetFormID())) {
-                if (auto* v = GoldCoins::PouchIconObjectFor(
-                        GoldCoins::PouchStoredOf(a_held.key))) heldIconObj = v;
+                // ★(1.3.0) a pouch lifted OFF THE SHELF keeps its amount on
+                // its reserved container slot, not in g_pouchStored -- asking
+                // only the player table drew the empty band for the whole
+                // carry (and the right icon snapped back on the drop).
+                const int shelf = LootBarter::HeldShelfGold();
+                const int amount =
+                    shelf >= 0 ? shelf : GoldCoins::PouchStoredOf(a_held.key);
+                if (auto* v = GoldCoins::PouchIconObjectFor(amount)) heldIconObj = v;
             }
             auto* hc = IconCache::GetSingleton();
             const IconCache::Icon* heldIcon = hc->Get(heldIconObj);
@@ -8549,9 +9035,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 LootBarter::IsLootMode(LootBarter::CurrentMode())) {
                 const auto sd = LootBarter::QueryStoreDrop();
                 if (sd.onCell && sd.freeSpot) {
+                    // ★(1.3.1) a carry lifted OUT OF A SHELF BAG surfaces
+                    // here: the engine item never moved, so releasing it from
+                    // the bundle is what makes its cell appear -- and the
+                    // pending spot below is what catches that cell at the
+                    // drop cell. A plain partner carry passes through false.
+                    LootBarter::ConsumeBundleCarry(a_held.obj, a_held.count);
                     LootBarter::NoteStoreSpot(a_held.obj, sd.col, sd.row, HeldInstanceSig(), a_held.rot);
                     if (g_sound) g_sound(a_held.obj, false);
                     g_held.reset();
+                } else if (sd.onCell && sd.occ && LootBarter::IsBundleCarry()) {
+                    // (1.3.1) no swap with a bundled carry -- the occupant's
+                    // slot machinery has nothing to hand it. Keep carrying.
                 } else if (sd.onCell && sd.occ) {
                     // swap: the held item takes the occupant's anchor, the
                     // occupant rides the cursor in its place
@@ -8657,10 +9152,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     }
                     // ★The pool the ARRIVING unit belongs to, so a signed tile
                     // cannot have its cell taken by a plain one landing in the
-                    // same rebuild. A carry with no signature leaves it empty
-                    // and the hint stays form-wide, as it always was.
-                    g_dropHint = { hintBase,
-                                   PoolPrefix(hintBase, a_held.uid, a_held.sig),
+                    // same rebuild. A carry with no signature arms FORM-WIDE
+                    // (empty pool) -- PoolPrefix(base,0,0) returns the base,
+                    // which is NOT form-wide under Wants(), and that mismatch
+                    // is why the fix below exists.
+                    // ★(1.3.1) STEAL / PICKPOCKET DRIFT THE SIGNATURE: the
+                    // engine's kSteal removal attaches the stolen-ownership
+                    // extra IN TRANSIT, so the unit that was plain (or sig S)
+                    // in the chest arrives as `base~S'` -- a pool the hint
+                    // never named. Every steal/pickpocket drag therefore
+                    // first-fit into the front gap. Those modes arm form-wide;
+                    // one item rides the cursor at a time, so the guard the
+                    // pool bought (two same-form arrivals in one rebuild)
+                    // cannot trigger here anyway.
+                    const bool sigDrifts =
+                        LootBarter::CurrentMode() == LootBarter::Mode::kSteal ||
+                        LootBarter::CurrentMode() == LootBarter::Mode::kPickpocket;
+                    const std::string hintPool =
+                        (!sigDrifts && (a_held.uid != 0 || a_held.sig != 0))
+                            ? PoolPrefix(hintBase, a_held.uid, a_held.sig)
+                            : std::string{};
+                    g_dropHint = { hintBase, hintPool,
                                    g_target.col, g_target.row, v.bagKey, a_held.rot };
                     if (swapDisp) {
                         // free the displaced tile's spot for the incoming item
@@ -8846,6 +9358,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         bool StackFragStore(Held& a_held)
         {
+            if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count)) {
+                Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));   // (1.3.3)
+                return true;   // the fragment keeps riding the cursor
+            }
             LootBarter::RequestStore(a_held.obj, a_held.count,
                                      HeldUidOf(a_held.key, a_held.uid), a_held.sig,
                                      a_held.fav);   // (3) store
@@ -9148,8 +9664,29 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // stored right there; occupied cell = swap (the stored item
             // takes the occupant's spot, the occupant jumps to the cursor).
             const RE::FormID fid = a_held.obj->GetFormID();
+            // ★(1.3.2a) a whole COIN TILE dropped on a shelf POUCH cell
+            // deposits into its slot (the pinned fragment's grammar, see
+            // GoldOnPartnerPouch); anywhere else coins keep their old cancel
+            if (a_held.coinValue > 0 &&
+                GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid)) {
+                const int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
+                if (moved > 0) {
+                    if (GoldCoins::PinnedValue(a_held.key) >= 0) {
+                        GoldCoins::UnpinTile(a_held.key);
+                    }
+                    g_layout.erase(a_held.key);
+                    GoldCoins::DebitLedger(moved);
+                    if (g_sound) g_sound(a_held.obj, false);
+                    g_held.reset();
+                    g_needRebuild = true;
+                    return true;
+                }
+            }
             if (g_questItem.contains(HeldPoolKey(a_held))) {   // Phase 7: can't store
                 Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
+            } else if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count)) {
+                // (1.3.3) a follower's pack is 10 x 8 -- keep carrying
+                Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
             } else if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
                 const auto sd = LootBarter::QueryStoreDrop();   // F7 (dead outside kLoot/kSteal)
                 if (a_held.count > 1) {
@@ -9168,11 +9705,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                              HeldUidOf(a_held.key, a_held.uid), a_held.sig,
                                              a_held.fav);
                     NotePendingRemove(a_held.obj, a_held.key, a_held.count);
-                    if (a_held.isBag) {   // bag contents reflow to main (E4)
+                    if (a_held.isBag) {
+                        // (1.3.0-D) contents FOLLOW the bag into the chest
+                        // (the old E4 reflow spilled them onto the main
+                        // board). A tile whose store is refused re-seats via
+                        // the rebuild's "bag truly gone" reflow, so nothing
+                        // can point at a bag that left without it.
+                        StoreBagContents(a_held.key, a_held.obj);
                         g_openBags.erase(a_held.key);
-                        for (auto& [k, le] : g_layout) {
-                            if (le.bag == a_held.key) le.bag.clear();
-                        }
                     }
                     if (sd.onCell) {
                         // `sd.occ != a_held.obj` was a FORM comparison: storing a
@@ -9521,6 +10061,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return true;   // note played; the pin keeps riding the cursor
         }
 
+        // ★(1.3.2a) gold dropped on a shelf POUCH cell deposits into its
+        // slot -- the player pouch's deposit grammar on the container side.
+        // The pin's value re-enters walking first (unpin), the ledger then
+        // pays the banked amount; any excess over the pouch cap stays as
+        // walking gold. False = not over a pouch (the next route decides).
+        bool GoldOnPartnerPouch(Held& a_held)
+        {
+            if (a_held.coinValue <= 0) return false;
+            const int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
+            if (moved <= 0) return false;
+            if (GoldCoins::PinnedValue(a_held.key) >= 0) {
+                GoldCoins::UnpinTile(a_held.key);
+            }
+            g_layout.erase(a_held.key);
+            GoldCoins::DebitLedger(moved);
+            if (g_sound) g_sound(a_held.obj, false);
+            g_held.reset();
+            g_needRebuild = true;
+            return true;
+        }
+
         struct DropRoute
         {
             DropWhere where;
@@ -9536,6 +10097,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             { DropWhere::kTrashArea, GoldFragTrashBlock },   // F2: gold never parks
             { DropWhere::kEmptyCell, GoldFragOnEmptyCell },
             { DropWhere::kBlockerSingle, GoldFragOnBlocker },
+            { DropWhere::kPartnerLoot, GoldOnPartnerPouch },   // (1.3.2a) deposit
             { DropWhere::kVoid, GoldFragToVoid },
         };
         constexpr DropRoute kStackFragRoutes[] = {
@@ -9802,6 +10364,83 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         MarkCapacityDirty();
     }
 
+    // ---- (1.3.1) shelf-bag intake --------------------------------------
+    RE::TESBoundObject* HeldShelfStorable()
+    {
+        if (!g_held || g_held->fromPartner || !g_held->obj) return nullptr;
+        if (g_held->isBag) return nullptr;            // no bag inside a bag
+        if (g_held->coinValue >= 0) return nullptr;   // coin tiles mirror the ledger
+        const RE::FormID fid = g_held->obj->GetFormID();
+        if (GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid)) return nullptr;
+        if (g_questItem.contains(PoolOfKey(g_held->key))) return nullptr;   // Phase 7
+        return g_held->obj;
+    }
+
+    bool CommitHeldToShelfBag(RE::FormID& a_form, int& a_count,
+                              std::uint16_t& a_sig, int& a_rot,
+                              std::uint8_t& a_glow, bool& a_stolen)
+    {
+        auto* obj = HeldShelfStorable();
+        if (!obj) return false;
+        a_stolen = IsStolenPool(g_held->key);
+        a_form = obj->GetFormID();
+        a_count = g_held->count;
+        a_sig = g_held->sig;
+        a_rot = g_held->rot & 3;
+        // ★(1.3.2) the markers this unit carries, read from its live entry
+        // ONCE here (a commit is a click, not a frame) -- the bundle records
+        // them so the bag window can draw them without an inventory walk.
+        {
+            auto* p = RE::PlayerCharacter::GetSingleton();
+            auto* entry = LiveEntry(p, obj);
+            auto* xl = ExtraForPoolImpl(entry, g_held->uid, g_held->sig);
+            a_glow = GlowBits(obj, entry, xl);
+        }
+        LootBarter::RequestStore(obj, g_held->count,
+            HeldUidOf(g_held->key, g_held->uid), g_held->sig, g_held->fav);
+        NotePendingRemove(obj, g_held->key, g_held->count);
+        if (g_sound) g_sound(obj, false);
+        g_held.reset();
+        g_needRebuild = true;
+        return true;
+    }
+
+    int HeldRot() { return g_held ? (g_held->rot & 3) : 0; }
+
+    // ★(1.3.2a) the withdrawn shelf-pouch amount rides the cursor as a
+    // pinned purse, exactly like the player pouch's withdraw; the excess
+    // over one purse stays as walking gold. The ledger credit is already
+    // queued (WalkingGold reflects it this same frame), so the pin's
+    // subtraction balances.
+    void CarryWithdrawnGold(int a_value)
+    {
+        if (a_value <= 0) return;
+        const int carry = (std::min)(a_value, GoldCoins::kCoinCap);
+        if (auto* cform = GoldCoins::CoinForTier(GoldCoins::BandTier(carry))) {
+            PickupPartial(cform, carry, {}, 0);
+        }
+    }
+
+    bool PeekHeldForShelf(RE::TESBoundObject*& a_obj, int& a_count,
+                          std::uint16_t& a_sig, int& a_rot, bool& a_fromPartner)
+    {
+        if (!g_held || !g_held->obj) return false;
+        a_obj = g_held->obj;
+        a_count = g_held->count;
+        a_sig = g_held->sig;
+        a_rot = g_held->rot & 3;
+        a_fromPartner = g_held->fromPartner;
+        return true;
+    }
+
+    void DropHeldForShelf()
+    {
+        if (!g_held) return;
+        if (g_sound) g_sound(g_held->obj, false);
+        g_held.reset();
+        g_needRebuild = true;
+    }
+
     // ---- cosave persistence ('GLAY' v5) ----
     // v5 == v2 layout (v3/v4 experiments retired; v4's trailing fav byte is
     // read-and-discarded on load).
@@ -10021,6 +10660,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_pouchOpen = false;
         g_pouchSlider = 0;
         g_pouchTile.clear();
+        g_knownPouchTiles.clear();   // (1.3.0) tile keys from another save are lies
         g_overloaded = false;
         g_spaceUsed = 0;
         g_spaceTotal = kCols * kMinRows;

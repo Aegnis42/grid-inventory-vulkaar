@@ -678,6 +678,12 @@ namespace FUI::Equip
                                           Grid::ExtraScope::kWorn,
                                           eq->uid, -1, eq->sig, eq->hand,
                                           Grid::TileContext{ {}, false, false, false, true });
+                    // (1.3.1) T = recharge the WORN unit -- while equipped the
+                    // charge lives in this hand's AV, and OpenRecharge knows.
+                    if (ImGui::IsKeyPressed(ImGuiKey_T, false) &&
+                        !ImGui::GetIO().WantTextInput) {
+                        Grid::OpenRecharge(eq->obj, eq->uid, eq->sig, true, eq->hand);
+                    }
                     // C: the same 3D view the grid offers. Vanilla files Item
                     // Zoom under the kItemMenu context, which every item screen
                     // shares -- turning a piece over is expected wherever an

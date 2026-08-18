@@ -99,6 +99,8 @@ namespace FUI::Lang
         X(StatSpace, "SPACE")                                                                               \
         X(Withdraw, "Withdraw")   /* G2 coin pouch */                                                       \
         X(StoredLabel, "Stored")                                                                            \
+        X(RechargeNoGems, "No filled soul gems")   /* (1.3.1) hover+T recharge */                           \
+        X(RechargeFull, "Already fully charged")                                                            \
         X(Teaches, "Teaches")   /* tooltip extras (I1+) */                                                  \
         X(Known, "known")                                                                                   \
         X(PoisonLabel, "Poison")                                                                            \

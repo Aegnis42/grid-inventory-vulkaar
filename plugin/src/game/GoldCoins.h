@@ -96,13 +96,22 @@ namespace FUI::GoldCoins
     [[nodiscard]] RE::TESBoundObject* PouchIconObjectFor(int a_stored);
     // A pouch's gold with no tile to sit on yet: a save older than v6, or a
     // pouch that just walked back in. The grid calls this with the pouch
-    // tiles it found and the waiting amount moves onto the first with room.
-    void ClaimReturned(const std::vector<std::string>& a_pouchTiles);
+    // tiles it found, split into tiles born THIS rebuild (a_fresh -- the
+    // pouch that just walked in) and tiles that already existed (a_known).
+    // ★(1.3.0) Returning shelf gold belongs to the pouch that carried it:
+    // while the return grace holds, only a fresh tile may claim, so a
+    // pre-existing empty pouch cannot swallow it.
+    void ClaimReturned(const std::vector<std::string>& a_fresh,
+                       const std::vector<std::string>& a_known);
     // A pouch's gold while the pouch is on a shelf: the container spot takes
     // it on the way out and gives it back on the way in, so the amount rides
     // with the pouch instead of hiding in a player-wide variable.
     [[nodiscard]] int TakeAwayGold();
     void GiveAwayGold(int a_amount);
+    // ★(1.3.2a) shelf-pouch banking: plain ledger credit/debit (no pouch
+    // parking) -- the shelf spot is the book, these settle the engine gold.
+    void CreditLedger(int a_amount);
+    void DebitLedger(int a_amount);
     int  StoreToPouch(const std::string& a_tileKey, int a_value);   // amount actually stored
     int  StoreToPouch(int a_value);   // no pouch named -> the fullest with room
     void WithdrawFrom(const std::string& a_tileKey, int a_value, bool a_sound = true);
@@ -128,6 +137,12 @@ namespace FUI::GoldCoins
     // Both are called from the container sink; ledger ops run on Tick.
     void OnPouchLeftPlayer();
     void OnPouchReturned();
+    // ★(1.3.0-C) The UI names WHICH pouch tile is about to leave (store /
+    // sell / drop paths all know their tile; the engine event only knows the
+    // form). One-shot: consumed by the next OnPouchLeftPlayer, cleared on
+    // session end / load. Without it the FULLEST pouch paid for every
+    // departure, whichever pouch actually left.
+    void NotePouchLeaving(const std::string& a_tileKey);
 
     // How the player is meant to GET the pouch and the bags. The esp carries
     // no leveled-list or vendor-list edit, so nothing stocks them -- and

@@ -89,6 +89,75 @@ namespace FUI::LootBarter
                           bool a_fav = false);                                          // (reverse-pickpocket)
     void ProcessTransfers();   // UIRoot::Tick
 
+    // ★(1.3.0) the gold riding the CARRIED shelf slot, or -1 when the
+    // current carry did not come off a shelf. A pouch lifted inside the
+    // container keeps its amount on its (reserved) slot -- the cursor ghost
+    // asks here, since g_pouchStored only knows the player's own tiles.
+    [[nodiscard]] int HeldShelfGold();
+
+    // ---- (1.3.0-D) bag bundles --------------------------------------------
+    // A bag stored into a container takes its CONTENTS along. The shelf
+    // remembers them as one bundle on the bag's spot -- their cells are
+    // hidden (no opening a bag inside a chest, per spec), and taking the
+    // bag back brings them home. Selling stays the old spill.
+    struct BundleItem
+    {
+        RE::FormID    form = 0;
+        int           count = 0;
+        std::uint16_t sig = 0;   // preferred sub-stack on the trip back
+        // ★(1.3.1) anchor inside the OPEN shelf-bag window (cosave v5).
+        // -1 = unplaced (first-fit on the next open, then written back).
+        int           col = -1;
+        int           row = -1;
+        // ★(1.3.2) quarter-turns clockwise, the angle it was dropped at
+        // (cosave v6). Footprint w/h swap when odd.
+        int           rot = 0;
+        // ★(1.3.2) the marker bits this unit carried IN (cosave v7):
+        // bit1 enchanted, bit2 unique, bit4 poisoned -- the same word
+        // Item::glow and PartnerCell::glow hold. RECORDED rather than
+        // recomputed: nothing can change an item's state while it sits in a
+        // container, and asking the engine per entry per frame would put a
+        // GetInventory walk on the draw path. The FAVOURITE star is
+        // deliberately not among them -- see the store paths, which strip it
+        // as the unit leaves the player.
+        std::uint8_t  glow = 0;
+        // ★(1.3.2) someone else's goods (cosave v8). NOT derivable at draw
+        // time on this side: the player board keeps ownership per POOL in
+        // its own table, and a shelf cell only knows "the whole container is
+        // owned" (kSteal). A unit that was stolen when it went in stays
+        // stolen in the bag, and the mark has to say so.
+        bool          stolen = false;
+    };
+    // Grid calls this as it queues the contents' stores; the bundle waits
+    // (per container) for the bag's shelf spot to be born and rides it.
+    void NoteBagBundle(RE::FormID a_bagForm, std::vector<BundleItem> a_items);
+    // Grid's rebuild asks: the bundle whose bag just walked back in (a
+    // fresh bag tile of this form). One-shot -- empty when none waits.
+    [[nodiscard]] std::vector<BundleItem> TakeIncomingBundle(RE::FormID a_bagForm);
+    // ★(1.3.1) a stored bag can be OPENED (right-click, player-bag grammar):
+    // a real grid window over its bundle -- items draw at their anchors,
+    // lift onto the cursor, and player items drop in. Top level (UIRoot).
+    void DrawShelfBag();
+    // The active carry was lifted OUT of a shelf-bag bundle. Consuming it
+    // (the take home, or a drop on the container board) removes the carried
+    // units from the bundle -- which is what lets their engine item's cell
+    // surface. Returns false when no bundle carry is active / form differs.
+    [[nodiscard]] bool IsBundleCarry();
+    bool ConsumeBundleCarry(RE::TESBoundObject* a_obj, int a_count);
+    // ★(1.3.2a) the shelf POUCH banks like the player's: right-click opens
+    // its withdraw window (DrawShelfPouch, top level), and gold dropped on
+    // its cell deposits. DepositOnHoveredPouch banks into the hovered pouch
+    // cell's SLOT and returns the amount actually taken (0 = not over a
+    // pouch / no room); the caller settles the player-side ledger.
+    void DrawShelfPouch();
+    int  DepositOnHoveredPouch(int a_value);
+
+    // ★(1.3.3) A LIVING FOLLOWER'S PACK IS 10 x 8. Chests, corpses and
+    // merchants are unbounded and always answer true; a companion answers
+    // from THIS frame's placement (partial stacks count as room). Every
+    // player -> partner store asks before it queues.
+    [[nodiscard]] bool PartnerHasRoomFor(RE::TESBoundObject* a_obj, int a_count = 1);
+
     // Quantity slider (Shift+right-click on a stack). Opens a small popup to
     // pick how many to move; confirm queues the transfer.
     enum class XferDir { kTake, kStore, kPickup, kBuy, kSell,    // kPickup = split onto cursor

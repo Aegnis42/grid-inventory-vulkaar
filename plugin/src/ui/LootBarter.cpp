@@ -3,6 +3,7 @@
 #include "ui/Fallback.h"
 #include "ui/LootBarter.h"
 
+#include "game/BagFilter.h"
 #include "game/GoldCoins.h"
 #include "ui/Grid.h"
 #include "ui/IconCache.h"
@@ -191,6 +192,12 @@ namespace FUI::LootBarter
             // to hang per-instance data, so the shelf position is what
             // "this pouch" means here.
             int gold = 0;
+            // ★(1.3.0-D) a stored BAG's contents, riding its spot the same
+            // way the pouch's gold does. Their cells are hidden while the
+            // bundle holds them; the spot's death by TAKE sends them home,
+            // any other death simply spills them onto the shelf (the hiding
+            // is derived from live bundles, so dropping one un-hides).
+            std::vector<BundleItem> bundle;
         };
         struct ContLayout
         {
@@ -207,6 +214,77 @@ namespace FUI::LootBarter
         [[nodiscard]] int ShelfGoldOf(const std::string& a_spotKey);
         std::uint32_t                              g_contStamp = 0;
         constexpr size_t                           kContLayoutMax = 128;
+
+        // ---- (1.3.0-D) bundles in transit --------------------------------
+        // STORE side: contents queued alongside their bag, waiting for the
+        // bag's shelf spot to be born (the spot exists only after the engine
+        // transfer lands and the cell appears). Per container, so a bundle
+        // can never hide same-form items in some OTHER chest.
+        struct PendingBundle
+        {
+            RE::FormID              cont = 0;   // container ref this store aimed at
+            RE::FormID              bagForm = 0;
+            std::vector<BundleItem> items;
+        };
+        std::vector<PendingBundle> g_pendingBundles;
+        // TAKE side: a bundle whose bag is on its way to the player. The
+        // grid's rebuild claims it when the bag's fresh tile appears and
+        // routes the arrived contents back INTO the bag.
+        std::vector<PendingBundle> g_incomingBundles;
+
+        // ---- (1.3.1/1.3.2c) OPEN shelf bags -------------------------------
+        // One window per opened bag spot, ordered by open time (ESC closes
+        // the newest first) -- the player-bag grammar, where every open bag
+        // has its own window. The bag's form rides along for the title.
+        struct ShelfBagWin
+        {
+            std::string spot;
+            RE::FormID  form = 0;
+        };
+        std::vector<ShelfBagWin> g_shelfBags;
+
+        // (1.3.2a) the shelf POUCH withdraw window (one at a time, like the
+        // player's) -- spot + form + the slider's current pick
+        std::string g_shelfPouchSpot;
+        RE::FormID  g_shelfPouchForm = 0;
+        int         g_shelfPouchSlider = 0;
+
+        // a carry lifted out of that window. The engine item stays put (it is
+        // already in the container, hidden by the bundle) -- consuming the
+        // carry (take home / drop on the shelf) is what removes the entry and
+        // lets the cell surface. col/row pin the EXACT entry (two identical
+        // stacks are told apart only by their anchors).
+        struct BundleCarry
+        {
+            bool          active = false;
+            RE::FormID    cont = 0;
+            std::string   spot;
+            RE::FormID    form = 0;
+            std::uint16_t sig = 0;
+            int           col = -1;
+            int           row = -1;
+        };
+        BundleCarry g_bundleCarry;
+
+        // ★(1.3.2) the marker bits of the unit riding the cursor from the
+        // PARTNER side (a shelf cell, or a bundle entry). The carry itself
+        // has nowhere to keep them and the shelf cell's own record dies with
+        // the lift, so they are parked here until the drop seats them.
+        std::uint8_t g_carryGlow = 0;
+        bool         g_carryStolen = false;   // (1.3.2) its ownership, likewise
+
+        [[nodiscard]] std::vector<BundleItem> TakePendingBundle(RE::FormID a_bagForm)
+        {
+            auto* p = Partner();
+            const RE::FormID cont = p ? p->GetFormID() : 0;
+            for (auto it = g_pendingBundles.begin(); it != g_pendingBundles.end(); ++it) {
+                if (it->bagForm != a_bagForm || it->cont != cont) continue;
+                auto v = std::move(it->items);
+                g_pendingBundles.erase(it);
+                return v;
+            }
+            return {};
+        }
 
         // pending drop-cell spot for a STACK store (slider round-trip)
         struct StoreHint
@@ -248,15 +326,66 @@ namespace FUI::LootBarter
         // looting follow storage order instead of the cursor.
         std::string g_actingSpot;
 
-        void ConsumeActingSpot()
+        void ConsumeActingSpot(RE::TESBoundObject* a_obj)
         {
             if (g_actingSpot.empty()) return;
+            std::vector<BundleItem> bundle;
             if (auto* p = Partner()) {
                 if (const auto ci = g_contLayouts.find(p->GetFormID()); ci != g_contLayouts.end()) {
+                    // ★★(1.3.0-B) A TAKEN POUCH BRINGS ITS GOLD HOME. This erase
+                    // IS the take/buy path's slot retirement, and it is the only
+                    // place that knows exactly which slot leaves. The old hook
+                    // waited for the whole POOL to vanish from the board -- but
+                    // absent items KEEP their spot by design, so the common
+                    // single take never tripped it and the amount died with the
+                    // spot ("pouch returned but nothing was away"). Deposit
+                    // first, then retire.
+                    if (const auto si = ci->second.spots.find(g_actingSpot);
+                        si != ci->second.spots.end()) {
+                        if (si->second.gold > 0) {
+                            SKSE::log::info("[LOOT] pouch taken back with {} G ('{}')",
+                                si->second.gold, g_actingSpot);
+                            GoldCoins::GiveAwayGold(si->second.gold);
+                        }
+                        // ★(1.3.0-D) same retirement for a bag: its bundled
+                        // contents leave WITH it (queued below, once the spot
+                        // is gone and the acting key is cleared -- the takes
+                        // re-enter this function and must find it empty).
+                        bundle = std::move(si->second.bundle);
+                    }
                     ci->second.spots.erase(g_actingSpot);
                 }
             }
             g_actingSpot.clear();
+
+            if (!bundle.empty() && a_obj) {
+                // bundles only ever ride LOOT-container spots, where the
+                // partner ref IS the source the takes will pull from
+                if (auto* src = Partner()) {
+                    auto inv = src->GetInventory();
+                    for (const auto& b : bundle) {
+                        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(b.form);
+                        if (!obj) continue;
+                        int present = 0;
+                        if (const auto ei = inv.find(obj); ei != inv.end()) {
+                            present = ei->second.first;
+                        }
+                        // the chest may have respawned some of it away: take
+                        // what is actually there, silently drop the rest
+                        const int take = (std::min)(b.count, present);
+                        if (take <= 0) continue;
+                        RequestTake(obj, take, 0, b.sig, false);
+                    }
+                }
+                SKSE::log::info("[LOOT] bag taken back, {} bundled kind(s) follow",
+                    bundle.size());
+                g_incomingBundles.push_back({ 0, a_obj->GetFormID(), std::move(bundle) });
+                // a manifest whose bag never arrived (refused take) must not
+                // pile up and mis-claim some future bag of the same form
+                if (g_incomingBundles.size() > 8) {
+                    g_incomingBundles.erase(g_incomingBundles.begin());
+                }
+            }
         }
 
         // GI41: pickpocket boards keep their layout too.
@@ -288,6 +417,25 @@ namespace FUI::LootBarter
         bool SpotMemoryOn()
         {
             return IsLootMode(g_mode) || g_mode == Mode::kPickpocket;
+        }
+
+        // ★★(1.3.3) A FOLLOWER CARRIES 10 x 8, AND NO MORE. A chest is a
+        // hole in the world and may be bottomless; a companion is a person
+        // with a pack, and an unbounded one turns every follower into a
+        // second inventory with no cost. The board still GROWS past it when
+        // the follower already holds more (their own gear, a quest item, a
+        // gift from a script) -- nothing is ever hidden or dropped. The
+        // limit governs what the PLAYER may add, which is the only half the
+        // player controls.
+        constexpr int kCompanionRows = 8;
+
+        [[nodiscard]] bool CompanionPartner()
+        {
+            if (!IsLootMode(g_mode)) return false;
+            auto* p = Partner();
+            auto* a = p ? p->As<RE::Actor>() : nullptr;
+            // dead followers are corpses: loot them like any other container
+            return a && !a->IsDead() && a->IsPlayerTeammate();
         }
 
         // ---- F6b: pickpocket helpers ----
@@ -385,10 +533,24 @@ namespace FUI::LootBarter
         if (IsLootMode(a_mode) && a_partner) {
             g_contLayouts[a_partner->GetFormID()].stamp = ++g_contStamp;
             while (g_contLayouts.size() > kContLayoutMax) {
-                auto victim = g_contLayouts.begin();
+                // ★(1.3.0-B) never evict a shelf that still banks a pouch's
+                // gold -- the pouch is still IN that chest and the layout is
+                // the only record of the amount. Oldest goldless one goes; if
+                // every remembered chest banks gold, keep them all (the cap is
+                // a memory bound, not a correctness bound).
+                auto victim = g_contLayouts.end();
                 for (auto it = g_contLayouts.begin(); it != g_contLayouts.end(); ++it) {
-                    if (it->second.stamp < victim->second.stamp) victim = it;
+                    bool banks = false;
+                    for (const auto& [k, s] : it->second.spots) {
+                        if (s.gold > 0) { banks = true; break; }
+                    }
+                    if (banks) continue;
+                    if (victim == g_contLayouts.end() ||
+                        it->second.stamp < victim->second.stamp) {
+                        victim = it;
+                    }
                 }
+                if (victim == g_contLayouts.end()) break;
                 g_contLayouts.erase(victim);
             }
         }
@@ -428,6 +590,19 @@ namespace FUI::LootBarter
         g_storeHint = {};        // F7: session-scoped drop hint (the grid geometry
         g_pendingSpots.clear();  // re-arms per frame in DrawWindows — kNormal
                                  // leaves it dead, so no teardown needed here)
+        // (1.3.0-C) a leaving-pouch hint whose transfer never fired (lost
+        // pick roll, refused move) must not name a tile for the NEXT session
+        GoldCoins::NotePouchLeaving({});
+        // (1.3.0-D) a store bundle whose bag spot was never born (the window
+        // closed the same instant) is dropped -- the contents are simply
+        // loose in the chest, visible next open. Incoming bundles SURVIVE:
+        // their claim happens on the player-side rebuild, which may run
+        // after this session is gone.
+        g_pendingBundles.clear();
+        g_shelfBags.clear();   // (1.3.1) the shelf windows die with the session
+        g_shelfPouchSpot.clear();
+        g_bundleCarry = {};
+        g_carryGlow = 0;
         GoldCoins::SetBarterContext(false);
     }
 
@@ -466,7 +641,11 @@ namespace FUI::LootBarter
         Sfx::SelectOn();   // click / shift+click opened the quantity popup
     }
 
-    bool IsPopupOpen() { return g_confirm.active || g_slider.active; }
+    bool IsPopupOpen()
+    {
+        return g_confirm.active || g_slider.active || !g_shelfBags.empty() ||
+               !g_shelfPouchSpot.empty();
+    }
 
     bool CloseTopPopup()
     {
@@ -479,6 +658,14 @@ namespace FUI::LootBarter
         if (g_slider.active) {
             g_slider.active = false;
             Grid::ClearDropHint();   // B2
+            return true;
+        }
+        if (!g_shelfPouchSpot.empty()) {   // (1.3.2a) the pouch window
+            g_shelfPouchSpot.clear();
+            return true;
+        }
+        if (!g_shelfBags.empty()) {   // (1.3.2c) the NEWEST bag window
+            g_shelfBags.pop_back();
             return true;
         }
         return false;
@@ -532,7 +719,8 @@ namespace FUI::LootBarter
             g_xfer.push_back({ XferReq::kTake, a_obj, a_count, 0, 0, {}, a_uid, a_sig,
                                a_fromWorn });
             NoteOut(a_obj, a_uid, a_sig, a_count);
-            ConsumeActingSpot();   // GI20: the hovered cell's slot, not the last one
+            ConsumeActingSpot(a_obj);   // GI20: the hovered cell's slot, not the last one
+            ConsumeBundleCarry(a_obj, a_count);   // (1.3.1) a shelf-bag carry taken home
         }
     }
 
@@ -557,7 +745,7 @@ namespace FUI::LootBarter
             g_xfer.push_back({ XferReq::kBuy, a_obj, a_count, a_price, a_baseTotal,
                                {}, a_uid, a_sig });
             NoteOut(a_obj, a_uid, a_sig, a_count);
-            ConsumeActingSpot();   // GI20
+            ConsumeActingSpot(a_obj);   // GI20
         }
     }
 
@@ -582,7 +770,7 @@ namespace FUI::LootBarter
             g_xfer.push_back({ XferReq::kPickTake, a_obj, a_count, 0, 0, {}, a_uid, a_sig,
                                a_fromWorn });
             NoteOut(a_obj, a_uid, a_sig, a_count);
-            ConsumeActingSpot();   // GI25
+            ConsumeActingSpot(a_obj);   // GI25
         }
     }
 
@@ -1146,6 +1334,13 @@ namespace FUI::LootBarter
                                  g_slider.srcKey, g_slider.fav);
                 break;
             case XferDir::kStore:
+                // ★(1.3.3) a follower's pack is 10 x 8 -- asked here too, so
+                // the slider cannot walk around the check the click made
+                if (!PartnerHasRoomFor(g_slider.obj, g_slider.value)) {
+                    Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
+                    g_storeHint = {};
+                    break;
+                }
                 RequestStore(g_slider.obj, g_slider.value, g_slider.uid, g_slider.sig,
                              g_slider.fav);
                 // outgoing units leave their tile IN PLACE (engine removal is
@@ -1291,6 +1486,686 @@ namespace
         return si == ci->second.spots.end() ? 0 : si->second.gold;
     }
 }
+
+    int HeldShelfGold()
+    {
+        // only a partner-side carry has a reserved shelf slot to ask
+        if (g_actingSpot.empty() || !Grid::HeldPartnerObject()) return -1;
+        return ShelfGoldOf(g_actingSpot);
+    }
+
+    void NoteBagBundle(RE::FormID a_bagForm, std::vector<BundleItem> a_items)
+    {
+        auto* p = Partner();
+        if (!p || a_items.empty()) return;
+        g_pendingBundles.push_back({ p->GetFormID(), a_bagForm, std::move(a_items) });
+        SKSE::log::info("[LOOT] bag bundle noted: {} kind(s) follow bag {:08X}",
+            g_pendingBundles.back().items.size(), a_bagForm);
+    }
+
+    std::vector<BundleItem> TakeIncomingBundle(RE::FormID a_bagForm)
+    {
+        for (auto it = g_incomingBundles.begin(); it != g_incomingBundles.end(); ++it) {
+            if (it->bagForm != a_bagForm) continue;
+            auto v = std::move(it->items);
+            g_incomingBundles.erase(it);
+            return v;
+        }
+        return {};
+    }
+
+    bool IsBundleCarry() { return g_bundleCarry.active; }
+
+    bool ConsumeBundleCarry(RE::TESBoundObject* a_obj, int a_count)
+    {
+        if (!g_bundleCarry.active || !a_obj ||
+            a_obj->GetFormID() != g_bundleCarry.form) {
+            return false;
+        }
+        g_bundleCarry.active = false;
+        const auto ci = g_contLayouts.find(g_bundleCarry.cont);
+        if (ci == g_contLayouts.end()) return true;
+        const auto si = ci->second.spots.find(g_bundleCarry.spot);
+        if (si == ci->second.spots.end()) return true;
+        auto& bundle = si->second.bundle;
+        // the anchor names the exact entry; fall back to (form, sig)
+        auto it = std::find_if(bundle.begin(), bundle.end(), [&](const BundleItem& b) {
+            return b.form == g_bundleCarry.form && b.col == g_bundleCarry.col &&
+                   b.row == g_bundleCarry.row;
+        });
+        if (it == bundle.end()) {
+            it = std::find_if(bundle.begin(), bundle.end(), [&](const BundleItem& b) {
+                return b.form == g_bundleCarry.form && b.sig == g_bundleCarry.sig;
+            });
+        }
+        if (it != bundle.end()) {
+            it->count -= a_count;
+            if (it->count <= 0) bundle.erase(it);
+        }
+        return true;
+    }
+
+    // ★(1.3.1/1.3.2c) an OPEN shelf bag: a REAL bag window over the bundle
+    // record -- the player-bag grammar on the container side. Items draw at
+    // their anchors on the bag's own grid, lift onto the cursor (drop on
+    // the player grid = take home, drop on the shelf = out of the bag, drop
+    // back inside = rearrange, drop in ANOTHER open shelf bag = move over),
+    // and a carried player item drops IN. Typed bags carry their COLLECT
+    // button. The engine items are already in the container throughout;
+    // only the bundle record moves until a transfer is actually queued.
+    namespace
+    {
+        // one bag window. a_ord staggers the default position; returns
+        // false when the window should close (the bag left the shelf).
+        bool DrawOneShelfBag(RE::TESObjectREFR* p, ContLayout& a_cl,
+                             const ShelfBagWin& a_w, int a_ord)
+        {
+        const auto si = a_cl.spots.find(a_w.spot);
+        if (si == a_cl.spots.end()) return false;   // the bag left the shelf
+        auto& bundle = si->second.bundle;
+        auto* bagObj = RE::TESForm::LookupByID<RE::TESBoundObject>(a_w.form);
+        if (!bagObj) return false;
+        const auto bagDef = Grid::ResolveDef(bagObj);
+        const int cols = (std::max)(1, bagDef.bw);
+        int rows = (std::max)(1, bagDef.bh);
+
+        // ---- seat the bundle: saved anchors first, first-fit for the rest.
+        // Fresh fits are WRITTEN BACK so the layout survives the session
+        // (cosave v5/v6) exactly like a player bag's. A carry lifted from
+        // THIS window is excluded entirely -- its cells free up while it
+        // rides the cursor, and a cancel simply re-seats it (colliding
+        // anchors refit, nothing is lost).
+        const bool carryOut = g_bundleCarry.active &&
+                              g_bundleCarry.spot == a_w.spot &&
+                              g_bundleCarry.cont == p->GetFormID();
+        auto isCarried = [&](const BundleItem& a_b) {
+            return carryOut && a_b.form == g_bundleCarry.form &&
+                   a_b.col == g_bundleCarry.col && a_b.row == g_bundleCarry.row;
+        };
+        auto dimsOf = [&](const BundleItem& a_b, RE::TESBoundObject* a_obj,
+                          int& a_w, int& a_h) {
+            const auto d = Grid::ResolveDef(a_obj);
+            a_w = (std::max)(1, d.w);
+            a_h = (std::max)(1, d.h);
+            if (a_b.rot & 1) std::swap(a_w, a_h);
+        };
+        constexpr int kGrowRows = 16;
+        const int maxRows = rows + kGrowRows;
+        std::vector<char> occ(static_cast<std::size_t>(cols) * maxRows, 0);
+        auto fits = [&](int a_c, int a_r, int a_w, int a_h) {
+            if (a_c < 0 || a_r < 0 || a_c + a_w > cols || a_r + a_h > maxRows) return false;
+            for (int y = 0; y < a_h; ++y)
+                for (int x = 0; x < a_w; ++x)
+                    if (occ[static_cast<std::size_t>(a_r + y) * cols + a_c + x]) return false;
+            return true;
+        };
+        auto mark = [&](int a_c, int a_r, int a_w, int a_h, char a_v) {
+            for (int y = 0; y < a_h; ++y)
+                for (int x = 0; x < a_w; ++x)
+                    occ[static_cast<std::size_t>(a_r + y) * cols + a_c + x] = a_v;
+        };
+        struct Seat
+        {
+            int                 idx;
+            int                 col, row, w, h, rot;
+            RE::TESBoundObject* obj;
+        };
+        std::vector<Seat> seats;
+        for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
+            if (isCarried(bundle[i])) continue;
+            auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(bundle[i].form);
+            if (!obj) continue;
+            int w = 1, h = 1;
+            dimsOf(bundle[i], obj, w, h);
+            if (bundle[i].col >= 0 && fits(bundle[i].col, bundle[i].row, w, h)) {
+                mark(bundle[i].col, bundle[i].row, w, h, 1);
+                seats.push_back({ i, bundle[i].col, bundle[i].row, w, h,
+                                  bundle[i].rot, obj });
+            } else {
+                bundle[i].col = bundle[i].row = -1;   // stale anchor: refit below
+            }
+        }
+        for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
+            if (bundle[i].col >= 0 || isCarried(bundle[i])) continue;
+            auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(bundle[i].form);
+            if (!obj) continue;
+            int w = 1, h = 1;
+            dimsOf(bundle[i], obj, w, h);
+            for (int r = 0; r < maxRows && bundle[i].col < 0; ++r) {
+                for (int c = 0; c < cols; ++c) {
+                    if (!fits(c, r, w, h)) continue;
+                    mark(c, r, w, h, 1);
+                    bundle[i].col = c;
+                    bundle[i].row = r;
+                    seats.push_back({ i, c, r, w, h, bundle[i].rot, obj });
+                    break;
+                }
+            }
+        }
+        for (const auto& s : seats) rows = (std::max)(rows, s.row + s.h);
+
+        // ---- the window: the player bag-window chrome, one for one --------
+        auto* wm = WinManager::GetSingleton();
+        const float S = Theme::Scale();
+        const float cell = Grid::CellPx();
+        const ImVec2 disp = ImGui::GetIO().DisplaySize;
+        const float topPad = Theme::TitleTopPad();
+        const ImVec2 size(cols * cell + 2.0f * Theme::PadX() * S +
+                              2.0f * Theme::FrameInsetX(),
+                          rows * cell + 54.0f * S + 2.0f * Theme::FrameInsetY());
+        const std::string wid = "sb|" + a_w.spot;
+        wm->ApplyNext(wid,
+            ImVec2(disp.x * 0.52f + a_ord * 44.0f * S,
+                   (disp.y - size.y) * 0.5f + a_ord * 36.0f * S),
+            size, WinManager::Anchor::kTopLeft, topPad);
+        ImGui::Begin(("##sb_" + a_w.spot).c_str(), nullptr, kManagedWinFlags);
+        // ★★(1.3.2) NO NoteOverlayRect HERE. This is a BAG window, not a
+        // popup -- and registering it made the window block its own cells:
+        // every lift is gated on `IsItemHovered() && !MouseInOverlay()`, and
+        // the mouse is always inside the rect the window itself just
+        // registered. Dropping IN still worked (that path asks
+        // IsWindowHovered, which knows nothing about overlays), so the
+        // symptom was exactly "things go into the bag but cannot come out".
+        // The player's own bag windows register nothing for the same reason;
+        // z-order already keeps clicks from falling through to the boards.
+        // ★★(1.3.2) the COLLECT button's width has to be RESERVED on the
+        // title bar before it is drawn: TitleBar lays a full-width drag
+        // strip across the row, and an unreserved button sits UNDER it --
+        // present, correct, and unclickable (the player's own bag windows
+        // pass the same reservation for the same reason).
+        const char* colLbl = Lang::T(Lang::Str::BagCollect);
+        const bool  hasCollect = !bagDef.accept.empty();
+        const float colW = hasCollect
+                               ? ImGui::CalcTextSize(colLbl).x + 16.0f * S
+                               : 0.0f;
+        wm->TitleBar(wid,
+            bagObj->GetName() && *bagObj->GetName() ? bagObj->GetName() : "?",
+            colW);
+
+        // ★(1.3.2b) typed bags carry their COLLECT on the shelf too: sweep
+        // this container's matching LOOSE items into the bag. The swept
+        // cells vanish (the bundle hides them) and their spots die in the
+        // ordinary dead-pool prune next frame.
+        if (hasCollect && !Grid::IsHolding()) {
+            const ImVec2 keep = ImGui::GetCursorScreenPos();
+            const float lineH = ImGui::GetTextLineHeight();
+            const float btnH = lineH + 6.0f * S;
+            const float textTop = WinManager::TitleTextY(wid, lineH);
+            ImGui::SetCursorScreenPos(ImVec2(
+                ImGui::GetWindowPos().x + size.x - colW - Theme::TopControlRightPad(),
+                textTop - (btnH - lineH) * 0.5f));
+            const auto& sk = Theme::S();
+            if (Sfx::Button(("##sbcollect_" + a_w.spot).c_str(), ImVec2(colW, btnH))) {
+                // already-bundled counts across THIS container hide cells;
+                // collect only what is still loose
+                std::map<RE::FormID, int> taken;
+                for (const auto& [k2, s2] : a_cl.spots) {
+                    for (const auto& b2 : s2.bundle) taken[b2.form] += b2.count;
+                }
+                int swept = 0;
+                if (auto* src = SourceRef()) {
+                    for (auto& [obj2, data2] : src->GetInventory()) {
+                        const int total = data2.first;
+                        if (!obj2 || total <= 0 || obj2->IsGold()) continue;
+                        const RE::FormID fid2 = obj2->GetFormID();
+                        if (GoldCoins::IsCoinForm(fid2)) continue;   // incl. pouch
+                        if (Grid::ResolveDef(obj2).bag != 0) continue;
+                        const char* nm2 = obj2->GetName();
+                        if (!nm2 || !*nm2 || !obj2->GetPlayable()) continue;
+                        if (BagFilter::FilterOf(obj2) != bagDef.accept) continue;
+                        const int loose = total - taken[fid2];
+                        if (loose <= 0) continue;
+                        bundle.push_back({ fid2, loose, 0, -1, -1, 0 });
+                        taken[fid2] += loose;
+                        swept += loose;
+                    }
+                }
+                if (swept > 0) Sfx::BagOpen();
+            }
+            const bool hovC = ImGui::IsItemHovered();
+            const ImVec2 bp = ImGui::GetItemRectMin();
+            const ImVec2 bs = ImGui::GetItemRectSize();
+            const ImVec2 ts = ImGui::CalcTextSize(colLbl);
+            ImGui::GetWindowDrawList()->AddText(
+                ImVec2(bp.x + (bs.x - ts.x) * 0.5f,
+                       bp.y + (bs.y - ts.y) * 0.5f),
+                hovC ? Theme::Val() : ImGui::GetColorU32(sk.inkDim), colLbl);
+            ImGui::SetCursorScreenPos(keep);
+        }
+
+        auto* dl = ImGui::GetWindowDrawList();
+        const ImVec2 winPos = ImGui::GetWindowPos();
+        const ImVec2 base(winPos.x + Theme::PadX() * S + Theme::FrameInsetX(),
+                          winPos.y + 40.0f * S + Theme::FrameInsetY() * 0.5f);
+
+        // ★★RESERVE THE GRID AREA FIRST. SetCursorScreenPos alone does not
+        // grow the window's content bounds, and ImGui 1.92 raises its error
+        // overlay for every item button placed beyond them -- that overlay
+        // then swallowed hover AND clicks, which read back as "the window
+        // closes the moment an item is clicked" and "nothing can be dropped
+        // in". One Dummy over the whole grid makes every later position a
+        // known-inside one.
+        ImGui::SetCursorScreenPos(base);
+        ImGui::Dummy(ImVec2(cols * cell, rows * cell));
+
+        // chrome, ground, then the lattice -- the partner board's order
+        Grid::DrawCellLattice(dl, base, cols, rows);
+        const ImU32 shade = Theme::OccupiedGround();
+        for (const auto& s : seats) {
+            dl->AddRectFilled(ImVec2(base.x + s.col * cell + 1.0f,
+                                     base.y + s.row * cell + 1.0f),
+                              ImVec2(base.x + (s.col + s.w) * cell - 1.0f,
+                                     base.y + (s.row + s.h) * cell - 1.0f),
+                shade);
+        }
+        Grid::DrawInkLattice(dl, base, cols, rows);
+
+        auto* cache = IconCache::GetSingleton();
+        for (const auto& s : seats) {
+            const auto& b = bundle[s.idx];
+            const ImVec2 p0(base.x + s.col * cell, base.y + s.row * cell);
+            const float bw = s.w * cell, bh = s.h * cell;
+            const IconCache::Icon* icon = cache->Get(s.obj);
+            if (!icon) {
+                cache->QueueCapture(s.obj);
+                icon = Fallback::Get(s.obj);
+            }
+            if (icon && icon->srv) {
+                // contain-fit inside the UPRIGHT box (the sprite is not
+                // rotated, only its draw quad -- GI62), the one icon path
+                // (gain/blend) + the same shadow as every board
+                const float iw = static_cast<float>(icon->w);
+                const float ih = static_cast<float>(icon->h);
+                const float upW = ((s.rot & 1) ? s.h : s.w) * cell;
+                const float upH = ((s.rot & 1) ? s.w : s.h) * cell;
+                const float k = (std::min)(upW / (std::max)(1.0f, iw),
+                                           upH / (std::max)(1.0f, ih)) * 0.92f;
+                const float dw = iw * k, dh = ih * k;
+                const float deg = s.rot * 90.0f;
+                const ImVec2 ctr(p0.x + bw * 0.5f, p0.y + bh * 0.5f);
+                // ★(1.3.2) the rarity halo, UNDER the sprite -- the same pass
+                // and the same call both boards make. Its absence was the
+                // whole "no markers inside a stored bag" report.
+                Grid::DrawGlow(dl, s.obj, b.glow,
+                    ImVec2(ctr.x - dw * 0.5f, ctr.y - dh * 0.5f),
+                    ImVec2(ctr.x + dw * 0.5f, ctr.y + dh * 0.5f),
+                    p0, ImVec2(p0.x + bw, p0.y + bh), s.rot);
+                Grid::DrawItemShadow(dl, icon->srv, ctr, dw, dh, deg);
+                UIRoot::DrawItemIconRot(dl, icon->srv, ctr, ImVec2(dw, dh), deg);
+            }
+            // ★(1.3.2) the marker tray: poison, and "stolen" when the whole
+            // container is someone else's. No star -- a stored unit is not
+            // the player's favourite any more (the store strips it).
+            Grid::DrawMarkerTray(dl, p0, ImVec2(p0.x + bw, p0.y + bh),
+                                 false, b.stolen || g_mode == Mode::kSteal,
+                                 (b.glow & 0x4) != 0, false);
+            {   // GI8: extension overlay (socket wells), same as every board
+                Badges::TileShape shape;
+                shape.w = s.w;
+                shape.h = s.h;
+                const bool hovB = UIRoot::CursorOwnsWindow() &&
+                                  ImGui::IsMouseHoveringRect(
+                                      p0, ImVec2(p0.x + bw, p0.y + bh), false);
+                Badges::Draw(dl, p0, bw, bh, shape, p->GetFormID(),
+                             b.form, 0, hovB);
+            }
+            if (b.count > 1) {
+                char cnt[16];
+                std::snprintf(cnt, sizeof(cnt), "%d", b.count);
+                Grid::DrawCountBadge(dl, p0, cnt);
+            }
+            if (!Grid::IsHolding()) {
+                char idbuf[24];
+                std::snprintf(idbuf, sizeof(idbuf), "##sbc%d", s.idx);
+                ImGui::SetCursorScreenPos(p0);
+                ImGui::InvisibleButton(idbuf, ImVec2(bw, bh));
+                if (ImGui::IsItemHovered() && !UIRoot::MouseInOverlay()) {
+                    dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
+                        Theme::Acc(0.10f));
+                    Grid::DrawItemTooltip(s.obj, b.count, -1, -1, false,
+                                          SourceRef(), Grid::ExtraScope::kAny,
+                                          0, -1, 0, 0,
+                                          Grid::TileContext{ {}, false, false, true, false });
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                        // lift it: the bundle keeps the entry until the carry
+                        // is CONSUMED (take home / shelf drop); a cancel puts
+                        // it visually straight back
+                        g_bundleCarry = { true, p->GetFormID(), a_w.spot,
+                                          b.form, b.sig, s.col, s.row };
+                        g_carryGlow = b.glow;   // (1.3.2)
+                        g_carryStolen = b.stolen;
+                        Grid::BeginPartnerCarry(s.obj, b.count, 0,
+                                                -1.0f, -1.0f, 0, -1, 0, s.rot);
+                    }
+                }
+            }
+        }
+
+        // ★(1.3.2) drop ghost, the same one both boards draw: green = the
+        // footprint seats here, red = it does not (a single blocker still
+        // swaps, exactly as on the partner board, and reads red there too).
+        // Its anchor is the DROP's anchor verbatim, so preview and result
+        // cannot disagree.
+        if (Grid::IsHolding() &&
+            ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+            int hw = 1, hh = 1;
+            float gox = 0.0f, goy = 0.0f;
+            if (Grid::HeldFootprint(hw, hh, gox, goy)) {
+                const ImVec2 gm = ImGui::GetIO().MousePos;
+                const int gc = static_cast<int>(std::floor(
+                    (gm.x - base.x) / cell - (hw - 1) * 0.5f));
+                const int gr = static_cast<int>(std::floor(
+                    (gm.y - base.y) / cell - (hh - 1) * 0.5f));
+                if (gc >= 0 && gr >= 0 && gc + hw <= cols && gr + hh <= rows) {
+                    const ImU32 ghost = fits(gc, gr, hw, hh)
+                                            ? IM_COL32(90, 170, 90, 90)
+                                            : IM_COL32(190, 60, 60, 110);
+                    const ImVec2 g0(base.x + gc * cell, base.y + gr * cell);
+                    dl->AddRectFilled(g0,
+                        ImVec2(g0.x + hw * cell, g0.y + hh * cell), ghost);
+                }
+            }
+        }
+
+        // ---- drops INTO the window ---------------------------------------
+        // The full player-bag grammar: a free rect seats it, ONE blocker is
+        // the C4 swap (incoming takes the occupant's anchor, the occupant
+        // rides the cursor), more keeps carrying. Sources: a rearrange from
+        // this bag, a PLAYER item (engine store rides along), or a plain
+        // SHELF cell (already in the container -- its slot retires and the
+        // entry simply hides it).
+        if (Grid::IsHolding() &&
+            ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            RE::TESBoundObject* hobj = nullptr;
+            int hcount = 0, hrot = 0;
+            std::uint16_t hsig = 0;
+            bool fromPartner = false;
+            const std::uint8_t hglow = g_carryGlow;   // (1.3.2) markers in transit
+            if (Grid::PeekHeldForShelf(hobj, hcount, hsig, hrot, fromPartner)) {
+                int hw = 1, hh = 1;
+                float hox = 0.0f, hoy = 0.0f;
+                Grid::HeldFootprint(hw, hh, hox, hoy);   // already-rotated dims
+                const ImVec2 m = ImGui::GetIO().MousePos;
+                // the carry centres on the cursor: centre the footprint too
+                const int c = static_cast<int>(std::floor(
+                    (m.x - base.x) / cell - (hw - 1) * 0.5f));
+                const int r = static_cast<int>(std::floor(
+                    (m.y - base.y) / cell - (hh - 1) * 0.5f));
+
+                const bool bundleRe = g_bundleCarry.active;
+                const bool sameBag = bundleRe &&
+                                     g_bundleCarry.spot == a_w.spot &&
+                                     g_bundleCarry.cont == p->GetFormID();
+                const RE::FormID hfid = hobj->GetFormID();
+                // eligibility: a rearrange is already inside; a shelf cell may
+                // not be a bag (no nesting) or a coin/pouch (its gold lives on
+                // the SLOT this move would retire); a player item answers to
+                // HeldShelfStorable. Typed bags keep their filter -- a move
+                // from ANOTHER bag answers to it too.
+                const bool intakeOk =
+                    bundleRe ||
+                    (fromPartner ? !(Grid::ResolveDef(hobj).bag != 0 ||
+                                     GoldCoins::IsCoinForm(hfid))
+                                 : Grid::HeldShelfStorable() != nullptr);
+                const bool filterOk = sameBag || bagDef.accept.empty() ||
+                                      BagFilter::FilterOf(hobj) == bagDef.accept;
+                if (intakeOk && filterOk) {
+                    // seats blocking the drop rect
+                    std::vector<int> blocks;
+                    for (int sn = 0; sn < static_cast<int>(seats.size()); ++sn) {
+                        const auto& s = seats[sn];
+                        const bool hit = !(c + hw <= s.col || s.col + s.w <= c ||
+                                           r + hh <= s.row || s.row + s.h <= r);
+                        if (hit) blocks.push_back(sn);
+                    }
+                    int  dropC = c, dropR = r;
+                    int  liftIdx = -1;
+                    bool ok = false;
+                    if (fits(c, r, hw, hh)) {
+                        ok = true;
+                    } else if (blocks.size() == 1) {
+                        const auto& bs = seats[blocks[0]];
+                        mark(bs.col, bs.row, bs.w, bs.h, 0);   // judge with it freed
+                        if (fits(bs.col, bs.row, hw, hh)) {
+                            dropC = bs.col;
+                            dropR = bs.row;
+                            liftIdx = blocks[0];
+                            ok = true;
+                        }
+                    }
+                    if (ok) {
+                        // the displaced occupant, remembered BEFORE the bundle
+                        // mutates under it
+                        BundleItem lifted{};
+                        RE::TESBoundObject* liftedObj = nullptr;
+                        if (liftIdx >= 0) {
+                            lifted = bundle[seats[liftIdx].idx];
+                            liftedObj = seats[liftIdx].obj;
+                        }
+                        bool consumed = false;
+                        if (bundleRe) {
+                            // (1.3.2c) pull the entry out of the bundle it was
+                            // lifted from -- which may be ANOTHER open bag --
+                            // and seat it here
+                            if (const auto sci = g_contLayouts.find(g_bundleCarry.cont);
+                                sci != g_contLayouts.end()) {
+                                if (const auto ssi =
+                                        sci->second.spots.find(g_bundleCarry.spot);
+                                    ssi != sci->second.spots.end()) {
+                                    auto& srcB = ssi->second.bundle;
+                                    const auto bit = std::find_if(srcB.begin(),
+                                        srcB.end(), [&](const BundleItem& b) {
+                                            return b.form == g_bundleCarry.form &&
+                                                   b.col == g_bundleCarry.col &&
+                                                   b.row == g_bundleCarry.row;
+                                        });
+                                    if (bit != srcB.end()) {
+                                        BundleItem moved = *bit;
+                                        srcB.erase(bit);
+                                        moved.col = dropC;
+                                        moved.row = dropR;
+                                        moved.rot = hrot & 3;
+                                        bundle.push_back(moved);
+                                        consumed = true;
+                                    }
+                                }
+                            }
+                            g_bundleCarry.active = false;
+                            Grid::DropHeldForShelf();
+                        } else if (fromPartner) {
+                            // off the shelf, into the bag: retire its slot --
+                            // the engine item never moves, the entry hides it
+                            if (!g_actingSpot.empty()) {
+                                a_cl.spots.erase(g_actingSpot);
+                                g_actingSpot.clear();
+                            }
+                            // off a shelf cell: the container's own ownership
+                            // is all this side knows (kSteal = owned whole)
+                            bundle.push_back({ hfid, hcount, hsig,
+                                               dropC, dropR, hrot & 3, hglow,
+                                               g_carryStolen ||
+                                                   g_mode == Mode::kSteal });
+                            consumed = true;
+                            Grid::DropHeldForShelf();
+                        } else {
+                            RE::FormID    f = 0;
+                            int           cnt = 0;
+                            std::uint16_t sg = 0;
+                            int           rt = 0;
+                            std::uint8_t  gl = 0;
+                            bool          st = false;
+                            if (Grid::CommitHeldToShelfBag(f, cnt, sg, rt, gl, st)) {
+                                bundle.push_back({ f, cnt, sg, dropC, dropR, rt,
+                                                   gl, st });
+                                consumed = true;
+                            }
+                        }
+                        if (consumed && liftIdx >= 0 && liftedObj) {
+                            // C4: the occupant rides the cursor in its place
+                            g_bundleCarry = { true, p->GetFormID(), a_w.spot,
+                                              lifted.form, lifted.sig,
+                                              lifted.col, lifted.row };
+                            g_carryGlow = lifted.glow;   // (1.3.2)
+                            g_carryStolen = lifted.stolen;
+                            Grid::BeginPartnerCarry(liftedObj, lifted.count, 0,
+                                                    -1.0f, -1.0f, 0, -1, 0,
+                                                    lifted.rot);
+                        }
+                    }
+                }
+            }
+        }
+
+        // player-bag parity: NO outside-click close -- a bag window closes by
+        // its right-click toggle, or ESC (newest first)
+        ImGui::End();
+        return true;
+        }
+    }
+
+    void DrawShelfBag()
+    {
+        if (g_shelfBags.empty()) return;
+        if (!IsLootMode(g_mode)) { g_shelfBags.clear(); return; }
+        auto* p = Partner();
+        if (!p) { g_shelfBags.clear(); return; }
+        const auto ci = g_contLayouts.find(p->GetFormID());
+        if (ci == g_contLayouts.end()) { g_shelfBags.clear(); return; }
+        for (std::size_t i = 0; i < g_shelfBags.size();) {
+            if (DrawOneShelfBag(p, ci->second, g_shelfBags[i], static_cast<int>(i))) {
+                ++i;
+            } else {
+                g_shelfBags.erase(g_shelfBags.begin() +
+                                  static_cast<std::ptrdiff_t>(i));
+            }
+        }
+    }
+
+    // ★(1.3.2a) the shelf POUCH's withdraw window -- the player pouch's
+    // grammar over the SLOT's amount. Withdrawing credits the ledger and
+    // puts a pinned purse on the cursor, exactly like the player's.
+    void DrawShelfPouch()
+    {
+        if (g_shelfPouchSpot.empty()) return;
+        if (!IsLootMode(g_mode)) { g_shelfPouchSpot.clear(); return; }
+        auto* p = Partner();
+        if (!p) { g_shelfPouchSpot.clear(); return; }
+        const auto ci = g_contLayouts.find(p->GetFormID());
+        if (ci == g_contLayouts.end()) { g_shelfPouchSpot.clear(); return; }
+        const auto si = ci->second.spots.find(g_shelfPouchSpot);
+        if (si == ci->second.spots.end()) {   // the pouch left the shelf
+            g_shelfPouchSpot.clear();
+            return;
+        }
+        const int stored = si->second.gold;
+        if (g_shelfPouchSlider > stored) g_shelfPouchSlider = stored;
+
+        auto* wm = WinManager::GetSingleton();
+        const auto& sk = Theme::S();
+        const float S = Theme::Scale();
+        const ImVec2 disp = ImGui::GetIO().DisplaySize;
+        const float insX = Theme::FrameInsetX();
+        const float insY = Theme::FrameInsetY();
+        const float barH = 34.0f * S;
+        const float btnW = 96.0f * S;
+        const float btnRow = 2.0f * btnW + 8.0f * S;
+        char line[64];
+        std::snprintf(line, sizeof(line), "%s: %d / %dG",
+            Lang::T(Lang::Str::StoredLabel), stored, GoldCoins::PouchCap());
+        const float sliderW = 220.0f * S;
+        const float contentW = (std::max)({ btnRow, sliderW,
+            ImGui::CalcTextSize(line).x });
+        const float lineH = ImGui::GetTextLineHeightWithSpacing();
+        const float sp = ImGui::GetStyle().ItemSpacing.y;
+        const float topPad = Theme::TitleTopPad();
+        const ImVec2 size(
+            contentW + 30.0f * S + 2.0f * insX,
+            barH + 8.0f * S + lineH + ImGui::GetFrameHeight() + 6.0f * S +
+                2.0f * sp + ImGui::GetFrameHeight() + 18.0f * S + 2.0f * insY);
+        wm->ApplyNext("shelfpouch",
+            ImVec2((disp.x - size.x) * 0.5f, (disp.y - size.y) * 0.5f), size,
+            WinManager::Anchor::kTopLeft, topPad);
+        ImGui::Begin("##grid_shelfpouch", nullptr, kManagedWinFlags);
+        UIRoot::NoteOverlayRect();
+        auto* pobj = RE::TESForm::LookupByID<RE::TESBoundObject>(g_shelfPouchForm);
+        wm->TitleBar("shelfpouch",
+            pobj && pobj->GetName() && *pobj->GetName() ? pobj->GetName() : "?",
+            0.0f, true);
+
+        if (!ImGui::IsWindowAppearing() &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsWindowHovered()) {
+            g_shelfPouchSpot.clear();
+            Sfx::SelectOff();
+        }
+
+        auto center = [](float a_w) {
+            const float w = ImGui::GetWindowSize().x;
+            ImGui::SetCursorPosX((std::max)(0.0f, (w - a_w) * 0.5f));
+        };
+
+        center(ImGui::CalcTextSize(line).x);
+        ImGui::TextColored(sk.ink, "%s", line);
+        center(sliderW);
+        Theme::ChromeSliderInt("##shelfdraw", &g_shelfPouchSlider, 0, stored,
+                               sliderW, "%dG");
+        const bool typing = ImGui::GetIO().WantTextInput;
+        if (!typing && ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true) &&
+            g_shelfPouchSlider > 0) {
+            --g_shelfPouchSlider;
+        }
+        if (!typing && ImGui::IsKeyPressed(ImGuiKey_RightArrow, true) &&
+            g_shelfPouchSlider < stored) {
+            ++g_shelfPouchSlider;
+        }
+        ImGui::Dummy(ImVec2(0.0f, 6.0f * S));
+        center(btnRow);
+        const bool can = g_shelfPouchSlider > 0;
+        const bool keyOk = !typing &&
+                           (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                            ImGui::IsKeyPressed(ImGuiKey_Space, false));
+        ImGui::BeginDisabled(!can);
+        if (Sfx::Button(Lang::T(Lang::Str::Withdraw), ImVec2(btnW, 0)) ||
+            (can && keyOk)) {
+            const int v = g_shelfPouchSlider;
+            si->second.gold -= v;
+            // the shelf's book shrinks; the ledger grows to match, and the
+            // amount rides the cursor as a pinned purse (player grammar)
+            GoldCoins::CreditLedger(v);
+            Grid::CarryWithdrawnGold(v);
+            g_shelfPouchSpot.clear();
+            g_shelfPouchSlider = 0;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine(0.0f, 8.0f * S);
+        if (Sfx::Button(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), true)) {
+            g_shelfPouchSpot.clear();
+        }
+        ImGui::End();
+    }
+
+    int DepositOnHoveredPouch(int a_value)
+    {
+        if (a_value <= 0 || !IsLootMode(g_mode)) return 0;
+        const auto sd = QueryStoreDrop();
+        if (!sd.onCell || !sd.occ || !GoldCoins::IsPouch(sd.occ->GetFormID())) {
+            return 0;
+        }
+        auto* p = Partner();
+        if (!p) return 0;
+        const auto ci = g_contLayouts.find(p->GetFormID());
+        if (ci == g_contLayouts.end()) return 0;
+        const auto si = ci->second.spots.find(sd.occSpotKey);
+        if (si == ci->second.spots.end()) return 0;
+        const int room = GoldCoins::PouchCap() - si->second.gold;
+        const int moved = (std::min)(a_value, room);
+        if (moved <= 0) return 0;   // full: the coin keeps riding
+        si->second.gold += moved;
+        SKSE::log::info("[LOOT] deposited {} G into shelf pouch '{}' -> {}",
+            moved, sd.occSpotKey, si->second.gold);
+        return moved;
+    }
 
     RE::TESObjectREFR* Partner()
     {
@@ -1462,6 +2337,7 @@ namespace
 
     bool IsPartnerHovered() { return g_partnerHovered; }
 
+
     // ---- Phase 3: partner-window stages (bodies moved verbatim) ----
     namespace
     {
@@ -1516,6 +2392,11 @@ namespace
         ImVec2                   g_partnerClipMax{};
         int                      g_partnerRows = 0;
         std::vector<PartnerCell> g_lastCells;          // this frame's placement
+        // ★(1.3.3) measured height of everything above the board (title bar,
+        // section label, window padding, title clearance). -1 = not measured
+        // yet. Independent of the row count, so it converges on the second
+        // frame and then holds. Reset when the skin or the scale changes.
+        float                    g_partnerChromeH = -1.0f;
 
         // ★Search on the partner board. Its cells are rebuilt EVERY frame, so
         // there is no board version to hang a key-set off the way the player's
@@ -1553,12 +2434,34 @@ namespace
             // gets closed, must not leave it primed for the NEXT take.
             if (!Grid::IsHolding() && !g_slider.active && !g_confirm.active) {
                 g_actingSpot.clear();
+                g_carryGlow = 0;                // (1.3.2) markers die with it
+                g_bundleCarry.active = false;   // (1.3.1) cancelled carry: the
+                                                // entry was never removed, so
+                                                // the item is simply back in
+                                                // its bag -- nothing to undo
             }
             SweepOut();
             // working copy: units already committed to the player leave this
             // board NOW, not one Tick later (see g_outPool)
             auto outPool = g_outPool;
             auto outForm = g_outForm;
+            // ★(1.3.0-D) how many of each form ride inside stored bags HERE:
+            // spot bundles of this container, plus bundles still waiting for
+            // their bag's spot to be born (so nothing flashes for a frame).
+            // Rebuilt per pass -- dropping a bundle un-hides by itself.
+            std::map<RE::FormID, int> bundled;
+            if (auto* pref = Partner()) {
+                if (const auto ci = g_contLayouts.find(pref->GetFormID());
+                    ci != g_contLayouts.end()) {
+                    for (const auto& [k, s] : ci->second.spots) {
+                        for (const auto& b : s.bundle) bundled[b.form] += b.count;
+                    }
+                }
+                for (const auto& pb : g_pendingBundles) {
+                    if (pb.cont != pref->GetFormID()) continue;
+                    for (const auto& b : pb.items) bundled[b.form] += b.count;
+                }
+            }
             // Vanilla-style: one cell per item form with a stack-count badge (no
             // Mabinogi split on the partner side, per spec). Read-only in Phase 2.
             for (auto& [obj, data] : source->GetInventory()) {
@@ -1621,6 +2524,16 @@ namespace
                             cellCount -= take;
                             if (cellCount <= 0) continue;   // whole cell is gone
                         }
+                    }
+                    // ★(1.3.0-D) contents riding inside a stored bag are the
+                    // bag's, not the shelf's: hidden while the bundle holds
+                    // them ("the chest remembers the bundle, no opening").
+                    if (auto bi = bundled.find(obj->GetFormID());
+                        bi != bundled.end() && bi->second > 0) {
+                        const int hide = (std::min)(bi->second, cellCount);
+                        bi->second -= hide;
+                        cellCount -= hide;
+                        if (cellCount <= 0) continue;
                     }
                     auto* xl = Grid::ExtraForInstance(entry, u.uid, u.xlIdx);
                     // GI43: a per-unit cell is priced from ITS list -- a
@@ -1725,6 +2638,8 @@ namespace
         int PlacePartnerCells(std::vector<PartnerCell>& cells)
         {
             const int cols = Grid::kCols;
+            // (1.3.3) a living follower's pack is capped -- see CompanionPartner
+            const bool companionBoard = CompanionPartner();
             std::vector<std::vector<bool>> occ;
             auto ensureRow = [&](int r) {
                 while (static_cast<int>(occ.size()) <= r) occ.emplace_back(cols, false);
@@ -1801,10 +2716,9 @@ namespace
                     // ("if the pool is already full, reuse its first slot"),
                     // which moved a SIBLING and left the dragged unit to inherit
                     // the vacated cell -- the two appeared to swap.
-                    const std::string key =
-                        (!ps->slotKey.empty() && cl->spots.contains(ps->slotKey))
-                            ? ps->slotKey
-                            : freshInPool(prefix);
+                    const bool reused =
+                        !ps->slotKey.empty() && cl->spots.contains(ps->slotKey);
+                    const std::string key = reused ? ps->slotKey : freshInPool(prefix);
                     // GI62: the hint's angle defines the new slot's footprint --
                     // match->w/h is the upright pair, so swap it when the drop
                     // was made on its side.
@@ -1814,13 +2728,29 @@ namespace
                     // left the player; taking it now is what makes the shelf
                     // -- rather than a player-wide variable -- the thing that
                     // holds it, so the icon is right and the trip home works.
+                    // ★(1.3.0-A) ...but only a NEW slot claims. A REARRANGE
+                    // reuses its slot, whose gold is already ON it -- claiming
+                    // here rewrote that slot at zero (nothing was away), and
+                    // could even steal gold travelling with a DIFFERENT pouch.
+                    const int prev = reused ? cl->spots[key].gold : 0;
                     const int carried =
-                        GoldCoins::IsPouch(match->obj->GetFormID())
+                        (!reused && GoldCoins::IsPouch(match->obj->GetFormID()))
                             ? GoldCoins::TakeAwayGold() : 0;
-                    cl->spots[key] = { ps->col, ps->row,
-                                       turned ? match->h : match->w,
-                                       turned ? match->w : match->h,
-                                       ps->rot & 3, carried };
+                    // ★(1.3.0-D) field-wise on purpose: a REUSED slot keeps its
+                    // bundle (rearranging a stored bag must not spill it), and
+                    // a fresh one claims the bundle its store queued.
+                    {
+                        auto& sp = cl->spots[key];
+                        sp.col = ps->col;
+                        sp.row = ps->row;
+                        sp.w = turned ? match->h : match->w;
+                        sp.h = turned ? match->w : match->h;
+                        sp.rot = ps->rot & 3;
+                        sp.gold = prev + carried;
+                        if (!reused) {
+                            sp.bundle = TakePendingBundle(match->obj->GetFormID());
+                        }
+                    }
                     if (carried > 0) {
                         SKSE::log::info("[LOOT] pouch shelved with {} G ('{}')",
                             carried, key);
@@ -1880,7 +2810,18 @@ namespace
                             // GI62: the slot remembers the angle -- adopt it
                             // BEFORE the fit test, which reads w/h.
                             members[i]->SetRot(s.rot);
-                            if (fits(s.col, s.row, members[i]->w, members[i]->h)) {
+                            // ★(1.3.3) a COMPANION's board is 10 x 8, and a
+                            // remembered spot from before that cap (or from
+                            // the +2 spare rows every other container still
+                            // gets) would hold the board open past it -- the
+                            // pack drew nine rows for an item nobody could
+                            // see down there. Out-of-cap spots are refused
+                            // here and first-fit back inside by pass 2.
+                            const bool inCap =
+                                !companionBoard ||
+                                s.row + members[i]->h <= kCompanionRows;
+                            if (inCap &&
+                                fits(s.col, s.row, members[i]->w, members[i]->h)) {
                                 members[i]->col = s.col;
                                 members[i]->row = s.row;
                                 mark(s.col, s.row, members[i]->w, members[i]->h);
@@ -1912,14 +2853,36 @@ namespace
                             {
                                 auto& sp = cl->spots[members[i]->spotKey];
                                 const int keep = sp.gold > 0 ? sp.gold : members[i]->gold;
-                                sp = { -1, -1, members[i]->w, members[i]->h,
-                                       members[i]->rot, keep };
+                                sp.col = -1;
+                                sp.row = -1;
+                                sp.w = members[i]->w;
+                                sp.h = members[i]->h;
+                                sp.rot = members[i]->rot;
+                                sp.gold = keep;
+                                // (1.3.0-D) the OTHER door a stored bag's spot
+                                // can be born through -- its bundle rides too
+                                if (sp.bundle.empty()) {
+                                    sp.bundle =
+                                        TakePendingBundle(members[i]->obj->GetFormID());
+                                }
                             }
                         }
                     }
                     // the pool shrank: drop the trailing positions
                     if (!Grid::HeldPartnerObject()) {
                         for (std::size_t j = members.size(); j < slots.size(); ++j) {
+                            // ★(1.3.0-B) same rule as every other spot death:
+                            // the gold goes home instead of dying with the
+                            // slot. (Two pouches stored in one chest merge
+                            // into ONE shelf cell -- the second slot lands
+                            // here the very frame it was made.)
+                            if (const auto si = cl->spots.find(slots[j].first);
+                                si != cl->spots.end() && si->second.gold > 0) {
+                                SKSE::log::info(
+                                    "[LOOT] shelf slot dropped, {} G goes home ('{}')",
+                                    si->second.gold, slots[j].first);
+                                GoldCoins::GiveAwayGold(si->second.gold);
+                            }
                             cl->spots.erase(slots[j].first);
                         }
                     }
@@ -1927,8 +2890,24 @@ namespace
             }
 
             // pass 2: first-fit for everything unplaced
+            // ★(1.3.3) a companion fills its 10 x 8 pack FIRST and only
+            // grows past it when what it already carries genuinely will not
+            // fit (its own gear, a script's gift). The cap governs what the
+            // player may add; it never hides what is already inside.
             for (auto& it : cells) {
-                for (int r = 0; it.col < 0; ++r) {
+                if (companionBoard) {
+                    for (int r = 0; r + it.h <= kCompanionRows && it.col < 0; ++r) {
+                        for (int c = 0; c < cols; ++c) {
+                            if (!fits(c, r, it.w, it.h)) continue;
+                            it.col = c;
+                            it.row = r;
+                            mark(c, r, it.w, it.h);
+                            break;
+                        }
+                    }
+                    if (it.col >= 0) continue;
+                }
+                for (int r = companionBoard ? kCompanionRows : 0; it.col < 0; ++r) {
                     for (int c = 0; c < cols; ++c) {
                         if (fits(c, r, it.w, it.h)) {
                             it.col = c;
@@ -1945,7 +2924,20 @@ namespace
             if (cl) {
                 for (const auto& it : cells) {
                     if (!it.spotKey.empty()) {
-                        cl->spots[it.spotKey] = { it.col, it.row, it.w, it.h, it.rot };
+                        // ★★(1.3.0-A) THE THIRD DOOR WAS THE OVERWRITER. This
+                        // rewrite runs every frame, AFTER both shelving doors,
+                        // and its braced init left `gold` value-initialised --
+                        // so the amount either door had just recorded was
+                        // zeroed in the SAME frame (the diag pair: col/row
+                        // alive, gold 0). Position is this pass's to write;
+                        // the gold (and D: the bundle) is the layout's and
+                        // stays -- hence field-wise, never a whole-struct init.
+                        auto& sp = cl->spots[it.spotKey];
+                        sp.col = it.col;
+                        sp.row = it.row;
+                        sp.w = it.w;
+                        sp.h = it.h;
+                        sp.rot = it.rot;
                     }
                 }
             }
@@ -2069,7 +3061,14 @@ namespace
                         // display the tempered one's stats -- kAny means "first
                         // list carrying the trait", which is exactly the bug
                         // this whole refactor exists to kill.
-                        Grid::DrawItemTooltip(it.obj, it.count, -1, price, true,
+                        // ★(1.3.0) a shelved pouch's tooltip prints its stored
+                        // amount -- the icon already asked the layout (below),
+                        // but this call passed -1 and the "N / cap G" line
+                        // never drew.
+                        const int tipGold =
+                            GoldCoins::IsPouch(it.obj->GetFormID())
+                                ? ShelfGoldOf(it.spotKey) : -1;
+                        Grid::DrawItemTooltip(it.obj, it.count, tipGold, price, true,
                                               SourceRef(),
                                               it.perUnit ? Grid::ExtraScope::kUnit
                                                          : Grid::ExtraScope::kAny,
@@ -2118,6 +3117,7 @@ namespace
                             // only holds if the cursor is the item's middle from
                             // the moment it is lifted (-1 = centre).
                             g_actingSpot = it.spotKey;   // GI20: this cell's slot
+                            g_carryGlow = it.glow;       // (1.3.2) markers ride along
                             Grid::BeginPartnerCarry(it.obj, it.count, it.value,
                                 -1.0f, -1.0f, it.uid, it.xlIdx, it.ord, it.rot);
                         }
@@ -2129,7 +3129,39 @@ namespace
                         const bool rc = ImGui::IsItemClicked(ImGuiMouseButton_Right);
                         const bool splitLc = ImGui::GetIO().KeyShift &&
                                              ImGui::IsItemClicked(ImGuiMouseButton_Left);
-                        if (rc || splitLc) {
+                        // ★(1.3.1) a BAG manages on right-click HERE TOO -- the
+                        // player board's grammar (bag right-click is ALWAYS the
+                        // window toggle; trade and storage happen by drag only)
+                        // now holds on both sides. Taking the shelf bag home is
+                        // the DRAG; right-click opens its bundle window.
+                        // ★(1.3.2a) and the POUCH manages the same way: its
+                        // right-click is the withdraw window over the SLOT's
+                        // amount, exactly the player pouch's grammar.
+                        if ((rc || splitLc) && GoldCoins::IsPouch(it.obj->GetFormID())) {
+                            if (g_shelfPouchSpot == it.spotKey) {
+                                g_shelfPouchSpot.clear();
+                                Sfx::SelectOff();
+                            } else if (!it.spotKey.empty()) {
+                                g_shelfPouchSpot = it.spotKey;
+                                g_shelfPouchForm = it.obj->GetFormID();
+                                g_shelfPouchSlider =
+                                    (std::max)(1, ShelfGoldOf(it.spotKey) / 2);
+                                Sfx::SelectOn();
+                            }
+                        } else if ((rc || splitLc) && Grid::ResolveDef(it.obj).bag != 0) {
+                            const auto sb = std::find_if(g_shelfBags.begin(),
+                                g_shelfBags.end(), [&](const ShelfBagWin& a_w) {
+                                    return a_w.spot == it.spotKey;
+                                });
+                            if (sb != g_shelfBags.end()) {
+                                g_shelfBags.erase(sb);
+                                Sfx::BagClose();
+                            } else if (!it.spotKey.empty()) {
+                                g_shelfBags.push_back({ it.spotKey,
+                                                        it.obj->GetFormID() });
+                                Sfx::BagOpen();
+                            }
+                        } else if (rc || splitLc) {
                             if (it.locked) {   // GI42
                                 Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
                             } else if (!(it.obj->IsGold() || Grid::CanFitNewItem(it.obj))) {
@@ -2199,27 +3231,6 @@ namespace
                 RE::TESBoundObject* cellIconObj = it.obj;
                 const int shelfGold = GoldCoins::IsPouch(it.obj->GetFormID())
                                           ? ShelfGoldOf(it.spotKey) : 0;
-                // DIAG (temporary): a pouch on a shelf drew empty even though the
-                // store logged the amount. Say what the cell asked for and what
-                // the layout actually holds, once per pouch per open.
-                if (GoldCoins::IsPouch(it.obj->GetFormID())) {
-                    static std::set<std::string> s_said;
-                    if (s_said.insert(it.spotKey).second) {
-                        SKSE::log::info("[LOOTDIAG] pouch cell spotKey='{}' -> gold {}",
-                            it.spotKey, shelfGold);
-                        if (auto* pp = Partner()) {
-                            const auto ci = g_contLayouts.find(pp->GetFormID());
-                            if (ci == g_contLayouts.end()) {
-                                SKSE::log::info("[LOOTDIAG]   no layout for this container");
-                            } else {
-                                for (const auto& [k, s] : ci->second.spots) {
-                                    SKSE::log::info("[LOOTDIAG]   spot '{}' col={} row={} gold={}",
-                                        k, s.col, s.row, s.gold);
-                                }
-                            }
-                        }
-                    }
-                }
                 if (shelfGold > 0) {
                     if (auto* v = GoldCoins::PouchIconObjectFor(shelfGold)) cellIconObj = v;
                 }
@@ -2376,19 +3387,40 @@ namespace
                     }
                 }
             }
-            // F7: drop ghost — the SAME anchor/blocker verdict the drop will
-            // use (QueryStoreDrop), so preview and result can never disagree.
-            // Green = free spot (stores/moves here), red = swap / invalid.
-            // Spot-memory modes only (barter auto-packs; a preview would lie).
+            // F7: drop ghost — green = free spot (stores/moves here), red =
+            // swap / invalid. Spot-memory modes only (barter auto-packs; a
+            // preview would lie).
+            // ★★(1.3.2) COMPUTED HERE, not via QueryStoreDrop. That helper
+            // refuses unless `g_partnerHovered` is set -- and that flag is
+            // published AFTER this function returns, having been cleared at
+            // the top of the frame, so the query answered "not on a cell"
+            // every single time and the ghost never drew on any container.
+            // The anchor formula below is QueryStoreDrop's, verbatim, so
+            // preview and result still cannot disagree.
             if (SpotMemoryOn() && Grid::IsHolding() &&
                 ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
-                const auto sd = QueryStoreDrop();
                 int hw = 1, hh = 1;
                 float ox = 0.0f, oy = 0.0f;
-                if (sd.onCell && Grid::HeldFootprint(hw, hh, ox, oy)) {
-                    const ImU32 ghost = sd.freeSpot ? IM_COL32(90, 170, 90, 90)
-                                                    : IM_COL32(190, 60, 60, 110);
-                    const ImVec2 g0(base.x + sd.col * cell, base.y + sd.row * cell);
+                if (Grid::HeldFootprint(hw, hh, ox, oy)) {
+                    const ImVec2 m = ImGui::GetIO().MousePos;
+                    int gc = static_cast<int>(std::lround((m.x - base.x - ox) / cell));
+                    int gr = static_cast<int>(std::lround((m.y - base.y - oy) / cell));
+                    gc = (std::max)(0, (std::min)(Grid::kCols - hw, gc));
+                    gr = (std::max)(0, (std::min)(rows - hh, gr));
+                    int blockers = 0;
+                    for (const auto& pc : cells) {
+                        if (pc.col < 0 ||
+                            Grid::IsHeldPartnerUnit(pc.obj, pc.uid, pc.xlIdx, pc.ord)) {
+                            continue;
+                        }
+                        if (gc < pc.col + pc.w && gc + hw > pc.col &&
+                            gr < pc.row + pc.h && gr + hh > pc.row) {
+                            ++blockers;
+                        }
+                    }
+                    const ImU32 ghost = blockers == 0 ? IM_COL32(90, 170, 90, 90)
+                                                      : IM_COL32(190, 60, 60, 110);
+                    const ImVec2 g0(base.x + gc * cell, base.y + gr * cell);
                     dl->AddRectFilled(g0,
                         ImVec2(g0.x + hw * cell, g0.y + hh * cell), ghost);
                 }
@@ -2508,6 +3540,10 @@ namespace
                     }
                     const int span = Grid::CellSpanOf(c.obj);
                     if (span <= free && Grid::CanFitNewItem(c.obj)) {
+                        // ★(1.3.0) name the slot so the take retires IT --
+                        // pouch gold and bag bundles ride the slot, and the
+                        // pool-prune fallback only ran for vanished pools.
+                        g_actingSpot = c.spotKey;
                         RequestTake(c.obj, c.count);
                         free -= span;
                     }
@@ -2537,9 +3573,29 @@ namespace
         const float S    = Theme::Scale();
         const float cell = Grid::CellPx();
         const int   cols = Grid::kCols;
+        // the measurement belongs to ONE skin at ONE scale: both change the
+        // title bar's height and the padding, so a stale figure would size
+        // the window for the skin the player just left
+        {
+            static float s_forScale = -1.0f;
+            static int   s_forSkin = -1;
+            const int    skin = Theme::SkinIndex();
+            if (s_forScale != S || s_forSkin != skin) {
+                s_forScale = S;
+                s_forSkin = skin;
+                g_partnerChromeH = -1.0f;
+            }
+        }
         // F7: spot-memory containers get +2 spare rows of arranging space
         // (fixed width, variable height per spec)
-        const int   rows = (std::max)(4, placedRows) + (SpotMemoryOn() ? 2 : 0);
+        // ★(1.3.3) a COMPANION's board is exactly its capacity -- 10 x 8, no
+        // spare rows, so the pack the player may fill is the pack they see.
+        // It still stretches when what is already inside overflows it (see
+        // CompanionPartner): the cap governs additions, never visibility.
+        const bool  companion = CompanionPartner();
+        const int   rows = companion
+                               ? (std::max)(kCompanionRows, placedRows)
+                               : (std::max)(4, placedRows) + (SpotMemoryOn() ? 2 : 0);
         const int   visRows = (std::min)(rows, 12);   // scroll past 12 rows
         const float gridW = cols * cell;
         // reserve the scrollbar gutter ONLY when the list actually scrolls —
@@ -2564,9 +3620,27 @@ namespace
         // the two sit side by side, so a pad on one title line and not the
         // other is visible as a step between them.
         const float topPad = Theme::TitleTopPad();
-        const ImVec2 size(gridW + sbW + 2.0f * (insX + Theme::PadX() * S),
-                          barH + labelH + visRows * cell + 14.0f * S +
-                              BottomStripH() + 2.0f * insY);
+        // ★★(1.3.3) PadX()/PadY() ARE ALREADY SCALED (12 * g_scale). Multiplying
+        // by S again made this window's padding S^2 -- the same fault the title
+        // bar had in 1.2.1, invisible at the 1440p reference where S == 1 and
+        // a growing gap everywhere else. The height's own 14 * S was a
+        // hand-fitted stand-in for that padding and could only agree with it
+        // by accident, which is the strip of empty grid under the board.
+        // Both halves now name the SAME quantity, so the window is exactly
+        // its content: title + label + rows + bottom strip + the padding.
+        const float padX = Theme::PadX(), padY = Theme::PadY();
+        // The chrome above the board -- title bar, section label, the window's
+        // own top padding and the title's clearance -- MEASURED last frame
+        // (see the note by EndChild). The first frame of a session uses the
+        // old estimate and is corrected on the next one.
+        // ★topPad is subtracted because ApplyNext adds it back: the measured
+        // height already contains it (it is measured from the window's top).
+        const float chromeH = g_partnerChromeH > 0.0f
+                                  ? g_partnerChromeH
+                                  : barH + labelH + 2.0f * padY;
+        const ImVec2 size(gridW + sbW + 2.0f * (insX + padX),
+                          chromeH + visRows * cell + 1.0f +
+                              BottomStripH() + insY - topPad);
         ImVec2 defPos(120.0f, 200.0f);
         if (auto* m = wm->Find("main"); m && m->posKnown) {
             defPos = ImVec2(m->pos.x - size.x - 12.0f * S, m->pos.y);
@@ -2576,7 +3650,7 @@ namespace
         // the content starts at the default padding (left) while the width was
         // sized from insX (right) — a lopsided right margin. (See memory note.)
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
-            ImVec2(insX + Theme::PadX() * S, insY + Theme::PadY() * S));
+            ImVec2(insX + padX, insY + padY));   // (1.3.3) no second scale
         ImGui::Begin("##gi_partner", nullptr, kManagedWinFlags);
         wm->TitleBar("partner", title);
 
@@ -2647,6 +3721,25 @@ namespace
         // board's own edge never draws.
         ImGui::EndChild();
 
+        // ★★(1.3.3) MEASURE THE CHROME, DO NOT GUESS IT. The bottom strip is
+        // drawn at an ABSOLUTE offset from the window's bottom edge, so any
+        // disagreement between the requested height and what the title, the
+        // section label and the padding actually consume shows up as a band
+        // of empty grid between the board and that strip -- which is what it
+        // was. Three hand-fitted constants could only ever agree with the
+        // real layout by luck, and did not on this skin/scale.
+        // ★What is cached is the part that does NOT depend on the row count,
+        // so it converges once and then holds: a value that never changes
+        // cannot oscillate the window's size (the readback trap in
+        // reference_imgui_pixel_traps).
+        {
+            const float used = ImGui::GetCursorScreenPos().y - ImGui::GetWindowPos().y;
+            const float measured = std::round(used - (visRows * cell + 1.0f));
+            if (measured > 0.0f && std::abs(measured - g_partnerChromeH) > 0.5f) {
+                g_partnerChromeH = measured;
+            }
+        }
+
         DrawPartnerBottomBar(size, gridW);               // stage 4
         TakeAllShortcut(cells);                          // stage 5
 
@@ -2684,6 +3777,62 @@ namespace
     }
 
     // ---- F7: container spot memory — public surface ----
+
+    // ★(1.3.3) reads g_lastCells -- this frame's partner placement -- so it
+    // lives down here with the other consumers of it.
+    bool PartnerHasRoomFor(RE::TESBoundObject* a_obj, int a_count)
+    {
+        // only a living follower is bounded; chests, corpses and merchants
+        // answer yes as they always have
+        if (!a_obj || !CompanionPartner()) return true;
+        // gold is weightless bookkeeping on both sides, and a stack that
+        // MERGES needs no cell of its own
+        if (a_obj->IsGold()) return true;
+        const int cap = Grid::StackCap(a_obj);
+        if (cap > 1) {
+            int loose = 0;
+            for (const auto& c : g_lastCells) {
+                if (c.obj == a_obj) loose += c.count;
+            }
+            if (loose > 0 && (loose % cap) != 0 &&
+                a_count <= cap - (loose % cap)) {
+                return true;   // room inside a stack already on the shelf
+            }
+        }
+        // ...otherwise it needs a free rect inside the 10 x kCompanionRows
+        // pack, measured against the board the player is looking at.
+        const auto d = Grid::ResolveDef(a_obj);
+        const int w = (std::max)(1, d.w), h = (std::max)(1, d.h);
+        const int cols = Grid::kCols;
+        std::vector<char> occ(static_cast<std::size_t>(cols) * kCompanionRows, 0);
+        for (const auto& c : g_lastCells) {
+            if (c.col < 0) continue;
+            for (int y = 0; y < c.h; ++y) {
+                const int rr = c.row + y;
+                if (rr < 0 || rr >= kCompanionRows) continue;
+                for (int x = 0; x < c.w; ++x) {
+                    const int cc = c.col + x;
+                    if (cc < 0 || cc >= cols) continue;
+                    occ[static_cast<std::size_t>(rr) * cols + cc] = 1;
+                }
+            }
+        }
+        for (int r = 0; r + h <= kCompanionRows; ++r) {
+            for (int c = 0; c + w <= cols; ++c) {
+                bool free = true;
+                for (int y = 0; y < h && free; ++y) {
+                    for (int x = 0; x < w; ++x) {
+                        if (occ[static_cast<std::size_t>(r + y) * cols + c + x]) {
+                            free = false;
+                            break;
+                        }
+                    }
+                }
+                if (free) return true;
+            }
+        }
+        return false;
+    }
 
     StoreDrop QueryStoreDrop()
     {
@@ -2786,7 +3935,7 @@ namespace
     {
         constexpr std::uint32_t kContMaxStr = 512;
         constexpr std::uint32_t kContMaxEntries = 65536;
-        constexpr std::uint32_t kContCosaveVersion = 3;   // v2: per-spot rotation  v3: a stored pouch's gold
+        constexpr std::uint32_t kContCosaveVersion = 8;   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag
 
         bool ContWriteStr(SKSE::SerializationInterface* a_intfc, const std::string& a_s)
         {
@@ -2823,6 +3972,22 @@ namespace
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.h));
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.rot));   // v2
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.gold));  // v3
+                // v4: the stored bag's bundle (raw FormIDs; resolved on load)
+                a_intfc->WriteRecordData(static_cast<std::uint32_t>(s.bundle.size()));
+                for (const auto& b : s.bundle) {
+                    a_intfc->WriteRecordData(b.form);
+                    a_intfc->WriteRecordData(static_cast<std::int32_t>(b.count));
+                    a_intfc->WriteRecordData(b.sig);
+                    // v5: the entry's anchor inside the bag window
+                    a_intfc->WriteRecordData(static_cast<std::int32_t>(b.col));
+                    a_intfc->WriteRecordData(static_cast<std::int32_t>(b.row));
+                    // v6: its quarter-turns
+                    a_intfc->WriteRecordData(static_cast<std::int32_t>(b.rot));
+                    // v7: its marker bits
+                    a_intfc->WriteRecordData(static_cast<std::int32_t>(b.glow));
+                    // v8: someone else's goods
+                    a_intfc->WriteRecordData(static_cast<std::int32_t>(b.stolen ? 1 : 0));
+                }
             }
         }
         SKSE::log::info("[LOOT] cosave: saved {} container layouts", g_contLayouts.size());
@@ -2867,7 +4032,49 @@ namespace
                 if (a_version >= 3) {   // a stored pouch's own gold
                     if (!a_intfc->ReadRecordData(gold)) return;
                 }
-                cl.spots[std::move(key)] = { col, row, w, h, rot & 3, gold };
+                std::vector<BundleItem> bundle;
+                if (a_version >= 4) {   // a stored bag's bundle
+                    std::uint32_t nb = 0;
+                    if (!a_intfc->ReadRecordData(nb) || nb > kContMaxEntries) return;
+                    bundle.reserve(nb);
+                    for (std::uint32_t bi = 0; bi < nb; ++bi) {
+                        RE::FormID    f = 0;
+                        std::int32_t  bc = 0;
+                        std::uint16_t bs = 0;
+                        if (!a_intfc->ReadRecordData(f) || !a_intfc->ReadRecordData(bc) ||
+                            !a_intfc->ReadRecordData(bs)) {
+                            return;
+                        }
+                        std::int32_t bcol = -1, brow = -1, brot = 0;
+                        if (a_version >= 5) {   // bundle anchors
+                            if (!a_intfc->ReadRecordData(bcol) ||
+                                !a_intfc->ReadRecordData(brow)) {
+                                return;
+                            }
+                        }
+                        if (a_version >= 6) {   // bundle rotation
+                            if (!a_intfc->ReadRecordData(brot)) return;
+                        }
+                        std::int32_t bglow = 0;
+                        if (a_version >= 7) {   // bundle markers
+                            if (!a_intfc->ReadRecordData(bglow)) return;
+                        }
+                        std::int32_t bstolen = 0;
+                        if (a_version >= 8) {   // someone else's goods
+                            if (!a_intfc->ReadRecordData(bstolen)) return;
+                        }
+                        // load-order shift: unresolvable contents are dropped
+                        // (their engine items simply stay visible on the shelf)
+                        RE::FormID rf = 0;
+                        if (a_intfc->ResolveFormID(f, rf) && rf != 0 && bc > 0) {
+                            bundle.push_back({ rf, bc, bs, bcol, brow, brot & 3,
+                                               static_cast<std::uint8_t>(bglow),
+                                               bstolen != 0 });
+                        }
+                    }
+                }
+                cl.spots[std::move(key)] = { col, row, w, h, rot & 3, gold,
+                                             std::move(bundle) };
             }
             if (ok && resolved != 0) {
                 maxStamp = (std::max)(maxStamp, stamp);
@@ -2885,6 +4092,8 @@ namespace
         g_contStamp = 0;
         g_storeHint = {};
         g_pendingSpots.clear();   // GI18
+        g_pendingBundles.clear();   // (1.3.0-D) bundles from the previous save
+        g_incomingBundles.clear();
         g_partnerGridLive = false;
         g_lastCells.clear();
     }

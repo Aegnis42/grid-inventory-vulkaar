@@ -40,6 +40,10 @@ namespace FUI::Grid
     // returning (or pre-1.3.0) amount belongs to.
     [[nodiscard]] std::vector<std::string> PouchTiles();
     [[nodiscard]] std::string              AnyPouchTile();
+    // ★(1.3.0) hand any waiting return to the pouch tiles, NEW tiles first
+    // (the pouch that just walked in claims its own gold before any
+    // pre-existing empty pouch gets a look). Called on every rebuild.
+    void ClaimIncomingPouchGold();
 
     // Game-side actions (main.cpp wires these):
     //  sound(obj, up): vanilla per-item pick-up (up=true) / put-down sound
@@ -572,6 +576,41 @@ namespace FUI::Grid
     // Phase 2 shared cell renderer: count/value badge hugging the tile's
     // top-left corner, full black outline (player tiles + partner grid).
     void DrawCountBadge(ImDrawList* a_dl, const ImVec2& a_tileMin, const char* a_text);
+
+    // ★(1.3.1) soul-gem recharge (hover + T -- the vanilla ChargeItem key):
+    // a popup lists the player's filled soul gems; picking one recharges the
+    // hovered enchanted weapon. Worn units included -- while equipped the
+    // charge is drained as DAMAGE on the hand's item-charge AV, so the
+    // restore goes through RestoreActorValue and the ExtraCharge both.
+    void OpenRecharge(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                      std::uint16_t a_sig, bool a_worn, int a_hand);
+    void DrawRechargeWindow();          // top level, pouch-window pattern
+    [[nodiscard]] bool IsRechargeOpen();
+    bool CloseRecharge();               // I/ESC layering
+    void ProcessRecharge();             // UIRoot::Tick -- engine mutations
+
+    // ★(1.3.1) shelf-bag intake: the held PLAYER-side item, when it may be
+    // stored into a shelf bag (not a bag itself, not a coin tile, not
+    // quest-locked). nullptr otherwise -- peek before committing.
+    [[nodiscard]] RE::TESBoundObject* HeldShelfStorable();
+    // Commit it into the open shelf bag: queue the store, note the pending
+    // remove, drop the carry. Fills the bundle entry's identity. False when
+    // nothing eligible rides the cursor.
+    bool CommitHeldToShelfBag(RE::FormID& a_form, int& a_count,
+                              std::uint16_t& a_sig, int& a_rot,
+                              std::uint8_t& a_glow, bool& a_stolen);
+    // ★(1.3.2) the carry's quarter-turns (0..3) -- the shelf-bag window
+    // seats and draws its entries at the angle they were dropped at.
+    [[nodiscard]] int HeldRot();
+    // ★(1.3.2a) put a withdrawn shelf-pouch amount on the cursor as a
+    // pinned purse (player-pouch withdraw grammar; excess stays walking).
+    void CarryWithdrawnGold(int a_value);
+    // The whole carry, for the shelf-bag window's partner-side intake:
+    // false = nothing held. DropHeldForShelf resets the carry WITHOUT any
+    // engine transfer (the item never left the container).
+    bool PeekHeldForShelf(RE::TESBoundObject*& a_obj, int& a_count,
+                          std::uint16_t& a_sig, int& a_rot, bool& a_fromPartner);
+    void DropHeldForShelf();
 
     // G2: coin-pouch withdraw window (slider) — top level, settings pattern.
     void DrawPouchWindow();

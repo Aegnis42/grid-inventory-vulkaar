@@ -464,6 +464,34 @@ namespace
                             }
                         });
                     }
+                    // ★(1.3.1) the game's MAGIC key hops out: close the grid
+                    // and raise the vanilla MagicMenu, journal-style. The
+                    // kItemMenu context never translates this key into a user
+                    // event, so it is read raw here exactly like the
+                    // Inventory key above (same 0xFF fallback story).
+                    static const RE::BSFixedString s_magicEvent("Magic");
+                    auto mscan = cm ? cm->GetMappedKey(s_magicEvent,
+                        RE::INPUT_DEVICE::kKeyboard) : 0xFF;
+                    if (mscan == 0xFF || mscan == 0xFFFFFFFF) mscan = 0x19;   // default P
+                    if (btn->GetIDCode() == mscan) {
+                        SKSE::GetTaskInterface()->AddUITask([]() {
+                            if (FUI::UIRoot::IsTextInputActive()) {
+                                return;   // typing 'p' into a text field
+                            }
+                            // plain inventory only: a loot/barter session has
+                            // a partner to tear down, and vanilla refuses menu
+                            // hopping out of those screens too
+                            if (FUI::LootBarter::CurrentMode() !=
+                                FUI::LootBarter::Mode::kNormal) {
+                                return;
+                            }
+                            FUI::UIRoot::Close();
+                            if (auto* q = RE::UIMessageQueue::GetSingleton()) {
+                                q->AddMessage(RE::MagicMenu::MENU_NAME,
+                                              RE::UI_MESSAGE_TYPE::kShow, nullptr);
+                            }
+                        });
+                    }
                 }
             }
             return RE::BSEventNotifyControl::kContinue;
@@ -1804,7 +1832,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 2, 1, 0 },
+    .Version              = { 1, 3, 0, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)

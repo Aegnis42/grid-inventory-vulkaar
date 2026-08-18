@@ -58,6 +58,10 @@ namespace FUI::GoldCoins
         {
             std::string best; int bv = -1;
             for (const auto& [k, v] : g_pouchStored) {
+                // ★(1.3.0) the reserved parking key is NOT a tile: treating
+                // it as "the fullest pouch" let auto-store feed the parking
+                // lot and let a departing pouch walk off with parked gold.
+                if (k == kReturnKey) continue;
                 if (v > bv) { bv = v; best = k; }
             }
             return best;
@@ -110,6 +114,22 @@ namespace FUI::GoldCoins
         // the intended penalty).
         int g_awayGold = 0;
 
+        // ★(1.3.0-C) WHICH pouch tile the UI last committed to leave. The
+        // container-change event only names the FORM, so OnPouchLeftPlayer
+        // used to guess ("the fullest one") -- store pouch B while holding a
+        // fuller A and A's gold walked out with B. Every UI exit path passes
+        // through Grid::NotePendingRemove WITH its tile key; it names the
+        // tile here. One-shot: consumed by the next OnPouchLeftPlayer,
+        // cleared on session end / load (a stale hint must not outlive the
+        // transaction it described).
+        std::string g_leavingHint;
+
+        // ★(1.3.0) claim passes during which ONLY a freshly-born pouch tile
+        // may take the waiting return (see ClaimReturned). Armed whenever a
+        // pouch's gold starts travelling home; a handful of passes covers
+        // the request -> Tick -> rebuild gap with room to spare.
+        int g_returnFreshGrace = 0;
+
         // auto-store: ledger snapshot of the PREVIOUS tick (after our own
         // ops). -1 = uninitialised (skip the first tick after load/new game
         // so the starting gold is NOT mistaken for a fresh pickup).
@@ -124,7 +144,8 @@ namespace FUI::GoldCoins
         // lands next tick.
         struct LedgerOp
         {
-            enum Kind { kDropCoin, kPouchLeave, kPouchReturn };
+            enum Kind { kDropCoin, kPouchLeave, kPouchReturn,
+                        kDebit };   // (1.3.2a) plain debit -- no awayGold tie
             Kind kind;
             int  value;
         };
@@ -259,25 +280,43 @@ namespace FUI::GoldCoins
     int PouchStored() { return PouchSum(); }   // legacy: the whole player
     // ★★The reserved key is not a tile -- no board ever draws it. The grid
     // calls this once it knows which tiles are pouches, and the waiting
-    // amount moves onto the first one with room. Anything that will not fit
+    // amount moves onto a pouch with room. Anything that will not fit
     // (the player carried one pouch, stored 10k, then lost the pouch) stays
     // parked rather than being silently destroyed.
-    void ClaimReturned(const std::vector<std::string>& a_pouchTiles)
+    // ★(1.3.0) FRESH TILES FIRST, AND ONLY FRESH WHILE THE GRACE HOLDS.
+    // Returning shelf gold belongs to the pouch that carried it, and that
+    // pouch's tile is born a rebuild or two AFTER the amount is parked (the
+    // engine transfer lands on a later Tick). "First tile with room" is how
+    // a pre-existing EMPTY pouch swallowed a returning pouch's gold and the
+    // returner itself drew empty. The grace counts claim passes, not time:
+    // a pass that finds no fresh tile leaves the amount parked and burns
+    // one; a save older than v6 parks with no grace and settles at once.
+    void ClaimReturned(const std::vector<std::string>& a_fresh,
+                       const std::vector<std::string>& a_known)
     {
         const auto it = g_pouchStored.find(kReturnKey);
         if (it == g_pouchStored.end()) return;
-        for (const auto& k : a_pouchTiles) {
-            if (it->second <= 0) break;
-            if (k == kReturnKey) continue;
+        const auto handTo = [&](const std::string& k) {
+            if (it->second <= 0 || k == kReturnKey) return;
             int& held = g_pouchStored[k];
             const int move = (std::min)(it->second, kPouchCap - held);
-            if (move <= 0) continue;
+            if (move <= 0) return;
             held += move;
-            g_pouchStored[kReturnKey] -= move;
+            it->second -= move;
             SKSE::log::info("[GOLD] incoming {} G claimed by pouch '{}'", move, k);
             g_dirty = true;
+        };
+        for (const auto& k : a_fresh) handTo(k);
+        if (it->second > 0) {
+            if (g_returnFreshGrace > 0) {
+                --g_returnFreshGrace;
+            } else {
+                for (const auto& k : a_known) handTo(k);
+            }
+        } else {
+            g_returnFreshGrace = 0;
         }
-        if (g_pouchStored[kReturnKey] <= 0) g_pouchStored.erase(kReturnKey);
+        if (it->second <= 0) g_pouchStored.erase(kReturnKey);
     }
 
     // ★★A STORED POUCH KEEPS ITS GOLD, and the chest shelf is where it now
@@ -305,8 +344,27 @@ namespace FUI::GoldCoins
         g_pending.push_back({ LedgerOp::kPouchReturn, a_amount });
         g_pouchStored[kReturnKey] =
             (std::min)(g_pouchStored[kReturnKey] + a_amount, kPouchCap);
+        g_returnFreshGrace = 4;   // (1.3.0) the ARRIVING pouch's tile claims this
         g_dirty = true;
         SKSE::log::info("[GOLD] shelf handed back {} G -> waiting for a tile", a_amount);
+    }
+
+    // ★(1.3.2a) shelf-pouch banking. The shelf SPOT is the book; these move
+    // the engine gold to match -- a plain ledger credit/debit with no pouch
+    // parking, deferred to Tick like every other ledger op (WalkingGold
+    // reflects them the same frame via PendingLedgerDelta).
+    void CreditLedger(int a_amount)
+    {
+        if (a_amount <= 0) return;
+        g_pending.push_back({ LedgerOp::kPouchReturn, a_amount });
+        g_dirty = true;
+    }
+
+    void DebitLedger(int a_amount)
+    {
+        if (a_amount <= 0) return;
+        g_pending.push_back({ LedgerOp::kDebit, a_amount });
+        g_dirty = true;
     }
 
     int PouchStoredOf(const std::string& a_tileKey)
@@ -706,10 +764,22 @@ namespace FUI::GoldCoins
 
     void SetBarterContext(bool a_open) { g_barterContext = a_open; }
 
+    void NotePouchLeaving(const std::string& a_tileKey)
+    {
+        g_leavingHint = a_tileKey;
+    }
+
     void OnPouchLeftPlayer()
     {
-        const std::string key = FullestPouch();
-        const int carried = key.empty() ? 0 : g_pouchStored[key];
+        // ★(1.3.0-C) trust the UI's word over the guess -- and trust it even
+        // when the named tile holds NOTHING: storing an empty pouch while a
+        // full one stays behind must move zero gold ("fullest" moved the full
+        // one's). The guess survives only for departures the UI never saw
+        // (scripts, gift menu).
+        std::string key = g_leavingHint;
+        g_leavingHint.clear();
+        if (key.empty()) key = FullestPouch();
+        const int carried = PouchStoredOf(key);
         if (carried <= 0) return;
 
         // SALE: the vendor buys the pouch at its base (empty) value — the
@@ -744,6 +814,7 @@ namespace FUI::GoldCoins
         g_pending.push_back({ LedgerOp::kPouchReturn, g_awayGold });
         g_pouchStored[kReturnKey] =
             (std::min)(g_pouchStored[kReturnKey] + g_awayGold, kPouchCap);
+        g_returnFreshGrace = 4;   // (1.3.0) the pouch that just walked in claims this
         g_awayGold = 0;
         g_dirty = true;
     }
@@ -828,6 +899,18 @@ namespace FUI::GoldCoins
             case LedgerOp::kPouchReturn:
                 a_p->AddObjectToContainer(a_gold, nullptr, a_op.value, nullptr);
                 if (g_lastLedger >= 0) g_lastLedger += a_op.value;
+                break;
+            case LedgerOp::kDebit:
+                // (1.3.2a) shelf-pouch deposit: the value just left a coin
+                // tile (walking), so the ledger covers it -- clamp anyway
+                {
+                    const int d = (std::min)(a_op.value, CountOf(a_p, a_gold));
+                    if (d > 0) {
+                        a_p->RemoveItem(a_gold, d, RE::ITEM_REMOVE_REASON::kRemove,
+                            nullptr, nullptr);
+                    }
+                    if (g_lastLedger >= 0) g_lastLedger -= d;
+                }
                 break;
             }
         }
@@ -1123,6 +1206,8 @@ namespace FUI::GoldCoins
         g_pouchStored.clear();
         g_sackRefs.clear();
         g_awayGold = 0;
+        g_leavingHint.clear();   // (1.3.0-C) a hint from the previous save is a lie
+        g_returnFreshGrace = 0;  // (1.3.0) ...and so is a grace from one
         g_pinned.clear();
         // per-save state: a new game must not inherit the last save's cycles,
         // or its first merchants look "already stocked" and skip a rotation

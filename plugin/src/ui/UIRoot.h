@@ -59,6 +59,14 @@ namespace FUI::UIRoot
     void Open();   // queue kShow for GridInventoryMenu
     void Close();  // queue kHide
 
+    // ★DIAG, wired but not called (same policy as g_poolTrace). SkyUI-style
+    // widgets -- SunHelm's among them -- show only while the TOP of the HUD's
+    // mode stack is in their allowed list, so a mode pushed and never popped
+    // hides them PERMANENTLY. Call this around a suspect open/close to dump
+    // the stack ("[HUDMODE] tag: [...]") and the culprit names itself.
+    // (Reported once against 1.2.x, never reproduced here.) UI thread only.
+    void LogHudModes(const char* a_tag);
+
     // I/ESC close staging: an open settings popup or EDIT mode closes FIRST
     // (returns true); only when nothing was closed does the caller close the
     // whole inventory.

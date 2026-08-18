@@ -1279,19 +1279,34 @@ namespace FUI::Wheeler
                 RE::BSTEventSource<RE::InputEvent*>* a_src)
             {
                 struct Saved { RE::ButtonEvent* b; float v; };
-                Saved saved[16]{};
-                int   n = 0;
+                struct SavedT { RE::ThumbstickEvent* t; float x, y; };
+                Saved  saved[16]{};
+                SavedT savedT[4]{};
+                int    n = 0, nt = 0;
                 if (g_open && a_event) {
                     for (auto* e = *a_event; e; e = e->next) {
-                        // ★★★BUTTONS ONLY. Mouse and stick MOTION is left
-                        // alone, because that motion is how the wheel is aimed
-                        // -- blanking it here (and it was blanked, without a
-                        // restore) left the player able to step slots with the
-                        // scroll wheel and nothing else, which is why dragging
-                        // did not feel like dragging.
-                        // ★The camera is not at risk: LookLock refuses the same
-                        // motion one layer further in. Two doors, and only one
-                        // of them is on the road the wheel's own aim travels.
+                        // ★★★BUTTONS, plus the LEFT stick. Mouse and RIGHT
+                        // stick MOTION is left alone, because that motion is
+                        // how the wheel is aimed -- blanking it here (and it
+                        // was blanked, without a restore) left the player able
+                        // to step slots with the scroll wheel and nothing
+                        // else, which is why dragging did not feel like
+                        // dragging.
+                        // ★(1.3.2) The LEFT stick is MOVEMENT, and movement is
+                        // blocked while the wheel is up (header contract). It
+                        // used to be the aim stick, which is why stick motion
+                        // was historically exempt wholesale; the aim lives on
+                        // the RIGHT stick now, and the camera hooks already
+                        // refuse that one further in. Blank-call-restore, so
+                        // our own sink (later in the chain) still reads it.
+                        if (auto* t = e->AsThumbstickEvent()) {
+                            if (!t->IsRight() && nt < 4) {
+                                savedT[nt++] = { t, t->xValue, t->yValue };
+                                t->xValue = 0.0f;
+                                t->yValue = 0.0f;
+                            }
+                            continue;
+                        }
                         auto* b = e->AsButtonEvent();
                         if (!b) continue;
                         // ★Never blank what cannot be put back. If the save
@@ -1306,6 +1321,10 @@ namespace FUI::Wheeler
                 }
                 const auto r = _ProcessEvent(a_this, a_event, a_src);
                 for (int i = 0; i < n; ++i) saved[i].b->value = saved[i].v;
+                for (int i = 0; i < nt; ++i) {
+                    savedT[i].t->xValue = savedT[i].x;
+                    savedT[i].t->yValue = savedT[i].y;
+                }
                 return r;
             }
             static void Install()
@@ -2795,11 +2814,47 @@ namespace FUI::Wheeler
         if (g_open && a_event->IsDown()) {
             constexpr std::uint32_t kA = 30, kD = 32;              // scan codes
             constexpr std::uint32_t kDLeft = 0x0004, kDRight = 0x0008;
+            // ★(1.3.2) the pad hotkey resolves to a D-PAD direction in this
+            // layout, so "hold it AND press D-pad left/right" was physically
+            // impossible. The triggers are the pad's natural left/right pair
+            // (LT back, RT forward), and Back cycles forward for pads where
+            // the triggers are busy. D-pad left/right stays for layouts
+            // whose hotkey leaves it free.
+            constexpr std::uint32_t kBack = 0x0020, kLT = 0x0009, kRT = 0x000A;
+
+            // ★★(1.3.2) THE PAD'S TWO HANDS. The mouse has had them since the
+            // wheel shipped -- left button = right hand, right button = left
+            // hand -- and the pad had neither: letting go of the hotkey was
+            // the only way to act, so it could only ever equip to the right
+            // hand and there was no way to take anything off.
+            // ★A and X, NOT A and B. X is what "equip" already means on this
+            // pad: our own inventory routes the item screens' Equip binding
+            // (ue->equip / xButton) to the same click the mouse's right
+            // button makes, so the button the player already presses to put
+            // something on is the button that puts it in the other hand here.
+            // B is the engine's Cancel and is left alone.
+            // ★UseFav is a TOGGLE (worn -> unequip), so one button covers
+            // equip and unequip for its hand, and g_itemActed keeps the
+            // release from acting a second time on top of it.
+            constexpr std::uint32_t kPadA = 0x1000, kPadX = 0x4000;
+            if (pad && (id == kPadA || id == kPadX) && G(g_group).click) {
+                if (g_sel >= 0 && Eligible(g_group, g_sel)) {
+                    G(g_group).click(g_sel, /*leftHand*/ id == kPadX);
+                    Sfx::Favorite();
+                } else {
+                    Sfx::SelectOff();   // nothing under the aim
+                }
+                return true;
+            }
+
             int dir = 0;
             if (!pad && id == kA) dir = -1;
             else if (!pad && id == kD) dir = 1;
             else if (pad && id == kDLeft) dir = -1;
             else if (pad && id == kDRight) dir = 1;
+            else if (pad && id == kLT) dir = -1;
+            else if (pad && id == kRT) dir = 1;
+            else if (pad && id == kBack) dir = 1;
             if (dir) {
                 g_group = (g_group + dir + kGroups) % kGroups;
                 g_groupT = 0.0f;   // re-ink the ring for the new list
@@ -2924,7 +2979,12 @@ namespace FUI::Wheeler
 
     bool OnThumbstick(const RE::ThumbstickEvent* a_event)
     {
-        if (!g_open || !a_event || a_event->IsRight()) return false;
+        // ★(1.3.2) the RIGHT stick aims the wheel now (user request); the
+        // LEFT stick is muted with the rest of movement while the wheel is
+        // up (InputLock -- the header contract: nothing else reaches the
+        // game). The camera is not fighting for the right stick either:
+        // LookLock refuses its motion while the wheel is open.
+        if (!g_open || !a_event || !a_event->IsRight()) return false;
         g_padDriving = true;
         const float x = a_event->xValue, y = a_event->yValue;
         if (x * x + y * y > 0.36f) {
