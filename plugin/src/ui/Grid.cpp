@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>   // strcmp: the carry-exclusion fallback names its reason
 #include <deque>
 #include <fstream>
 #include <map>
@@ -3659,6 +3660,63 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         trace("REMOVED from plain");
                         return;
                     }
+                    // ★★★A CARRIED UNIT COMES OFF THE BOARD, WHATEVER ITS
+                    // SIGNATURE SAYS NOW.
+                    //
+                    // The signature hashes the unit's own numbers -- temper
+                    // (ExtraHealth), charge (ExtraCharge), poison doses -- and
+                    // any of them can move between the frame the item was
+                    // picked up and the rebuild that follows: the engine splits
+                    // a unit out of its stack to hand it over, a script tops a
+                    // charge up, an ownership stamp lands. When it does, the
+                    // exact (uid, sig) match above finds nothing and the old
+                    // code did NOTHING -- so the unit sat on the cursor AND on
+                    // the board at once. It looked like a duplicate, it blocked
+                    // its own cell, and dropping it therefore fell through to
+                    // the first free square. Reported as "weapons and armour
+                    // cannot be moved, they jump to the front gap"; a plain
+                    // item (no list, no signature) was never affected, which is
+                    // exactly which items the reports named.
+                    //
+                    // For a HELD unit the count is not in question -- the player
+                    // is holding it -- so only "which one" is, and inside a pool
+                    // that has no answer by construction (units are placed in
+                    // position order). Take the nearest identity we can prove,
+                    // then any unit at all; an unmatched carry must never leave
+                    // the board's total one too high.
+                    // ★Only the carry. A queued removal or a trash-parked unit
+                    // that fails to match is a different question -- guessing
+                    // there would hide a unit the player still owns.
+                    const bool held = why && std::strcmp(why, "held") == 0;
+                    if (held) {
+                        if (uid != 0) {   // same unique id, drifted signature
+                            for (auto it = insts.begin(); it != insts.end(); ++it) {
+                                if (it->uid != uid) continue;
+                                if (--it->units <= 0) insts.erase(it);
+                                trace("REMOVED by uid (signature drifted)");
+                                return;
+                            }
+                        }
+                        if (sig != 0) {   // same signature, uid dropped
+                            for (auto it = insts.begin(); it != insts.end(); ++it) {
+                                if (it->sig != sig) continue;
+                                if (--it->units <= 0) insts.erase(it);
+                                trace("REMOVED by sig (uid dropped)");
+                                return;
+                            }
+                        }
+                        if (!insts.empty()) {
+                            auto it = std::prev(insts.end());
+                            if (--it->units <= 0) insts.erase(it);
+                            trace("REMOVED as any listed unit (carry must leave)");
+                            return;
+                        }
+                        if (plain > 0) {
+                            --plain;
+                            trace("REMOVED as any plain unit (carry must leave)");
+                            return;
+                        }
+                    }
                     trace("no match (no-op)");
                 };
                 for (const auto& u : OffBoardUnitsFor(a_entry ? a_entry->object : nullptr,
@@ -6656,6 +6714,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     void MarkCapacityDirty() { g_capacityDirty = true; }
+
+    void SetPoolTrace(bool a_on)
+    {
+        if (g_poolTrace == a_on) return;
+        g_poolTrace = a_on;
+        SKSE::log::info("[GRID] pool trace {}", a_on ? "ON" : "off");
+    }
 
     namespace
     {

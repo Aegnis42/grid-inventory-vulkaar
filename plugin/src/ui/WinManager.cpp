@@ -1,4 +1,5 @@
 ﻿#include "ui/IconCache.h"
+#include "ui/Grid.h"
 #include "ui/Lang.h"
 #include "ui/LootBarter.h"
 #include "ui/Theme.h"
@@ -293,6 +294,15 @@ namespace FUI
             }
             if (key == "!skin3") {
                 Theme::SetSkinByName(rest.c_str());
+                continue;
+            }
+            // Diagnostics switch, read from the same ini the skin and
+            // language live in. OFF unless the file says so -- it is here for
+            // reports that cannot be reproduced on the author's machine: the
+            // [POOL] / [TAKE] lines name the pool, the signature and which
+            // unit actually came off the board.
+            if (key == "!pooltrace") {
+                Grid::SetPoolTrace(rest == "1" || rest == "true");
                 continue;
             }
             if (key == "!lang") {

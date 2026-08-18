@@ -34,6 +34,13 @@ namespace FUI::Grid
     // items at their real size (sword 1x3, helmet 2x2) instead of 1x1.
     [[nodiscard]] GridDef ResolveDef(RE::TESBoundObject* a_obj);
 
+    // ★Turn the [POOL]/[TAKE]/[CHECK] diagnostics on from the ini
+    // ("!pooltrace = 1" in GridInventory_ui.ini). Ships OFF. These are what
+    // turn "a spare vanished" or "it will not move" into a log line naming
+    // the pool, the signature and which unit came off the board -- so a
+    // report that cannot be reproduced here can still be diagnosed there.
+    void SetPoolTrace(bool a_on);
+
     // ★Tile keys of the coin pouches on the board right now, front cell
     // first. GoldCoins needs them for two things it cannot work out on its
     // own: which pouch an unaddressed deposit should fill, and which one a
