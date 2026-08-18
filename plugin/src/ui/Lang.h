@@ -20,6 +20,15 @@ namespace FUI::Lang
     // impossible. Adding a string = adding one row here; translations catch up
     // through their .ini files and show English until they do.
     //   X(name, en)
+    // ★★EQUIP SLOT strings. The nine slots the doll knows, plus "Accessory"
+    // for every biped slot it does not -- which is what SlotAccepts already
+    // files them as, so the tooltip and the doll cannot disagree.
+    // ★Bethesda names the mod slots too (kModBack and friends) and they are
+    // deliberately NOT used: modders ignore that intent (47 carries backpacks,
+    // capes, quivers and wings alike), while the NUMBER is never wrong and is
+    // what every mod page and conflict guide quotes.
+    // ★Nothing multi-line may sit INSIDE the macro below -- each line needs a
+    // trailing backslash and one missing ends it. That is why this is here.
     #define FUI_LANG_STRINGS(X)                                                                                 \
         X(Inventory, "Inventory")   /* main title — sentence case, like every bag title */                                                        \
         X(Edit, "EDIT")                                                                                     \
@@ -53,6 +62,26 @@ namespace FUI::Lang
         X(Armor, "Armor")                                                                                   \
         X(Weight, "Weight")                                                                                 \
         X(Value, "Value")                                                                                   \
+        X(SlotHead, "Head")                                                                                 \
+        X(SlotBody, "Body")                                                                                 \
+        X(SlotHands, "Hands")                                                                               \
+        X(SlotFeet, "Feet")                                                                                 \
+        X(SlotShield, "Shield")                                                                             \
+        X(SlotAmulet, "Amulet")                                                                             \
+        X(SlotRing, "Ring")                                                                                 \
+        X(SlotCirclet, "Circlet")                                                                           \
+        X(SlotEars, "Ears")                                                                                 \
+        X(SlotAccessory, "Accessory")                                                                       \
+        X(WeapDagger, "Dagger")                                                                             \
+        X(WeapSword, "Sword")                                                                               \
+        X(WeapWarAxe, "War Axe")                                                                            \
+        X(WeapMace, "Mace")                                                                                 \
+        X(WeapGreatsword, "Greatsword")                                                                     \
+        X(WeapBattleaxe, "Battleaxe")                                                                       \
+        X(WeapWarhammer, "Warhammer")                                                                       \
+        X(WeapBow, "Bow")                                                                                   \
+        X(WeapCrossbow, "Crossbow")                                                                         \
+        X(WeapStaff, "Staff")                                                                               \
         X(InventoryFull, "Inventory is full - no room for this item")   /* capacity: pickup blocked */      \
         X(BuyPresetTab, "Buy Preset Tab")   /* L2 popups */                                                 \
         X(CostLabel, "Cost")                                                                                \

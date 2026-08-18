@@ -177,7 +177,15 @@ namespace FUI::Sfx
             dl->ChannelsSplit(2);
             dl->ChannelsSetCurrent(1);
         }
-        ImGui::PushID(a_label);
+        // ★★THE ID COMES FROM THE LABEL, so a label carrying a live number
+        // gets a NEW id every frame: the press and the release land on two
+        // different widgets and the click never completes. That is not a
+        // button that is hard to hit, it is one that CANNOT be hit -- which
+        // is what the precache CANCEL was, its label counting down as the
+        // queue drained. "##" marks the part that must not move, exactly as
+        // ImGui intends it; the visible half above already respects it.
+        const char* idPart = std::strstr(a_label, "##");
+        ImGui::PushID(idPart ? idPart : a_label);
         const bool pressed = ImGui::Button("##b", sz);
         ImGui::PopID();
         if (inset) {

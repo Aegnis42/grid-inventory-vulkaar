@@ -233,12 +233,20 @@ namespace FUI
             if (key.empty()) continue;
 
             std::string rest = trim(line.substr(eq + 1));
-            // ★"!uiscale" is READ BY NOTHING now — the UI-scale slider is gone
-            // and Theme::Scale() is fixed at 1.0 (see Theme.h). Left as an
-            // explicit skip rather than falling through to the window-layout
-            // parser at the bottom of this loop, which would take "!uiscale"
-            // for a window key and file a phantom window at 1,0,0,0.
-            if (key == "!uiscale") continue;
+            // ★★"!uiscale" is the SCALE THIS FILE'S POSITIONS WERE WRITTEN AT.
+            // It went dead when the UI-scale slider was removed; it is read
+            // again now as a stamp, not as a setting. A file without it came
+            // from that era and its coordinates are 1.00 pixels, which is
+            // exactly the default here -- so nothing has to be converted.
+            // Still consumed before the window-layout parser at the foot of
+            // this loop, which would otherwise file a phantom window.
+            if (key == "!uiscale") {
+                try {
+                    const float v = std::stof(rest);
+                    if (v > 0.2f && v < 8.0f) m_fileScale = v;
+                } catch (...) {}
+                continue;
+            }
             // ★★"!cellscale" stored the BOARD MULTIPLIER; "!scale" stores the
             // SETTING, which is that divided by kScaleBase. Same board size,
             // different number for it — 0.90 became 1.00 — so an old file has
@@ -716,6 +724,14 @@ namespace FUI
         }
         out << "; GridInventory window layout (auto-generated)\n";
         out << "; key = x,y,w,h[,parent:<key>]\n";
+        // ★★The scale THESE POSITIONS ARE IN. Sizes below are not
+        // restored -- ApplyNext recomputes them every frame -- so the stamp is
+        // for the coordinates alone: Load multiplies them by (current / this)
+        // so a layout carried to another UI scale keeps its arrangement rather
+        // than bunching up. Absent in a file from before 1.2.1, where it reads
+        // as 1.00 -- exactly what those files were written at.
+        // ★NOT in ExportPreset: a preset never carries window layout.
+        out << "!uiscale = " << Theme::Scale() << "\n";
         out << "!scale = " << Theme::ScaleSetting() << "\n";
         out << "!skin3 = " << Theme::SkinNameAt(Theme::SkinIndex()) << "\n";
         out << "!lang = " << Lang::Id(Lang::Get()) << "\n";
@@ -783,6 +799,21 @@ namespace FUI
     //  edge that must stay put, and anything DOCKED to this window keeps the
     //  edge it was docked to. Docking already survived a drag (StartDrag's
     //  follower list); this makes it survive a resize as well.
+    // ★★POSITIONS ONLY. Sizes are code-defined and ApplyNext has already
+    // recomputed them at the new scale, so touching them here would apply the
+    // factor twice. Rounded because ImGui works in whole pixels and feeding
+    // it fractions is what made a window crawl one frame at a time (GI72).
+    void WinManager::RescalePositions(float a_ratio)
+    {
+        for (auto& w : m_wins) {
+            if (!w.posKnown) continue;
+            w.pos.x = std::round(w.pos.x * a_ratio);
+            w.pos.y = std::round(w.pos.y * a_ratio);
+        }
+        SKSE::log::info("[WIN] layout rescaled x{:.3f} ({} windows)",
+                        a_ratio, m_wins.size());
+    }
+
     void WinManager::Reanchor(const std::string& a_key, ImVec2 a_newSize, Anchor a_anchor)
     {
         auto* w = Find(a_key);
@@ -867,6 +898,19 @@ namespace FUI
                                ImVec2 a_defaultSize, Anchor a_anchor, float a_topPad)
     {
         if (!m_loaded) Load();
+        // ★★DEFERRED FROM Load(). The scale is derived from the display and
+        // the ini is read before there is one, so the conversion cannot happen
+        // where the file is parsed. It happens once, on the first frame that
+        // has a display -- which is this one, because nothing draws earlier.
+        if (!m_scaleFixed) {
+            const ImVec2 d0 = ImGui::GetIO().DisplaySize;
+            if (d0.x > 64.0f && d0.y > 64.0f) {
+                m_scaleFixed = true;
+                const float from = m_fileScale > 0.0f ? m_fileScale : 1.0f;
+                const float r = Theme::Scale() / from;
+                if (std::abs(r - 1.0f) > 0.001f) RescalePositions(r);
+            }
+        }
         // ★The height pays for the title's clearance right here, at the one call
         // that owns the size and still runs before Begin. TitleBar reads the
         // same number back off the record, so "passed the pad but forgot the
@@ -1140,7 +1184,10 @@ namespace FUI
         // title: tracked uppercase
         ImFont* font = ImGui::GetFont();
         // whole pixels only — a fractional size bakes its own face (rule 102)
-        const float fontSize = Theme::SnapPx(sk.titleSize * S);
+        // ★DESIGN UNITS. SnapPx applies the scale itself — passing
+        // titleSize*S asked for 24·S², which at 4K is a 54px name in a
+        // 51px bar (Theme::SnapAbs).
+        const float fontSize = Theme::SnapPx(sk.titleSize);
         const float spacing = sk.titleSpacing * S;
         // tornFrame: nudge the title in so it clears the ragged frame edge
         const float insX = Theme::FrameInsetX();

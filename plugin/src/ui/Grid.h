@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 #include <string_view>
 #include <unordered_map>
 
@@ -32,6 +33,13 @@ namespace FUI::Grid
     // the main grid uses). LootBarter reuses this so the partner window draws
     // items at their real size (sword 1x3, helmet 2x2) instead of 1x1.
     [[nodiscard]] GridDef ResolveDef(RE::TESBoundObject* a_obj);
+
+    // ★Tile keys of the coin pouches on the board right now, front cell
+    // first. GoldCoins needs them for two things it cannot work out on its
+    // own: which pouch an unaddressed deposit should fill, and which one a
+    // returning (or pre-1.3.0) amount belongs to.
+    [[nodiscard]] std::vector<std::string> PouchTiles();
+    [[nodiscard]] std::string              AnyPouchTile();
 
     // Game-side actions (main.cpp wires these):
     //  sound(obj, up): vanilla per-item pick-up (up=true) / put-down sound

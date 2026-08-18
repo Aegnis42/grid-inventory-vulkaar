@@ -851,9 +851,10 @@ namespace FUI::Theme
 
         // ★Initialised FROM the exported defaults, never from a second copy of
         // the number — the reset gesture reads the same constants.
-        // ★const now: the UI-scale slider is gone (see Theme.h). Kept as a
-        // named constant rather than inlined so Scale() still has one home.
-        const float g_scale = kDefScale;
+        // ★No longer const: ResolveScale writes it once, at D3D init, from
+        // the backbuffer height. It stays kDefScale until then, which is what
+        // anything running before a swapchain exists will read.
+        float g_scale = kDefScale;
         // ★The SETTING, not the board multiplier — 1.00 by default, and
         // kScaleBase (0.90) is what that 1.00 draws at. See Theme.h.
         float g_cellScale = kDefCellScale;
@@ -1048,6 +1049,15 @@ namespace FUI::Theme
 
     // ---- scale ---------------------------------------------------------------
     float Scale() { return g_scale; }
+
+    void ResolveScale(float a_displayH)
+    {
+        if (a_displayH < 240.0f) return;   // nonsense: keep the default
+        const float s = a_displayH / kScaleBaseH;
+        g_scale = (std::max)(kScaleMin, (std::min)(kScaleMax, s));
+        SKSE::log::info("[UI] display height {:.0f} -> UI scale {:.3f}",
+                        a_displayH, g_scale);
+    }
 
     float ScaleSetting() { return g_cellScale; }
 
@@ -2073,6 +2083,15 @@ namespace FUI::Theme
         const ImVec4 kTipBad  = Rgba(232, 106, 106);   // restriction, overload
         const ImVec4 kTipSub  = Rgba(151, 163, 172);   // hints, shop price
         const ImVec4 kTipBody = Rgba(230, 237, 242);   // running text
+
+        // ★The tooltip's CHROME, named once. PushTipStyle pushes these and
+        // TipBg/TipBorder/... hand the same values to whoever has to paint the
+        // panel by hand (Theme.h). While they were literals inside PushTipStyle
+        // the compare card could not reach them, so it invented its own.
+        const ImVec4    kTipGround = { 0.055f, 0.063f, 0.075f, 0.96f };
+        const ImVec4    kTipEdge   = { 0.62f, 0.66f, 0.70f, 0.45f };
+        constexpr float kTipRound  = 3.0f;
+        const ImVec2    kTipPad    = { 10.0f, 8.0f };
     }
 
     const ImVec4& TipHead() { return kTipHead; }
@@ -2080,18 +2099,24 @@ namespace FUI::Theme
     const ImVec4& TipGood() { return kTipGood; }
     const ImVec4& TipBad()  { return kTipBad; }
     const ImVec4& TipSub()  { return kTipSub; }
+    const ImVec4& TipBody() { return kTipBody; }
+
+    ImU32  TipBg()       { return ImGui::GetColorU32(kTipGround); }
+    ImU32  TipBorder()   { return ImGui::GetColorU32(kTipEdge); }
+    float  TipRounding() { return kTipRound; }
+    ImVec2 TipPadding()  { return kTipPad; }
 
     void PushTipStyle()
     {
         // ★The tooltip goes DARK on every skin. Over a light panel a tooltip
         // painted in the same blue lands on the window it describes and
         // dissolves — it needs an edge of its own.
-        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.055f, 0.063f, 0.075f, 0.96f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.62f, 0.66f, 0.70f, 0.45f));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, kTipGround);
+        ImGui::PushStyleColor(ImGuiCol_Border, kTipEdge);
         ImGui::PushStyleColor(ImGuiCol_Text, kTipBody);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 3.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, kTipRound);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, kTipPad);
     }
 
     void PopTipStyle()
@@ -2131,6 +2156,20 @@ namespace FUI::Theme
         // 17.6 gets a scaled blit of the 18 — which is exactly the smearing
         // the bake was meant to avoid.
         return (std::max)(1.0f, std::round(a_size * g_scale));
+    }
+
+    float SnapAbs(float a_px)
+    {
+        // ★★The same rounding WITHOUT the scale, and the reason it exists:
+        // SnapPx multiplies by g_scale, so handing it a number that is
+        // already a pixel count SQUARES the scale. That was invisible for
+        // as long as the scale was a constant 0.90 — everything simply came
+        // out 10% small and was tuned around, once, by eye. It stopped
+        // being invisible the moment 1.2.1 derived the scale from the
+        // screen: at 4K the scale is 1.5 and 1.5² is 2.25, which is a title
+        // bar whose name no longer fits it and three controls drawn half as
+        // wide again as the boxes they were measured into.
+        return (std::max)(1.0f, std::round(a_px));
     }
 
     float FontValue()   { return SnapPx(20.0f); }

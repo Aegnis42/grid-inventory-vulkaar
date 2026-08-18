@@ -265,6 +265,11 @@ namespace FUI::Grid
 
         bool g_pouchOpen = false;       // G2: coin-pouch withdraw window
         int  g_pouchSlider = 0;
+        // ★WHICH pouch the window is drawing from. It used to need no such
+        // thing because there was one amount for the whole player; with the
+        // amount on the tile, a window that does not name its pouch would
+        // withdraw from whichever one the map happened to list first.
+        std::string g_pouchTile;
 
         // B: gold paid by a barter purchase this frame. The spill pass adds the
         // coin tiles this payment dissolved back into the main-board sim so the
@@ -2254,7 +2259,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // variants) while the item itself stays the pouch form
                 RE::TESBoundObject* iconObj = it.obj;
                 if (GoldCoins::IsPouch(it.obj->GetFormID())) {
-                    if (auto* v = GoldCoins::PouchIconObject()) iconObj = v;
+                    // ★ITS OWN amount -- two pouches drew the same icon while
+                    // this asked the player-wide total.
+                    if (auto* v = GoldCoins::PouchIconObjectFor(
+                            GoldCoins::PouchStoredOf(it.key))) iconObj = v;
                 }
                 const IconCache::Icon* iconPtr = cache->Get(iconObj);
                 if (iconObj != it.obj) {
@@ -2571,7 +2579,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // coin -- the one item type where splitting is the
                             // main thing you do with it.
                             DrawItemTooltip(it.obj, it.count,
-                                GoldCoins::IsPouch(fid) ? GoldCoins::PouchStored()
+                                GoldCoins::IsPouch(fid) ? GoldCoins::PouchStoredOf(it.key)
                                                         : it.coinValue,
                                 price, false, nullptr, ExtraScope::kUnit,
                                 it.uid, it.xlIdx, 0, 0,
@@ -2648,7 +2656,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // G2: shift+left-click on the pouch = withdraw
                             // window, same as right-click (user shortcut)
                             g_pouchOpen = true;
-                            g_pouchSlider = (std::max)(1, GoldCoins::PouchStored() / 2);
+                            g_pouchTile = it.key;
+                            g_pouchSlider = (std::max)(1, GoldCoins::PouchStoredOf(it.key) / 2);
                             Sfx::SelectOn();
                         } else if (io.KeyShift && it.count > 1 && !coin) {
                             // shift+left-click on a stack = split slider (ALWAYS
@@ -2715,7 +2724,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         } else if (GoldCoins::IsPouch(it.obj->GetFormID())) {
                             g_pouchOpen = true;   // G2: withdraw window
                             // start at half the stored amount (split-friendly default)
-                            g_pouchSlider = (std::max)(1, GoldCoins::PouchStored() / 2);
+                            g_pouchTile = it.key;
+                            g_pouchSlider = (std::max)(1, GoldCoins::PouchStoredOf(it.key) / 2);
                             Sfx::SelectOn();
                         } else if (LootBarter::IsLootMode(LootBarter::CurrentMode())) {
                             // loot: right-click stores this tile into the
@@ -5590,6 +5600,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (!v.bagKey.empty()) g_spaceTotal += v.cols * v.minRows;
             }
 
+            // ★Now that the pouch tiles are known, hand over any gold that
+            // was waiting without one -- a pre-1.3.0 save, or a pouch that
+            // has just walked back into the inventory.
+            GoldCoins::ClaimReturned(PouchTiles());
             SKSE::log::info("[GRID] rebuilt: {} items, {} views, gold {}",
                 g_items.size(), g_views.size(), g_gold);
             // ★DIAG: a tile with no column, or parked in the overflow zone, is
@@ -6502,7 +6516,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return (std::max)(1, n);
     }
 
+    std::vector<std::string> PouchTiles()
+    {
+        std::vector<std::string> out;
+        for (const auto& it : g_items) {
+            if (!it.obj || it.key.empty()) continue;
+            if (GoldCoins::IsPouch(it.obj->GetFormID())) out.push_back(it.key);
+        }
+        return out;
+    }
+
+    std::string AnyPouchTile()
+    {
+        const auto v = PouchTiles();
+        return v.empty() ? std::string{} : v.front();
+    }
+
     void MarkCapacityDirty() { g_capacityDirty = true; }
+
+    void ClaimIncomingPouchGold() { GoldCoins::ClaimReturned(PouchTiles()); }
 
     namespace
     {
@@ -7390,7 +7422,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                          std::uint16_t a_sig, int a_hand, const TileContext& a_tile)
     {
         if (!a_obj) return;
-        const auto& sk = Theme::S();
 
         // The OWNER's inventory entry: poison/charge/soul/crafted-enchant extras
         // all live there, not on the base form.
@@ -7438,6 +7469,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             ImGui::TextColored(Theme::TipVal(), "%s  x%d", nm, a_count);
         } else {
             ImGui::TextColored(Theme::TipVal(), "%s", nm);
+        }
+        // ★★Directly under the NAME, as a subtitle: "Iron Greatsword / Greatsword"
+        // is how the eye expects a kind to be told, and it is the one fact here
+        // that qualifies the name rather than measuring the item. Printed bare --
+        // a caption in front would be the longer half of the line.
+        // ★Asked of Equip so the tooltip and the doll give ONE answer. Everything
+        // this UI has no slot for reads "Accessory (47)": the number, because that
+        // is what mod pages quote and what two cloaks fighting over one slot have
+        // in common. Empty for anything not worn, which is most of the grid.
+        if (const std::string slot = Equip::SlotLabel(a_obj); !slot.empty()) {
+            ImGui::TextColored(Theme::TipSub(), "%s", slot.c_str());
         }
         const bool isPouch = GoldCoins::IsPouch(a_obj->GetFormID());
         if (a_coinValue >= 0) {   // G2: represented / stored gold
@@ -7926,7 +7968,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             std::snprintf(valBuf, sizeof(valBuf), "%s %d",
                 Lang::T(Lang::Str::Value), cmpObj->GetGoldValue());
 
-            const ImVec2 pad = ImGui::GetStyle().WindowPadding;
+            // ★★THE CARD IS A SECOND TOOLTIP, so it wears the tooltip's chrome
+            // and the tooltip's palette — not the skin's. It used to paint
+            // sk.winBg / sk.acc / sk.ink, which put a parchment panel with
+            // skin-coloured ink flush against the dark tooltip it belongs to,
+            // on every skin. The padding came from the WINDOW style for the
+            // same reason, so even the text inset disagreed.
+            const ImVec2 pad = Theme::TipPadding();
             const float lh = ImGui::GetTextLineHeightWithSpacing();
             const float cardW = (std::max)({
                 ImGui::CalcTextSize(Lang::T(Lang::Str::EquippedLabel)).x,
@@ -7945,17 +7993,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             auto* fdl = ImGui::GetForegroundDrawList();
             const ImVec2 c0(cx, cy);
             const ImVec2 c1(cx + cardW, cy + cardH);
-            fdl->AddRectFilled(c0, c1, Theme::Col(sk.winBg, 1.0f), sk.rounding);
-            fdl->AddRect(c0, c1, Theme::Col(sk.acc, 0.8f), sk.rounding);
+            const float rnd = Theme::TipRounding();
+            fdl->AddRectFilled(c0, c1, Theme::TipBg(), rnd);
+            fdl->AddRect(c0, c1, Theme::TipBorder(), rnd, 0, 1.0f);
             float ty = cy + pad.y;
             auto line = [&](const char* a_txt, const ImVec4& a_col) {
                 fdl->AddText(ImVec2(cx + pad.x, ty), ImGui::GetColorU32(a_col), a_txt);
                 ty += lh;
             };
-            line(Lang::T(Lang::Str::EquippedLabel), sk.inkDim);
-            line(en, sk.hi);
-            line(statBuf, sk.inkDim);
-            line(valBuf, sk.inkDim);
+            // ★Same roles the tooltip uses for the same kinds of fact: a muted
+            // caption, the name in the value colour, the stat as running text,
+            // the price as a sub-line.
+            line(Lang::T(Lang::Str::EquippedLabel), Theme::TipSub());
+            line(en, Theme::TipVal());
+            line(statBuf, Theme::TipBody());
+            line(valBuf, Theme::TipSub());
         }
     }
 
@@ -8062,7 +8114,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         const float barH = 34.0f * S;
         const float btnW = 96.0f * S;
         const float btnRow = 2.0f * btnW + 8.0f * S;
-        const int stored = GoldCoins::PouchStored();
+        const int stored = GoldCoins::PouchStoredOf(g_pouchTile);
         if (g_pouchSlider > stored) g_pouchSlider = stored;
 
         char line[64];
@@ -8138,13 +8190,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // inventory. Carry caps at one purse (kCoinCap); any excess of a
             // larger withdrawal lands in the inventory as walking gold.
             const int v = g_pouchSlider;
-            GoldCoins::Withdraw(v, false);   // pickup sound plays instead
+            GoldCoins::WithdrawFrom(g_pouchTile, v, false);   // pickup sound plays instead
             const int carry = (std::min)(v, GoldCoins::kCoinCap);
             if (auto* cform = GoldCoins::CoinForTier(GoldCoins::BandTier(carry))) {
                 PickupPartial(cform, carry, {}, 0);   // pins from walking
             }
             g_pouchOpen = false;             // window closes; the purse rides
             g_pouchSlider = 0;
+            g_pouchTile.clear();
         }
         ImGui::EndDisabled();
         ImGui::SameLine(0.0f, 8.0f * S);
@@ -8344,7 +8397,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const ImVec2 a(io.MousePos.x - a_held.offX, io.MousePos.y - a_held.offY);
             RE::TESBoundObject* heldIconObj = a_held.obj;
             if (GoldCoins::IsPouch(a_held.obj->GetFormID())) {
-                if (auto* v = GoldCoins::PouchIconObject()) heldIconObj = v;
+                if (auto* v = GoldCoins::PouchIconObjectFor(
+                        GoldCoins::PouchStoredOf(a_held.key))) heldIconObj = v;
             }
             auto* hc = IconCache::GetSingleton();
             const IconCache::Icon* heldIcon = hc->Get(heldIconObj);
@@ -8660,7 +8714,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // pouch can draw from it; no room -> the pin restores)
                 const int v2 = a_held.coinValue;
                 GoldCoins::UnpinTile(a_held.key);
-                if (GoldCoins::StoreToPouch(v2) > 0) {
+                if (GoldCoins::StoreToPouch(tgt.key, v2) > 0) {
                     g_layout.erase(a_held.key);
                     if (g_sound) g_sound(a_held.obj, false);
                     g_held.reset();
@@ -8998,7 +9052,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     const int v2 = a_held.coinValue;
                     const bool wasPinned = GoldCoins::PinnedValue(a_held.key) >= 0;
                     if (wasPinned) GoldCoins::UnpinTile(a_held.key);
-                    if (GoldCoins::StoreToPouch(v2) > 0) {
+                    if (GoldCoins::StoreToPouch(disp.key, v2) > 0) {
                         if (wasPinned) g_layout.erase(a_held.key);
                         if (g_sound) g_sound(a_held.obj, false);
                         g_held.reset();
@@ -9966,6 +10020,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_drainHint = {};
         g_pouchOpen = false;
         g_pouchSlider = 0;
+        g_pouchTile.clear();
         g_overloaded = false;
         g_spaceUsed = 0;
         g_spaceTotal = kCols * kMinRows;

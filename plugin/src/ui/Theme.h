@@ -152,15 +152,28 @@ namespace FUI::Theme
     // supposed to escape.
     inline constexpr float kTornOut = 14.0f;
 
-    // ★★FIXED AT 1.0, and no longer a setting. It was a 0.5~1.6 slider called
-    // SCALE that moved type, buttons and spacing while CellScale moved the
-    // board — two scales for one question, and the board is 97% of the window,
-    // so the type one mostly made the chrome disagree with itself. The
-    // remaining ~57 call sites keep going through here rather than dropping a
-    // "* 1.0" each: the multiply costs nothing, and this stays the one place a
-    // DPI factor could be reintroduced if it is ever wanted.
-    // The old "!uiscale" key is no longer read or written.
+    // ★★THE UI SCALE, and since 1.2.1 it follows the SCREEN. It was fixed at
+    // 1.0 after the old 0.5~1.6 slider was removed (that slider moved type and
+    // chrome while CellScale moved the board — two scales for one question).
+    // Fixed meant type was a fixed number of PIXELS, so on a 4K screen every
+    // label was half the size it is on 1440p and the SCALE slider could not
+    // help: that slider moves the board, not the type.
+    //
+    // ★Derived from the display HEIGHT, not the width ★ an ultrawide is not a
+    // bigger screen, it is a wider one: 3440x1440 gets the same 1.00 as
+    // 2560x1440 and nothing about it changes. Width would have inflated it by
+    // a third and pushed the layout off the bottom.
+    //
+    // ★★1440 is the BASELINE because that is the screen every one of these
+    // sizes was chosen by eye against. Change it and you have not "fixed a
+    // constant", you have resized the whole UI for everybody.
+    inline constexpr float kScaleBaseH = 1440.0f;
+    inline constexpr float kScaleMin   = 0.75f;   // 1080p
+    inline constexpr float kScaleMax   = 2.00f;   // beyond 4K
     [[nodiscard]] float Scale();
+    // Resolve Scale() from a real backbuffer height. Called ONCE, from
+    // TryInitD3D, before the font atlas is baked — the bake reads Scale().
+    void ResolveScale(float a_displayH);
 
     // ★★THE scale — what the SCALE slider moves, persisted as "!scale".
     // Measured on the main window: the item grid and the equipment doll are
@@ -398,11 +411,21 @@ namespace FUI::Theme
     [[nodiscard]] const ImVec4& TipGood();   // temper, enchantment
     [[nodiscard]] const ImVec4& TipBad();    // "cannot", overload
     [[nodiscard]] const ImVec4& TipSub();    // hints, shop price
-    // (no TipBody accessor: the body ink is pushed by PushTipStyle below and
-    // was never read anywhere else)
+    [[nodiscard]] const ImVec4& TipBody();   // running text
     // push/pop around BeginTooltip: dark ground + pale hairline + body ink
     void PushTipStyle();
     void PopTipStyle();
+
+    // ★★The same chrome, for a panel that must LOOK like a tooltip without
+    // being an ImGui popup. The shift-compare card paints on the foreground
+    // draw list -- it cannot inherit a pushed style, so it used to carry the
+    // SKIN's parchment ground and accent border and sat beside a dark tooltip
+    // looking like a different mod, on every skin. One source for both, or
+    // the two drift again the next time either is touched.
+    [[nodiscard]] ImU32  TipBg();
+    [[nodiscard]] ImU32  TipBorder();
+    [[nodiscard]] float  TipRounding();
+    [[nodiscard]] ImVec2 TipPadding();
 
     // Draw text with the 4-way 1px black outline the window title uses.
     // ★For the strings the eye SEEKS — values, totals, money. White on this
@@ -475,6 +498,10 @@ namespace FUI::Theme
     // the close x, whose multiplier still assumed a 17px body, came out at 31
     // and outgrew the title it sat beside.
     [[nodiscard]] float SnapPx(float a_size);   // whole-pixel: see Theme.cpp
+    // ★Already in PIXELS. SnapPx takes design units and SCALES them; this
+    // one only rounds — for a value that has been through the scale once
+    // already (ImGui::GetFontSize(), or a size derived from one).
+    [[nodiscard]] float SnapAbs(float a_px);
     [[nodiscard]] float FontValue();    // numbers the eye seeks
     [[nodiscard]] float FontBody();     // labels, buttons, running text
     [[nodiscard]] float FontCaption();  // section headings, family names
@@ -784,9 +811,26 @@ namespace FUI::Theme
     // at the same BOARD SIZE — which is what the numbers were chosen by eye
     // against — that span is 0.83~1.22, rounded here to slider-friendly ends.
     // Board size still runs 0.765~1.08 against the old 0.75~1.10.
+    //
+    // ★★1.2.1: THE TOP END IS NOT WHAT IT READS. kScaleBase is 0.90, so the
+    // old maximum of 1.20 drew the board at 1.08 -- eight percent over default,
+    // which on an ultrawide at 1440p or above is no bigger at all. Reported as
+    // "even the maximum is too small", and it was.
+    // ★2.00 (board 1.80, cell 86px) and not higher, for a reason that is not
+    // taste: the pak stores each icon at what a TILE can show -- 160px per
+    // footprint cell (IconCache's `limit`). At 86px a 1x1 still has room to
+    // spare; past ~1.85 the cell outgrows its own sprite and every small icon
+    // starts being upscaled. Raising this further means re-baking 427MB of
+    // icons, so the ceiling belongs where the art already reaches.
     inline constexpr float kDefCellScale = 1.00f;
-    inline constexpr float kMinCellScale = 0.85f;
-    inline constexpr float kMaxCellScale = 1.20f;
+    // ★The bottom end moves with the top for the same reason: 0.85 was only
+    // 0.765 of the board, a shade under default, so "smaller" barely was. 0.60
+    // (board 0.54, cell 26px) is where the FLOOR actually is -- every marker
+    // holds a one-pixel rim by clamp (RimPx) rather than by scale, so the
+    // shapes survive, and the icons are downscaled from a supersampled capture
+    // rather than stretched. Below that the count badges stop being readable.
+    inline constexpr float kMinCellScale = 0.60f;
+    inline constexpr float kMaxCellScale = 2.00f;
     // ★0/0 means "the shipped rig", not "no light" — the offset origin. That
     // is what makes a right-click reset here identical to a fresh install, and
     // what lets an item def's 0/0 mean "whatever the global says".

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 // G1: gold as physical coin items (Mabinogi style). Gold001 stays the hidden
 // LEDGER (shops/quests keep working untouched); the player's visible gold is
@@ -83,7 +84,28 @@ namespace FUI::GoldCoins
     void UnpinTile(const std::string& a_tileKey);                  // merged / dropped / cancelled
 
     // G2 interactions — mutate the ledger/pouch and mark the mirror dirty.
-    int  StoreToPouch(int a_value);   // returns the amount actually stored
+    // ★★PER POUCH. Every one of these used to be player-wide, which is why
+    // two pouches in one inventory showed the same amount and the same
+    // icon: there was a single number for all of them. The amount now hangs
+    // off the TILE KEY, beside the pinned purses above and for the reason
+    // LayoutEntry::rot and ::coin already give -- the engine has nowhere to
+    // hang per-instance data, so the slot is what "this pouch" means.
+    [[nodiscard]] int PouchStoredOf(const std::string& a_tileKey);
+    // The icon band for an amount the CALLER knows -- a tile asks for its
+    // own, a stored pouch asks for the one riding in the container spot.
+    [[nodiscard]] RE::TESBoundObject* PouchIconObjectFor(int a_stored);
+    // A pouch's gold with no tile to sit on yet: a save older than v6, or a
+    // pouch that just walked back in. The grid calls this with the pouch
+    // tiles it found and the waiting amount moves onto the first with room.
+    void ClaimReturned(const std::vector<std::string>& a_pouchTiles);
+    // A pouch's gold while the pouch is on a shelf: the container spot takes
+    // it on the way out and gives it back on the way in, so the amount rides
+    // with the pouch instead of hiding in a player-wide variable.
+    [[nodiscard]] int TakeAwayGold();
+    void GiveAwayGold(int a_amount);
+    int  StoreToPouch(const std::string& a_tileKey, int a_value);   // amount actually stored
+    int  StoreToPouch(int a_value);   // no pouch named -> the fullest with room
+    void WithdrawFrom(const std::string& a_tileKey, int a_value, bool a_sound = true);
     // pouch -> walking gold. a_sound=false when the caller immediately lifts
     // the amount onto the cursor (the pickup sound plays instead).
     void Withdraw(int a_value, bool a_sound = true);

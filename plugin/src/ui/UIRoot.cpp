@@ -826,7 +826,10 @@ namespace FUI::UIRoot
         }
         float BtnW(const char* a_label)
         {
-            return ImGui::CalcTextSize(a_label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+            // ★Hide anything past "##" -- it is an id, not a word, and Sfx
+            // measures its own label the same way.
+            return ImGui::CalcTextSize(a_label, nullptr, true).x +
+                   ImGui::GetStyle().FramePadding.x * 2.0f;
         }
         float BtnRowW(std::initializer_list<const char*> a_labels)
         {
@@ -1504,7 +1507,9 @@ namespace FUI::UIRoot
             // whole run.
             char lbl[64], wide[64];
             if (s_precacheOn) {
-                std::snprintf(lbl, sizeof(lbl), "%s (%zu)",
+                // ★The count is DISPLAY; the id after "##" is what the click
+                // needs to stay still (Sfx::Button).
+                std::snprintf(lbl, sizeof(lbl), "%s (%zu)##precachecancel",
                     Lang::T(Lang::Str::Cancel), q);
                 std::snprintf(wide, sizeof(wide), "%s (%zu)",
                     Lang::T(Lang::Str::Cancel), s_precacheMax);
@@ -1543,7 +1548,7 @@ namespace FUI::UIRoot
             SettingLabel(a_c, Lang::Str::DeferredLabel);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
             char lbl[64];
-            std::snprintf(lbl, sizeof(lbl), "%s (%zu)",
+            std::snprintf(lbl, sizeof(lbl), "%s (%zu)##deferredretry",
                 Lang::T(Lang::Str::DeferredRetry), n);
             RightAlign(BtnW(lbl) + 6.0f * a_c.S +
                        BtnW(Lang::T(Lang::Str::DeferredForget)));
@@ -2068,6 +2073,20 @@ namespace FUI::UIRoot
         // draws the box and by the code that places it.
         float TitleBtnBoxPad() { return 6.0f * Theme::Scale(); }
 
+        // ★The ✕ is drawn at the TITLE's size while its neighbours are
+        // body text, so its multiplier is the ratio between the two — and
+        // that ratio is SCALE-FREE, because both sides already carry the
+        // scale.
+        // ★★One function, because the number is read TWICE: once to size the
+        // glyph and once to reserve the strip the drag zone must not cover.
+        // Those two had drifted into a hardcoded 1.55 and a live
+        // recomputation of the same thing.
+        [[nodiscard]] float TitleCloseMul()
+        {
+            return Theme::SnapPx(Theme::S().titleSize) /
+                   (std::max)(1.0f, ImGui::GetFontSize());
+        }
+
         // titlebar text button (v10.6): dim tracked text, hover brightens,
         // active = hi + underline (fade on skin 2). Fires on RELEASE — a
         // press-time toggle opened the settings popup and the same click's
@@ -2161,7 +2180,11 @@ namespace FUI::UIRoot
             // A line box reserves descender room; "EDIT" has no descender and
             // ✕ has neither, so each label sits at its own wrong offset and no
             // single nudge straightens them together (Theme::TextInkCentered).
-            const float fsz = Theme::SnapPx(ImGui::GetFontSize() * a_fontMul);
+            // ★SnapAbs, not SnapPx: GetFontSize() is ALREADY scaled pixels,
+            // and SnapPx scales again. The label was drawn at S² while the box
+            // around it had been measured at S — which is nothing at S=0.90 and
+            // is three controls on top of each other at 4K.
+            const float fsz = Theme::SnapAbs(ImGui::GetFontSize() * a_fontMul);
             Theme::TextInkCentered(dl, b0, b1, ImGui::GetColorU32(col), a_lbl, fsz);
             return pressed;
         }
@@ -2185,8 +2208,7 @@ namespace FUI::UIRoot
             // ★An ABSOLUTE size, not a ratio. A ratio recomputed from the
             // live font size drifts in the last decimal every frame, and ImGui
             // bakes a new glyph set for every distinct size it is handed.
-            const float closePx = Theme::SnapPx(Theme::S().titleSize * Theme::Scale());
-            const float kCloseMul = closePx / (std::max)(1.0f, ImGui::GetFontSize());
+            const float kCloseMul = TitleCloseMul();
             const float closeW = ImGui::CalcTextSize(closeLbl).x * kCloseMul;
             // ★The same right margin the FIND box below it keeps. ★★Minus the
             // BOX pad as well as the label width: these controls are drawn as
@@ -2753,7 +2775,18 @@ namespace FUI::UIRoot
             // different amount at every cell size (the grid shrinks with the
             // cell, the stats panel doesn't — it is type). Letting the gap
             // absorb the difference keeps the two columns level.
-            const float dollGap = (std::max)(12.0f * S,
+            // ★★AND THE FLOOR HAS TO PAY FOR THE STRIP. BottomStripY reserves
+            // 38*S under the body for the GOLD bar and the stats block is
+            // pinned ABOVE that, while bodyH adds 8*S back at the end -- so the
+            // air the player actually sees between doll and stats is
+            // (dollGap - 30*S), not dollGap. A 12*S floor therefore started the
+            // block 18*S INSIDE the doll the moment the grid column stopped
+            // being the taller one, which is every cell scale below ~0.85: the
+            // stat rows landed on the bottom row of equipment slots. Only
+            // visible once the scale floor was lowered (1.2.1) -- the old
+            // minimum of 0.85 sat right on the edge of it.
+            constexpr float kDollStatsAir = 12.0f;   // what the eye should see
+            const float dollGap = (std::max)((kDollStatsAir + 38.0f - 8.0f) * S,
                 gridBodyH - Equip::PanelH() - StatsPanelH());
             const float bodyH  = (compact
                 ? gridBodyH + 30.0f * S
@@ -2787,7 +2820,7 @@ namespace FUI::UIRoot
             const float editW = ImGui::CalcTextSize(editLbl).x;
             const float setW = ImGui::CalcTextSize(setLbl).x;
             const float btnGap = 18.0f * S;
-            const float closeW = ImGui::CalcTextSize("\xC3\x97").x * 1.55f;   // F1 ✕ (kCloseMul)
+            const float closeW = ImGui::CalcTextSize("\xC3\x97").x * TitleCloseMul();
             // strip excludes the right-aligned control zone (EDIT + SETTINGS
             // + ✕) so the buttons below actually receive their clicks
             wm->TitleBar("main", Lang::T(Lang::Str::Inventory),
@@ -3031,6 +3064,12 @@ namespace FUI::UIRoot
             SKSE::log::error("[UI] TryInitD3D: GetDesc failed");
             return false;
         }
+
+        // ★★BEFORE ImGui exists and long before BuildFonts: the atlas is baked
+        // at Scale(), so resolving it after would give every glyph the default
+        // size and only the layout the new one. The swapchain is the earliest
+        // place the real height is known — io.DisplaySize is still zero here.
+        Theme::ResolveScale(static_cast<float>(desc.bufferDesc.height));
 
         auto* device  = reinterpret_cast<ID3D11Device*>(data->forwarder);
         auto* context = reinterpret_cast<ID3D11DeviceContext*>(data->context);

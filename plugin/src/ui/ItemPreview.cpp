@@ -69,6 +69,12 @@ namespace FUI
         };
         LightProbe g_probe;
 
+        // ★Diagnostic state for the capture lamp, beside the probe so the
+        // restore path clears both together -- a deliberate put-back must not
+        // read as the engine taking the lamp off us.
+        RE::NiPoint3 g_lampWrote{};
+        bool         g_lampHasWrote = false;
+
         // the one MenuLight that is actually attached to the scene (bsLight
         // non-null) — the survey showed exactly one, on the inventory scheme.
         // ★The slot INDEX used to be recorded here, in case the engine ever
@@ -95,7 +101,41 @@ namespace FUI
         void WriteLightWorld(const RE::NiPoint3& a_pos, float a_radius)
         {
             RE::MenuLight* L = AttachedMenuLight();
-            if (!L) return;
+            if (!L) {
+                // ★★THIS USED TO RETURN IN SILENCE, and that is how a whole
+                // precache came out at half brightness with nothing in the log
+                // to say why: with no lamp to move, every item is captured
+                // under the default scheme -- and m_parkTicks counts up all
+                // the same, so the capture is accepted exactly as if the rig
+                // were in place. A failure that leaves no trace is one nobody
+                // can report.
+                static bool s_warned = false;
+                if (!s_warned) {
+                    s_warned = true;
+                    SKSE::log::warn("[LIGHT] no attached MenuLight -- captures run "
+                                    "under the default scheme (icons come out dark)");
+                }
+                return;
+            }
+            // ★Did the last write survive the frame? The engine re-asserts the
+            // menu light scheme on its own schedule, and a lamp put back between
+            // our write and the render is indistinguishable from one that was
+            // never moved -- except right here, before we overwrite it again.
+            if (g_lampHasWrote) {
+                const RE::NiPoint3& cur = L->translate;
+                if (std::fabs(cur.x - g_lampWrote.x) > 0.5f ||
+                    std::fabs(cur.y - g_lampWrote.y) > 0.5f ||
+                    std::fabs(cur.z - g_lampWrote.z) > 0.5f) {
+                    static bool s_revert = false;
+                    if (!s_revert) {
+                        s_revert = true;
+                        SKSE::log::warn("[LIGHT] lamp put back by the engine: found "
+                            "{:.0f},{:.0f},{:.0f} where we left {:.0f},{:.0f},{:.0f}",
+                            cur.x, cur.y, cur.z,
+                            g_lampWrote.x, g_lampWrote.y, g_lampWrote.z);
+                    }
+                }
+            }
             if (!g_probe.held) {   // first write of this session: remember it all
                 g_probe.menuPos = L->translate;
                 g_probe.menuRadius = L->radius;
@@ -108,6 +148,35 @@ namespace FUI
                     }
                 }
                 g_probe.held = true;
+                SKSE::log::info("[LIGHT] lamp {:.0f},{:.0f},{:.0f} r={:.0f}"
+                    " -> {:.0f},{:.0f},{:.0f} r={:.0f}",
+                    g_probe.menuPos.x, g_probe.menuPos.y, g_probe.menuPos.z,
+                    g_probe.menuRadius, a_pos.x, a_pos.y, a_pos.z, a_radius);
+                // ★★WHAT WE DO NOT WRITE. Position and radius are ours; the
+                // COLOUR and the FADE belong to whatever scheme the engine had
+                // loaded, and a lamp at half fade is half the light with every
+                // other thing about the capture unchanged -- which is the exact
+                // shape of the icons-came-out-dark report (uniform across R/G/B,
+                // same silhouette, same framing).
+                // ★The lamp COUNT too: only the first attached one is moved, so
+                // a scene lit by two and a scene lit by one differ by a stop.
+                int lamps = 0;
+                if (auto* sm = RE::UI3DSceneManager::GetSingleton()) {
+                    for (RE::MenuLight* M : sm->menuLights) {
+                        if (M && M->light) ++lamps;
+                    }
+                }
+                if (RE::BSLight* b0 = L->light.get()) {
+                    if (RE::NiLight* n0 = b0->light.get()) {
+                        const auto& d = n0->GetLightRuntimeData();
+                        SKSE::log::info("[LIGHT] diffuse {:.2f},{:.2f},{:.2f}"
+                            "  ambient {:.2f},{:.2f},{:.2f}  fade {:.2f}"
+                            "  niradius {:.0f}  attached lamps {}",
+                            d.diffuse.red, d.diffuse.green, d.diffuse.blue,
+                            d.ambient.red, d.ambient.green, d.ambient.blue,
+                            d.fade, d.radius.x, lamps);
+                    }
+                }
             }
             L->translate = a_pos;
             L->radius = a_radius;
@@ -122,6 +191,8 @@ namespace FUI
                         RE::NiPoint3{ a_radius, a_radius, a_radius };
                 }
             }
+            g_lampWrote = a_pos;
+            g_lampHasWrote = true;
         }
 
         // item-relative spherical -> world, using the engine's own item origin
@@ -132,6 +203,39 @@ namespace FUI
         // tiny compared to the sphere, not larger than it, so the scaling
         // clamped to 1.00 on every single item and changed nothing. Whatever
         // makes armour ignore its angle, it is not the light's reach.
+        // ★★★THE CAPTURE INHERITS THE WORLD'S SKY, AND IT CANNOT BE STOPPED
+        // FROM HERE. Skyrim lights a menu item with the menu lamp AND the
+        // scene's directional ambient. That ambient is the sky where the
+        // PLAYER stands: measured in game, its level term reads 0.85 outdoors
+        // at noon against 0.074 in a dark interior, and icons captured under
+        // the two differ by 1.8x. Precache in a cave and the whole set comes
+        // out dark; the shipped pak was made outdoors, so an icon captured
+        // indoors later does not match the ones beside it.
+        //
+        // Overriding BSShaderManager::State::directionalAmbientTransform DOES
+        // fix the icons -- measured, 1.00x against the shipped pak from a dark
+        // interior. It was removed anyway, because three things are all true
+        // at once and together they leave no way to do it invisibly:
+        //   1. the ambient is ONE GLOBAL. ShadowSceneNode -- the per-scene
+        //      object -- carries lights, fog and a portal graph, but no
+        //      ambient, so a separate scene cannot have a separate sky.
+        //   2. the WORLD RENDERS BEFORE THE CAPTURE (Tick -> world -> 
+        //      PostDisplay), so anything written early enough for the capture
+        //      lights the world the player is looking at.
+        //   3. writing it LATE, on the line before inv->Render(), reaches
+        //      nothing: the frame's shader constants are already uploaded.
+        //      Tried and measured -- the icons stayed dark.
+        // Gating the override on "only while the icon queue is busy" was
+        // tried too; with a cold cache the queue is busy for as long as the
+        // inventory is open, so the world simply brightened on open.
+        //
+        // WHAT TO DO INSTEAD: precache OUTDOORS IN DAYLIGHT. That is what the
+        // shipped pak was made under, and it is why the shipped icons are
+        // consistent. The one lever that is ours alone is the menu LAMP
+        // (per-scene, no world effect) -- driving it hard enough to swamp the
+        // ambient would even out the level, but it is a directional light
+        // standing in for fill, so the shading hardens and it needs tuning
+        // rounds in game. Left undone deliberately.
         void PlaceLight(float a_azOff, float a_elOff)
         {
             const float az = (kBaseAzDeg + a_azOff) * kDeg2Rad;
@@ -150,6 +254,7 @@ namespace FUI
         {
             if (!g_probe.held) return;
             g_probe.held = false;
+            g_lampHasWrote = false;   // our own put-back, not the engine's
             // ★Re-find rather than keep a stored pointer: the scene may have
             // been rebuilt between move and restore, and writing through a
             // stale MenuLight* would be a write into freed memory.
@@ -625,6 +730,14 @@ namespace FUI
         // and the failure would be one item captured under its neighbour's lamp.
         const bool newNode = (m_scaledNode != model);
         PlaceLight(m_lightAz, m_lightEl);
+        // ★★ONLY WHILE A CAPTURE IS IN FLIGHT. This is scene-global state, so
+        // held for the whole menu it lights the WORLD as well -- invisible
+        // behind an opaque skin, plainly wrong behind a translucent one.
+        // ★Asked of the icon QUEUE, not of m_requested: that flag is raised
+        // and consumed inside PostDisplay, long after this runs, so it reads
+        // false here every time. IsBusy() is true from the frame the queue
+        // takes work, which is at least one frame before m_parkTicks lets any
+        // pixels be accepted -- the sky is always in place before the shot.
         // ★This request's rig is now on the scene. The gate waits for a SECOND
         // application, so the pixels it accepts were rendered after this one —
         // not with whatever the previous item left behind.
@@ -1134,6 +1247,8 @@ namespace FUI
         // Step 3 (render): the engine paints the model into the bound surface.
         // Any overspill beyond the capture rect is erased by the full-frame
         // restore in Step 5, so nothing is ever visible on screen.
+        // ★DO NOT SET THE SCENE AMBIENT HERE -- measured, it reaches nothing
+        // this late in the frame. See the note above PlaceLight.
         inv->Render();
 
         // Step 4 (capture): copy backbuffer rect → top-left of our texture.

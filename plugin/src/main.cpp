@@ -282,6 +282,20 @@ namespace
             // capacity state (shop buys, scripted AddItem, drops, sells)
             if (a_event->newContainer == 0x14 || a_event->oldContainer == 0x14) {
                 FUI::Grid::MarkCapacityDirty();
+                // ★★1.2.1: AND THE TILES, not only the numbers. Capacity and
+                // gold were re-derived here while the board itself was left
+                // alone, so an item arriving from OUTSIDE the UI (console
+                // AddItem, Modex, a script, a quest reward) moved the SPACE
+                // figure and showed no tile -- the player had to close and
+                // reopen. Our own take/sell/drop paths already ask for this,
+                // and the flag coalesces per frame, so the extra request is
+                // free.
+                // ★Only while our menu is up: closed, the next open rebuilds
+                // from scratch anyway.
+                if (auto* ui = RE::UI::GetSingleton();
+                    ui && ui->IsMenuOpen("GridInventoryMenu"sv)) {
+                    FUI::Grid::RequestRebuild();
+                }
                 // G1: ledger (Gold001) or coin-form movement -> re-mirror.
                 // The reconciler's own edits re-mark dirty and settle at a
                 // zero diff next tick (also renormalises console-given coins).
@@ -1790,7 +1804,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 2, 0, 0 },
+    .Version              = { 1, 2, 1, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)

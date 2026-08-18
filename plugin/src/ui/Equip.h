@@ -123,4 +123,13 @@ namespace FUI::Equip
     // generously, and the item grid has to line up with the real slot edge,
     // not with a budget. 0 before the first draw.
     [[nodiscard]] float SlotsTopOffset();
+
+    // ★★What the TOOLTIP says an item is worn on, and it has to agree with the
+    // doll: SlotAccepts already files every biped slot this UI does not know as
+    // an ACCESSORY, so an unknown one reads "Accessory (47)" rather than having
+    // a name invented for it.
+    // ★The number is the SLOT (30..61), not the bit index -- that is what mod
+    // pages and conflict guides quote, and the one a player can act on.
+    // Empty when the thing is not worn at all.
+    [[nodiscard]] std::string SlotLabel(RE::TESBoundObject* a_obj);
 }

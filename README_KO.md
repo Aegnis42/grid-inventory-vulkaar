@@ -280,5 +280,5 @@ Inventory = EKWIPUNEK            왼쪽 키 이름은 그대로, 오른쪽만 �
 ## 크레딧 / 라이선스
 
 [CREDITS.md](CREDITS.md) 참조 — 플러그인 소스는 **GPL-3.0**(Modding Exception
-포함)으로 배포됩니다. ModExplorerMenu(patchulidev), Address Library(meh321),
+포함)으로 배포됩니다. Modex(patchulidev), Address Library(meh321),
 CommonLibSSE-NG, Dear ImGui, SKSE 팀에 감사드립니다.

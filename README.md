@@ -34,9 +34,9 @@ not exist, so a plain clone builds with no local setup.
 
 The plugin source is distributed under **GPL-3.0** — see [LICENSE-GPL](LICENSE-GPL) —
 with the modding/linking exceptions in [EXCEPTIONS.txt](EXCEPTIONS.txt)
-(inherited unchanged from upstream ModExplorerMenu).
+(inherited unchanged from upstream Modex).
 
-Portions are ported from [ModExplorerMenu](https://github.com/patchulidev/ModExplorerMenu)
+Portions are ported from [Modex](https://github.com/patchulidev/ModExplorerMenu)
 (patchulidev, GPL-3.0): the IMenu bootstrap, the ImGui render-loop structure,
 and the Inventory3DManager backbuffer-capture pipeline. Each ported file
 carries an attribution header. Full credits: [CREDITS.md](CREDITS.md).

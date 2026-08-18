@@ -181,6 +181,28 @@ namespace FUI
         // everything docked to it along the edge it was docked to.
         void Reanchor(const std::string& a_key, ImVec2 a_newSize, Anchor a_anchor);
 
+        // ★★SAVED POSITIONS ARE PIXELS AT A PARTICULAR UI SCALE. Sizes are
+        // not persisted at all -- ApplyNext recomputes them every frame from
+        // the current scale -- so a layout carried to a different scale keeps
+        // its old coordinates while every window around them grows: nothing
+        // leaves the screen (the titlebar clamp sees to that), they simply
+        // bunch up and overlap in the top-left.
+        // ★Normalised against the SCALE and not against the display: the whole
+        // layout is built in scale-multiplied units, so scaling positions by
+        // the same factor moves flush edges together and docked windows stay
+        // docked. Dividing by the display size would grow the gaps faster than
+        // the windows and pull them apart.
+        // ★The file carries the scale it was written at (`!uiscale`), so an
+        // existing ini -- every one of which was written at 1.00 -- needs no
+        // conversion, and the numbers in it stay real pixels a human can read.
+        void RescalePositions(float a_ratio);
+
+        float m_fileScale  = 1.0f;    // !uiscale from the file; 1.0 when absent
+        // ★Deferred, because Load() runs before there is a swapchain: the
+        // display size the scale is derived from is not known until the first
+        // frame. Applied once, there.
+        bool  m_scaleFixed = false;
+
         // length of the shared (flush) edge between two rects; 0 = not touching
         static float ContactLen(ImVec2 a_min, ImVec2 a_max, ImVec2 b_min, ImVec2 b_max);
 

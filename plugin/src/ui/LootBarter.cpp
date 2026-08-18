@@ -185,6 +185,12 @@ namespace FUI::LootBarter
             // kept so the sprite draws at the angle the player left it at, and
             // so taking the item back carries the turn home.
             int rot = 0;
+            // ★★A coin pouch on the shelf keeps the gold that walked in with
+            // it. Same answer the grid gives on its own board (the amount
+            // hangs off the SLOT, not the item) -- the engine has nowhere
+            // to hang per-instance data, so the shelf position is what
+            // "this pouch" means here.
+            int gold = 0;
         };
         struct ContLayout
         {
@@ -192,6 +198,13 @@ namespace FUI::LootBarter
             std::uint32_t                   stamp = 0;   // LRU recency
         };
         std::unordered_map<RE::FormID, ContLayout> g_contLayouts;
+        // ★★ASKED OF THE LAYOUT, NOT CARRIED ON THE CELL. The amount was
+        // being copied onto PartnerCell during slot assignment and read back
+        // at draw time -- one hop too many: the cell list is rebuilt between
+        // the two, so a pouch that HAD been shelved with 6,943 G still drew
+        // the empty-pouch art. The layout is the thing that actually keeps
+        // the number; read it where it is used.
+        [[nodiscard]] int ShelfGoldOf(const std::string& a_spotKey);
         std::uint32_t                              g_contStamp = 0;
         constexpr size_t                           kContLayoutMax = 128;
 
@@ -1265,6 +1278,20 @@ namespace FUI::LootBarter
         ImGui::End();
     }
 
+namespace
+{
+    int ShelfGoldOf(const std::string& a_spotKey)
+    {
+        if (a_spotKey.empty()) return 0;
+        auto* p = Partner();
+        if (!p) return 0;
+        const auto ci = g_contLayouts.find(p->GetFormID());
+        if (ci == g_contLayouts.end()) return 0;
+        const auto si = ci->second.spots.find(a_spotKey);
+        return si == ci->second.spots.end() ? 0 : si->second.gold;
+    }
+}
+
     RE::TESObjectREFR* Partner()
     {
         if (!g_partner) return nullptr;
@@ -1466,6 +1493,10 @@ namespace FUI::LootBarter
             // trailing position and everything after the taken cell shuffles up,
             // which is exactly "it loots in storage order, not the one I hovered".
             std::string   spotKey;
+            // ★What the SHELF is holding for this cell -- a coin pouch's own
+            // gold. Carried onto the cell during slot assignment so the draw
+            // does not have to reach back into the layout.
+            int           gold = 0;
             // GI62: quarter-turns clockwise. Set through SetRot so w/h and the
             // angle can never disagree -- every placement test on this side reads
             // w/h directly, and a stale pair would place the cell wrong.
@@ -1778,10 +1809,22 @@ namespace FUI::LootBarter
                     // match->w/h is the upright pair, so swap it when the drop
                     // was made on its side.
                     const bool turned = (ps->rot & 1) != 0;
+                    // ★A POUCH LANDING HERE CLAIMS ITS GOLD. The amount was
+                    // parked in g_awayGold by OnPouchLeftPlayer as the item
+                    // left the player; taking it now is what makes the shelf
+                    // -- rather than a player-wide variable -- the thing that
+                    // holds it, so the icon is right and the trip home works.
+                    const int carried =
+                        GoldCoins::IsPouch(match->obj->GetFormID())
+                            ? GoldCoins::TakeAwayGold() : 0;
                     cl->spots[key] = { ps->col, ps->row,
                                        turned ? match->h : match->w,
                                        turned ? match->w : match->h,
-                                       ps->rot & 3 };
+                                       ps->rot & 3, carried };
+                    if (carried > 0) {
+                        SKSE::log::info("[LOOT] pouch shelved with {} G ('{}')",
+                            carried, key);
+                    }
                     ps = g_pendingSpots.erase(ps);
                 }
 
@@ -1792,8 +1835,20 @@ namespace FUI::LootBarter
                     std::set<std::string> livePools;
                     for (const auto& it : cells) livePools.insert(poolPrefix(it));
                     for (auto si = cl->spots.begin(); si != cl->spots.end();) {
-                        si = livePools.contains(poolOf(si->first)) ? std::next(si)
-                                                                  : cl->spots.erase(si);
+                        if (livePools.contains(poolOf(si->first))) { ++si; continue; }
+                        // ★THE GOLD GOES HOME WITH IT. A spot dies because its
+                        // item is gone from this container -- taken back, most
+                        // often -- so anything the shelf was holding for it is
+                        // handed to g_awayGold, which is exactly where
+                        // OnPouchReturned looks when the pouch reaches the
+                        // player. Dropping the spot without this would delete
+                        // the gold silently.
+                        if (si->second.gold > 0) {
+                            SKSE::log::info("[LOOT] pouch left the shelf with {} G",
+                                si->second.gold);
+                            GoldCoins::GiveAwayGold(si->second.gold);
+                        }
+                        si = cl->spots.erase(si);
                     }
                 }
 
@@ -1821,6 +1876,7 @@ namespace FUI::LootBarter
                         if (i < slots.size()) {
                             members[i]->spotKey = slots[i].first;
                             const auto& s = slots[i].second;
+                            members[i]->gold = s.gold;
                             // GI62: the slot remembers the angle -- adopt it
                             // BEFORE the fit test, which reads w/h.
                             members[i]->SetRot(s.rot);
@@ -1833,8 +1889,32 @@ namespace FUI::LootBarter
                             }
                         } else {
                             members[i]->spotKey = freshInPool(prefix);
-                            cl->spots[members[i]->spotKey] = { -1, -1, members[i]->w,
-                                                               members[i]->h, members[i]->rot };
+                            // ★★THE OTHER DOOR. A shelf slot is born in two places:
+                            // there (a drop the player aimed at a cell) and here
+                            // (everything else -- a store with no aimed cell, an
+                            // item that simply appeared). Only the first claimed
+                            // the pouch's gold, so storing a full pouch any other
+                            // way shelved it as EMPTY and left the amount stranded
+                            // in g_awayGold. Both doors take it now.
+                            members[i]->gold =
+                                GoldCoins::IsPouch(members[i]->obj->GetFormID())
+                                    ? GoldCoins::TakeAwayGold() : 0;
+                            if (members[i]->gold > 0) {
+                                SKSE::log::info("[LOOT] pouch shelved with {} G ('{}', fresh slot)",
+                                    members[i]->gold, members[i]->spotKey);
+                            }
+                            // ★★NEVER CLOBBER AN AMOUNT ALREADY ON THIS SHELF. This
+                            // branch re-writes the whole slot, and it runs LATER IN
+                            // THE SAME FRAME than the drop that shelved the pouch --
+                            // so a pouch stored with 6,943 G had its slot rebuilt at
+                            // zero a few lines further down, and drew empty. The
+                            // position may be rewritten; the gold may not.
+                            {
+                                auto& sp = cl->spots[members[i]->spotKey];
+                                const int keep = sp.gold > 0 ? sp.gold : members[i]->gold;
+                                sp = { -1, -1, members[i]->w, members[i]->h,
+                                       members[i]->rot, keep };
+                            }
                         }
                     }
                     // the pool shrank: drop the trailing positions
@@ -2112,10 +2192,41 @@ namespace FUI::LootBarter
                 // with no captures yet must still READ as a chest full of
                 // items, which is exactly what you need to decide whether to
                 // take anything.
-                const IconCache::Icon* cellIcon = cache->Get(it.obj);
+                // ★A SHELVED POUCH DRAWS ITS OWN BAND. Without this the chest
+                // showed the empty-pouch art for a pouch with 6,000 G in it:
+                // the icon came from the bare form, and the amount lived
+                // somewhere the shelf could not see.
+                RE::TESBoundObject* cellIconObj = it.obj;
+                const int shelfGold = GoldCoins::IsPouch(it.obj->GetFormID())
+                                          ? ShelfGoldOf(it.spotKey) : 0;
+                // DIAG (temporary): a pouch on a shelf drew empty even though the
+                // store logged the amount. Say what the cell asked for and what
+                // the layout actually holds, once per pouch per open.
+                if (GoldCoins::IsPouch(it.obj->GetFormID())) {
+                    static std::set<std::string> s_said;
+                    if (s_said.insert(it.spotKey).second) {
+                        SKSE::log::info("[LOOTDIAG] pouch cell spotKey='{}' -> gold {}",
+                            it.spotKey, shelfGold);
+                        if (auto* pp = Partner()) {
+                            const auto ci = g_contLayouts.find(pp->GetFormID());
+                            if (ci == g_contLayouts.end()) {
+                                SKSE::log::info("[LOOTDIAG]   no layout for this container");
+                            } else {
+                                for (const auto& [k, s] : ci->second.spots) {
+                                    SKSE::log::info("[LOOTDIAG]   spot '{}' col={} row={} gold={}",
+                                        k, s.col, s.row, s.gold);
+                                }
+                            }
+                        }
+                    }
+                }
+                if (shelfGold > 0) {
+                    if (auto* v = GoldCoins::PouchIconObjectFor(shelfGold)) cellIconObj = v;
+                }
+                const IconCache::Icon* cellIcon = cache->Get(cellIconObj);
                 if (!cellIcon) {
-                    cache->QueueCapture(it.obj);   // first sight — render next frames
-                    cellIcon = Fallback::Get(it.obj);
+                    cache->QueueCapture(cellIconObj);   // first sight — render next frames
+                    cellIcon = Fallback::Get(cellIconObj);
                 }
                 if (const auto* icon = cellIcon) {
                     // contain the icon inside the footprint box, keeping aspect.
@@ -2136,7 +2247,7 @@ namespace FUI::LootBarter
                     // rarity glow UNDER the sprite — same pass as the player grid
                     Grid::DrawGlow(dl, it.obj, it.glow, i0, i1,
                         p0, ImVec2(p0.x + bw, p0.y + bh), it.rot);
-                    const bool cellFallback = cellIcon && !cache->Get(it.obj);
+                    const bool cellFallback = cellIcon && !cache->Get(cellIconObj);
                     const auto cdef = Grid::ResolveDef(it.obj);
                     // both styles — the partner board draws the same item the
                     // player's board does, and one offset rule serves both
@@ -2675,7 +2786,7 @@ namespace FUI::LootBarter
     {
         constexpr std::uint32_t kContMaxStr = 512;
         constexpr std::uint32_t kContMaxEntries = 65536;
-        constexpr std::uint32_t kContCosaveVersion = 2;   // v2: GI62 per-spot rotation
+        constexpr std::uint32_t kContCosaveVersion = 3;   // v2: per-spot rotation  v3: a stored pouch's gold
 
         bool ContWriteStr(SKSE::SerializationInterface* a_intfc, const std::string& a_s)
         {
@@ -2711,6 +2822,7 @@ namespace FUI::LootBarter
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.w));
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.h));
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.rot));   // v2
+                a_intfc->WriteRecordData(static_cast<std::int32_t>(s.gold));  // v3
             }
         }
         SKSE::log::info("[LOOT] cosave: saved {} container layouts", g_contLayouts.size());
@@ -2751,7 +2863,11 @@ namespace FUI::LootBarter
                 if (a_version >= 2) {   // GI62 (older saves: everything upright)
                     if (!a_intfc->ReadRecordData(rot)) return;
                 }
-                cl.spots[std::move(key)] = { col, row, w, h, rot & 3 };
+                std::int32_t gold = 0;
+                if (a_version >= 3) {   // a stored pouch's own gold
+                    if (!a_intfc->ReadRecordData(gold)) return;
+                }
+                cl.spots[std::move(key)] = { col, row, w, h, rot & 3, gold };
             }
             if (ok && resolved != 0) {
                 maxStamp = (std::max)(maxStamp, stamp);

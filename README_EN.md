@@ -303,5 +303,5 @@ The same notes are in that folder's `_README.txt`.
 ## Credits / licence
 
 See [CREDITS.md](CREDITS.md) — plugin source under **GPL-3.0** (with the Modding
-Exception). Thanks to ModExplorerMenu (patchulidev), Address Library (meh321),
+Exception). Thanks to Modex (patchulidev), Address Library (meh321),
 CommonLibSSE-NG, Dear ImGui, and the SKSE team.

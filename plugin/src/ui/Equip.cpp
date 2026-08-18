@@ -1461,6 +1461,87 @@ namespace FUI::Equip
         }
     }
 
+    // ★★ONE ANSWER, SHARED. SlotForArmor already decides where an item lands on
+    // the doll and SlotAccepts already files anything it does not recognise as an
+    // accessory; a tooltip that worked it out again would eventually disagree
+    // with the slot the item actually goes into.
+    // ★Every set bit is listed, not just the first: modded armour routinely
+    // covers body+hands+feet at once, and "Body" alone would be a lie about what
+    // the piece takes off you.
+    std::string SlotLabel(RE::TESBoundObject* a_obj)
+    {
+        if (!a_obj) return {};
+
+        // ★★Weapons have no biped slot worth printing -- the hand is not the
+        // fact, the KIND is. Same switch the drawn-icon picker uses
+        // (Fallback::KeyFor), keyword test included: the engine files both the
+        // battleaxe and the warhammer as kTwoHandAxe, so the type alone would
+        // call every warhammer a battleaxe.
+        if (const auto* weap = a_obj->As<RE::TESObjectWEAP>()) {
+            using WT = RE::WEAPON_TYPE;
+            switch (weap->GetWeaponType()) {
+            case WT::kOneHandDagger: return Lang::T(Lang::Str::WeapDagger);
+            case WT::kOneHandSword:  return Lang::T(Lang::Str::WeapSword);
+            case WT::kOneHandAxe:    return Lang::T(Lang::Str::WeapWarAxe);
+            case WT::kOneHandMace:   return Lang::T(Lang::Str::WeapMace);
+            case WT::kTwoHandSword:  return Lang::T(Lang::Str::WeapGreatsword);
+            case WT::kTwoHandAxe:
+                return Lang::T(weap->HasKeywordString("WeapTypeWarhammer")
+                                   ? Lang::Str::WeapWarhammer
+                                   : Lang::Str::WeapBattleaxe);
+            case WT::kBow:           return Lang::T(Lang::Str::WeapBow);
+            case WT::kCrossbow:      return Lang::T(Lang::Str::WeapCrossbow);
+            case WT::kStaff:         return Lang::T(Lang::Str::WeapStaff);
+            default:                 return Lang::T(Lang::Str::WeapSword);
+            }
+        }
+
+        const auto* biped = a_obj->As<RE::BGSBipedObjectForm>();
+        if (!biped) return {};
+        const auto mask = static_cast<std::uint32_t>(biped->GetSlotMask());
+        if (mask == 0) return {};
+
+        // bit N is slot 30+N (BGSBipedObjectForm::BipedObjectSlot)
+        auto named = [](int bit) -> Lang::Str {
+            switch (bit) {
+            case 0: case 1:  return Lang::Str::SlotHead;      // head / hair
+            case 2:          return Lang::Str::SlotBody;
+            case 3:          return Lang::Str::SlotHands;
+            case 5:          return Lang::Str::SlotAmulet;
+            case 6:          return Lang::Str::SlotRing;
+            case 7:          return Lang::Str::SlotFeet;
+            case 9:          return Lang::Str::SlotShield;
+            case 12:         return Lang::Str::SlotCirclet;
+            case 13:         return Lang::Str::SlotEars;
+            default:         return Lang::Str::Count_;         // not one of ours
+            }
+        };
+
+        std::string out;
+        std::vector<int> extra;                  // slot numbers, in order
+        std::vector<Lang::Str> seen;             // head+hair must not print twice
+        for (int bit = 0; bit < 32; ++bit) {
+            if (!(mask & (1u << bit))) continue;
+            const Lang::Str id = named(bit);
+            if (id == Lang::Str::Count_) { extra.push_back(30 + bit); continue; }
+            if (std::find(seen.begin(), seen.end(), id) != seen.end()) continue;
+            seen.push_back(id);
+            if (!out.empty()) out += " · ";
+            out += Lang::T(id);
+        }
+        if (!extra.empty()) {
+            if (!out.empty()) out += " · ";
+            out += Lang::T(Lang::Str::SlotAccessory);
+            out += " (";
+            for (size_t i = 0; i < extra.size(); ++i) {
+                if (i) out += " · ";
+                out += std::to_string(extra[i]);
+            }
+            out += ")";
+        }
+        return out;
+    }
+
     float SlotsTopOffset() { return g_slotsTop; }
 
     void OnMenuClosed()
