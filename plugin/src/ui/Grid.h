@@ -41,6 +41,17 @@ namespace FUI::Grid
     // report that cannot be reproduced here can still be diagnosed there.
     void SetPoolTrace(bool a_on);
 
+    // *TEST ONLY ("!simdrift = 1"), ships OFF. Corrupts the identity the
+    // carry-exclusion is given, reproducing a signature that moved under us
+    // -- a held unit must still leave the board. Use it to verify the
+    // fallback, never in a shipped configuration.
+    void SetSimDrift(bool a_on);
+
+    // ...and read back, so the ini writer can keep a switch the tester
+    // turned on across a restart instead of making them set it every time.
+    [[nodiscard]] bool PoolTrace();
+    [[nodiscard]] bool SimDrift();
+
     // ★Tile keys of the coin pouches on the board right now, front cell
     // first. GoldCoins needs them for two things it cannot work out on its
     // own: which pouch an unaddressed deposit should fill, and which one a

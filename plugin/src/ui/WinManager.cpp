@@ -301,6 +301,11 @@ namespace FUI
             // reports that cannot be reproduced on the author's machine: the
             // [POOL] / [TAKE] lines name the pool, the signature and which
             // unit actually came off the board.
+            // Test switch, not a setting: see Grid::SetSimDrift.
+            if (key == "!simdrift") {
+                Grid::SetSimDrift(rest == "1" || rest == "true");
+                continue;
+            }
             if (key == "!pooltrace") {
                 Grid::SetPoolTrace(rest == "1" || rest == "true");
                 continue;
@@ -745,6 +750,11 @@ namespace FUI
         out << "!scale = " << Theme::ScaleSetting() << "\n";
         out << "!skin3 = " << Theme::SkinNameAt(Theme::SkinIndex()) << "\n";
         out << "!lang = " << Lang::Id(Lang::Get()) << "\n";
+        // Diagnostic / test switches survive a restart once turned on --
+        // a tester should not have to re-arm them every session. Written
+        // only while ON, so an ordinary install never carries them.
+        if (Grid::PoolTrace()) out << "!pooltrace = 1\n";
+        if (Grid::SimDrift())  out << "!simdrift = 1\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
         out << "!caplight = " << Theme::CaptureLightAz()
             << ", " << Theme::CaptureLightEl() << "\n";

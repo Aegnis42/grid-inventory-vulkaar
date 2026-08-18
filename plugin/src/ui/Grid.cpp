@@ -351,6 +351,12 @@ namespace FUI::Grid
             // hand's list, and the accounting wrote the unit off as already worn.
             // (Appended last so the aggregate initialisers above stay valid.)
             bool          arriving = false;
+            // *The units POSITION in the entrys extraLists. Unlike the
+            // signature this cannot drift: it is where the list sits, not
+            // what the list says. When a carried units numbers move under
+            // us this is the only handle left that still points at the same
+            // unit -- see the carry fallback in EnumerateUnitRefs.
+            int           xlIdx = -1;
             // ★How MANY units this one entry stands for. One, for everything you
             // wear a single copy of -- but a quiver is equipped by the tileful,
             // and a suppression worth 1 against a 100-arrow equip left the board
@@ -1055,6 +1061,13 @@ namespace FUI::Grid
         // (the per-tile string keys especially) lives INSIDE the guard.
         bool g_poolTrace = false;
 
+        // *TEST ONLY ("!simdrift = 1" in GridInventory_ui.ini), ships OFF.
+        // Hands the carry-exclusion a DELIBERATELY WRONG identity -- the
+        // state a signature drift leaves the board in. With this on, picking
+        // a weapon up should STILL take it off the board; if it does not, the
+        // carry fallback in EnumerateUnitRefs is not covering the case.
+        bool g_simDrift = false;
+
         // GI32: favourite syncs waiting for the game thread (see ToggleFavorite)
         struct FavSync
         {
@@ -1237,8 +1250,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     u.hand == g_held->hand);
                         });
                 }
-                out.push_back({ a_base, g_held->uid, g_held->sig, "held", stillWorn,
-                                false, g_held->hand, g_held->key });
+                // (!simdrift) both halves of the identity are corrupted, so
+                // every exact path misses and only the carry fallback can
+                // still take the unit off the board -- the thing under test.
+                const std::uint16_t hUid = g_simDrift ? 0u : g_held->uid;
+                const std::uint16_t hSig = g_simDrift
+                    ? static_cast<std::uint16_t>((g_held->sig ^ 0xA5A5u) | 1u)
+                    : g_held->sig;
+                out.push_back({ a_base, hUid, hSig, "held", stillWorn,
+                                false, g_held->hand, g_held->key, false,
+                                g_held->xlIdx });
             }
             for (const auto& u : g_pendingEquip) {                     // equip queued
                 if (u.base == a_base) out.push_back(u);
@@ -3626,7 +3647,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
             if (!a_base.empty()) {
                 auto takeOne = [&](std::uint16_t uid, std::uint16_t sig, bool mayBeWorn,
-                                   const char* why, int hand) {
+                                   const char* why, int hand, int xlIdx) {
                     const auto trace = [&](const char* from) {
                         if (g_poolTrace) {
                             SKSE::log::info("[TAKE] {} uid {:04X} sig {:04X} -> {} "
@@ -3689,6 +3710,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // there would hide a unit the player still owns.
                     const bool held = why && std::strcmp(why, "held") == 0;
                     if (held) {
+                        // *THE LIST POSITION FIRST. It is the one handle that
+                        // cannot drift -- the signature hashes the unit's
+                        // numbers, the uniqueID can be absent, but WHERE the
+                        // list sits in the entry does not change when a value
+                        // inside it does. Taking "any unit" instead was wrong
+                        // in exactly the case that matters: with three daggers
+                        // in the pack it removed one of the OTHERS, so the
+                        // carried one stayed drawn (a duplicate) while an
+                        // innocent sibling blinked out.
+                        if (xlIdx >= 0) {
+                            for (auto it = insts.begin(); it != insts.end(); ++it) {
+                                if (it->xlIdx != xlIdx) continue;
+                                if (--it->units <= 0) insts.erase(it);
+                                trace("REMOVED by list position");
+                                return;
+                            }
+                        }
                         if (uid != 0) {   // same unique id, drifted signature
                             for (auto it = insts.begin(); it != insts.end(); ++it) {
                                 if (it->uid != uid) continue;
@@ -3704,6 +3742,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 trace("REMOVED by sig (uid dropped)");
                                 return;
                             }
+                        }
+                        // A carry that had NO list is a plain unit, and the
+                        // plain pool is where it must come from -- reaching
+                        // into `insts` first would take a listed sibling and
+                        // leave the carried one drawn.
+                        if (xlIdx < 0 && plain > 0) {
+                            --plain;
+                            trace("REMOVED from plain (carry had no list)");
+                            return;
                         }
                         if (!insts.empty()) {
                             auto it = std::prev(insts.end());
@@ -3721,7 +3768,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 };
                 for (const auto& u : OffBoardUnitsFor(a_entry ? a_entry->object : nullptr,
                                                      a_base)) {
-                    takeOne(u.uid, u.sig, u.mayBeWorn, u.why, u.hand);
+                    takeOne(u.uid, u.sig, u.mayBeWorn, u.why, u.hand, u.xlIdx);
                 }
             }
 
@@ -6714,6 +6761,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     void MarkCapacityDirty() { g_capacityDirty = true; }
+
+    bool PoolTrace() { return g_poolTrace; }
+    bool SimDrift()  { return g_simDrift; }
+
+    void SetSimDrift(bool a_on)
+    {
+        if (g_simDrift == a_on) return;
+        g_simDrift = a_on;
+        SKSE::log::info("[GRID] carry-identity drift simulation {}",
+            a_on ? "ON (test)" : "off");
+    }
 
     void SetPoolTrace(bool a_on)
     {
