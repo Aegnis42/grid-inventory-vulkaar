@@ -1,4 +1,7 @@
 #include "ui/GridMenu.h"
+#include "game/Census.h"
+#include "game/DeltaWatch.h"
+#include "game/Ledger.h"
 #include "ui/Grid.h"
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
@@ -123,6 +126,9 @@ namespace FUI
         // parking must run here: menus still advance every frame while the
         // game is paused, BEFORE the frame renders.
         UIRoot::Tick();
+        // ★Frames, not wall clock (Ledger.h): AdvanceMovie keeps running while
+        // the menu pauses the game, which is exactly the clock we want.
+        FUI::Ledger::Tick();
         IMenu::AdvanceMovie(a_interval, a_currentTime);
     }
 
@@ -151,6 +157,21 @@ namespace FUI
     void GridInventoryMenu::OnShow()
     {
         g_closeSfxPlayed = false;
+        // ★1.4/B0: the strongest test in the whole step. Everything that
+        // happened while the menu was SHUT had to arrive as events; if the
+        // running total disagrees with a fresh count here, the engine does not
+        // tell us everything and §9 says 1.4 stops.
+        FUI::DeltaWatch::Reconcile("menu-open");
+        // ★B1 AFTER B0: the form-level audit is the cheaper question and its
+        // answer frames the kind-level one. If the totals already disagree,
+        // a kind relabel report is describing a board that was wrong anyway.
+        FUI::Census::Take("menu-open");
+        // ★B2 flushes on OPEN, not on close. Closing the menu right after a
+        // request reported it outstanding at ONE frame old -- the confirmation
+        // was simply still in flight. Waiting until the next open gives every
+        // request its full chance, and what is left by then really was never
+        // answered.
+        FUI::Ledger::Flush("since-last-open");
         FlushInputState();
         UIRoot::OnShow();   // whoosh plays deferred (UIRoot) — at kShow time
                             // the audio path swallowed it
@@ -163,6 +184,10 @@ namespace FUI
             Sfx::MenuClose();
         }
         g_closeSfxPlayed = false;
+        // ...and this one covers the session itself: our own actions, which we
+        // are supposed to know about exactly.
+        FUI::DeltaWatch::Reconcile("menu-close");
+        FUI::Census::Take("menu-close");
         ItemPreview::GetSingleton()->End();
         UIRoot::OnClose();
     }

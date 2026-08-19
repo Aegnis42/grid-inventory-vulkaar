@@ -169,6 +169,14 @@ namespace FUI::Grid
 
     // Deferred rebuild (safe to request mid-draw; runs at FinishFrame).
     void RequestRebuild();
+    // ★B3-a: an engine request that was never confirmed. Registered with the
+    // Ledger at startup; see Ledger::SetOnExpire.
+    void OnRequestExpired(std::uint32_t a_form, std::int32_t a_delta,
+                          const char* a_who);
+    // ★B3-b: a gear slot is no longer dropped when the request goes out -- it
+    // is dropped when the engine CONFIRMS, and kept when it does not.
+    void CommitSlotDrop(std::uint32_t a_form, int a_count);
+    void CancelSlotDrop(std::uint32_t a_form, int a_count);
 
     // Light path for rotation/scale edits: re-resolve defs + queue captures
     // WITHOUT re-placing the grid (footprints unchanged — no reflow, no IO).

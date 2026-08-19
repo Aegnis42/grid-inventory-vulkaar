@@ -3,6 +3,7 @@
 #include "ui/Equip.h"
 #include "ui/Fallback.h"
 #include "ui/LootBarter.h"
+#include "game/Ledger.h"
 
 #include "game/BagFilter.h"
 #include "game/GoldCoins.h"
@@ -914,6 +915,26 @@ namespace FUI::LootBarter
         };
 
         for (const auto& r : g_xfer) {
+            // ★1.4/B0 -- registered HERE, once, for all six directions: this is
+            // the last point before the engine is asked, and every branch below
+            // ends in a RemoveItem that will come back to us as an event. The
+            // direction test is the same one RequestXfer uses (see kTake ||
+            // kBuy || kPickTake above), so the two cannot drift apart.
+            if (r.obj && Ledger::Enabled()) {
+                const bool incoming = r.dir == XferReq::kTake ||
+                                      r.dir == XferReq::kBuy ||
+                                      r.dir == XferReq::kPickTake;
+                const char* who =
+                    r.dir == XferReq::kTake      ? "take"  :
+                    r.dir == XferReq::kStore     ? "store" :
+                    r.dir == XferReq::kBuy       ? "buy"   :
+                    r.dir == XferReq::kSell      ? "sell"  :
+                    r.dir == XferReq::kPickTake  ? "steal" : "plant";
+                // ★uid+sig ride along: B0 proved the engine's events never
+                // name the unit (§8-2), so this is the only record that does.
+                Ledger::Submit(r.obj->GetFormID(), incoming ? r.count : -r.count,
+                               who, r.uid, r.sig);
+            }
             switch (r.dir) {
             case XferReq::kTake: {
                 // partner -> player. Engine moves the extra data too (charge,
@@ -966,10 +987,24 @@ namespace FUI::LootBarter
                 // list we got to the engine (rule 58).
                 auto* sxl = Grid::ResolveExitUnit(r.obj, r.uid, r.sig, r.count,
                                                   r.fav ? r.count : 0, r.xlIdx);
-                GuardedRemove(player, r.obj, sxl == nullptr, "store", [&]() {   // GI42
-                    player->RemoveItem(r.obj, r.count,
-                        RE::ITEM_REMOVE_REASON::kStoreInContainer, sxl, source);
-                });
+                // ★TEST ONLY (!simrefuse): skip the ENGINE CALL and nothing
+                // else. A real refusal is RemoveItem quietly not taking -- our
+                // own bookkeeping still runs, because the engine's silence does
+                // not reach back and cancel it. The first version bailed out of
+                // the whole case, which also skipped ClearPendingRemove, so the
+                // tile stayed suppressed and the recovery rebuild had nothing to
+                // show. That was a situation the game cannot produce: §10-7's
+                // rule about stress tools, and I broke it the same day I wrote
+                // it down.
+                if (Ledger::SimRefuse()) {
+                    SKSE::log::warn("[XFER] !simrefuse: engine call SKIPPED for "
+                                    "store '{}' x{}", r.obj->GetName(), r.count);
+                } else {
+                    GuardedRemove(player, r.obj, sxl == nullptr, "store", [&]() {   // GI42
+                        player->RemoveItem(r.obj, r.count,
+                            RE::ITEM_REMOVE_REASON::kStoreInContainer, sxl, source);
+                    });
+                }
                 Grid::ClearPendingRemove(r.obj, r.count);   // engine count dropped
                 itemSound(r.obj, false);
                 break;

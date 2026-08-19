@@ -3,6 +3,7 @@
 #include "ui/Equip.h"
 #include "ui/Fallback.h"
 #include "ui/Grid.h"
+#include "game/Ledger.h"
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
 #include "ui/Lang.h"
@@ -338,6 +339,9 @@ namespace FUI::Grid
         // slot NotePendingRemove had already erased -- came back as a fresh
         // arrival and first-fit into the front gap on its way out the door.
         std::map<std::string, int>          g_pendingRemovePool;
+        // ★B3-b: gear slots whose drop is waiting on the engine's answer. FIFO
+        // per form; CommitSlotDrop erases them, CancelSlotDrop lets them live.
+        std::unordered_map<RE::FormID, std::vector<std::string>> g_pendingSlotDrop;
 
         // *THE LIST POSITIONS behind those counts, per pool, in the order they
         // were queued. The pool name is a crowd (three separately tempered
@@ -3741,6 +3745,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (g_sound) g_sound(a_obj, true);
     }
 
+    void OnRequestExpired(std::uint32_t a_form, std::int32_t a_delta, const char* a_who)
+    {
+        // ★The cell comes back FIRST -- a rebuild before this would re-mint the
+        // slot and first-fit it into the front gap, which is the very bug.
+        if (a_delta < 0) CancelSlotDrop(a_form, -a_delta);
+        // ★The board is still derived from the engine, so the engine's answer is
+        // still the truth and re-deriving IS the recovery. That stops being true
+        // in B3-b, and this is where the undo goes when it does.
+        const auto* form = RE::TESForm::LookupByID(a_form);
+        SKSE::log::warn("[GRID] '{}' {:+d} ({}) was never confirmed -- rebuilding "
+                        "to recover",
+            form && form->GetName() ? form->GetName() : "?", a_delta, a_who);
+        RequestRebuild();
+    }
+
     void RequestRebuild()
     {
         g_needRebuild = true;
@@ -6971,7 +6990,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return;
         }
 
-        // GI20: cap<=1 (gear/bags) -- just drop THIS slot.
+        // ★★B3-b: DEFERRED, not done here. Dropping the slot at REQUEST time
+        // is what made a refused store come back into the front gap: the cell
+        // was already forgotten, so the rebuild minted a fresh slot and
+        // first-fit it. The stackable branch above already knew this -- read its
+        // comment, "Cancel-safe: this runs on CONFIRM only" -- and gear did not.
+        //
+        // The unit still disappears from the board the moment the player
+        // commits: g_pendingRemovePool hides it. What survives is the CELL.
+        //
+        // What used to be here, for the record: g_layout.erase(a_key).
         //
         // This used to erase the key and then RE-KEY every surviving tile of the
         // form densely (#0..#n-1). That is what made the wrong cell empty: the
@@ -6983,7 +7011,32 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         //
         // Losing the re-key also removes its bag hazard: a renamed bag key had to
         // drag g_openBags and every contents' inBag pointer along with it.
-        g_layout.erase(a_key);
+        g_pendingSlotDrop[fid].push_back(a_key);
+    }
+
+    // ★Both halves consume the same FIFO, and which half runs is the whole
+    // difference between "the engine took it" and "the engine ignored us".
+    void CommitSlotDrop(std::uint32_t a_form, int a_count)
+    {
+        const auto it = g_pendingSlotDrop.find(a_form);
+        if (it == g_pendingSlotDrop.end()) return;
+        for (int i = 0; i < a_count && !it->second.empty(); ++i) {
+            g_layout.erase(it->second.front());
+            it->second.erase(it->second.begin());
+        }
+        if (it->second.empty()) g_pendingSlotDrop.erase(it);
+    }
+
+    void CancelSlotDrop(std::uint32_t a_form, int a_count)
+    {
+        const auto it = g_pendingSlotDrop.find(a_form);
+        if (it == g_pendingSlotDrop.end()) return;
+        for (int i = 0; i < a_count && !it->second.empty(); ++i) {
+            SKSE::log::warn("[GRID] slot '{}' KEPT -- its move was never confirmed",
+                            it->second.front());
+            it->second.erase(it->second.begin());   // dropped from the queue, not from g_layout
+        }
+        if (it->second.empty()) g_pendingSlotDrop.erase(it);
     }
 
     void ClearPendingRemove(RE::TESBoundObject* a_obj, int a_count)
@@ -7170,7 +7223,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // placement as WouldOverflow, but asks about everything at once.
     namespace
     {
-        bool ComputeOverloaded()
+        // ★Why the board is overloaded, not just that it is. The report that
+        // prompted this said "the bar is red with plenty of space left", and
+        // the verdict alone cannot answer it: the free cells the panel counts
+        // may all sit inside bags, and the units that overflowed may be the two
+        // kinds that can never go in one (coins, and bags themselves).
+        struct OverloadWhy
+        {
+            int                      stranded = 0;
+            std::vector<std::string> lines;
+        };
+
+        bool ComputeOverloaded(OverloadWhy* a_why = nullptr)
         {
             auto* player = RE::PlayerCharacter::GetSingleton();
             if (!player) return false;
@@ -7213,6 +7277,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     spill.push_back(&it);
                 } else {
                     hardOverflow = true;
+                    if (a_why) {
+                        const char* kind =
+                            !it.obj                    ? "unknown" :
+                            it.def.bag != 0            ? "a bag cannot be put inside a bag automatically" :
+                            !it.inBag.empty()          ? "already inside a bag" :
+                                                         "coins never spill into bags";
+                        a_why->lines.push_back(std::format("'{}' -- {}",
+                            it.obj ? it.obj->GetName() : "?", kind));
+                    }
                 }
             }
             for (const auto& slot : CollectBagSlots(tmp)) {
@@ -7245,6 +7318,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         ++sit;
                     }
                 }
+            }
+            if (a_why) {
+                for (const Item* s : spill) {
+                    a_why->lines.push_back(std::format("'{}' ({}x{}) -- no general bag "
+                        "slot has room for its shape",
+                        s->obj ? s->obj->GetName() : "?", s->mask.w, s->mask.h));
+                }
+                a_why->stranded = static_cast<int>(a_why->lines.size());
             }
             return hardOverflow || !spill.empty();
         }
@@ -7478,10 +7559,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (g_capacityDirty) {
             g_capacityDirty = false;
             const bool was = g_overloaded;
-            g_overloaded = ComputeOverloaded();
+            OverloadWhy why;
+            g_overloaded = ComputeOverloaded(&why);
             if (g_overloaded && !was) {
                 Sfx::FailNote(Lang::T(Lang::Str::Overloaded));
-                SKSE::log::info("[GRID] capacity: OVERLOADED");
+                // ★The panel shows main + GENERAL bags; the hard board is only
+                // kCols x kMinRows of that. Printing both is what turns "why is
+                // it red, I have room" into an answerable question -- the room
+                // is real, it is just somewhere these units cannot go.
+                SKSE::log::info("[GRID] capacity: OVERLOADED -- hard board {}x{}={}, "
+                                "panel shows {}/{} (the free cells include general "
+                                "bag space)",
+                    kCols, kMinRows, kCols * kMinRows, g_spaceUsed, g_spaceTotal);
+                for (const auto& l : why.lines) {
+                    SKSE::log::info("[GRID]   stranded: {}", l);
+                }
             } else if (!g_overloaded && was) {
                 SKSE::log::info("[GRID] capacity: back to normal");
             }
@@ -11200,6 +11292,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(d.form);
             if (!obj) continue;
             const int count = d.count;
+            Ledger::Submit(d.form, -count, "trash", d.uid, d.sig);   // 1.4/B2
             player->RemoveItem(obj, count, RE::ITEM_REMOVE_REASON::kRemove,
                 ResolveExitUnit(obj, d.uid, d.sig, count, d.fav ? count : 0,
                                 d.xlIdx), nullptr);

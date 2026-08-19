@@ -6,6 +6,9 @@
 #include "ui/UIRoot.h"
 #include "ui/Wheeler.h"
 #include "ui/WinManager.h"
+#include "game/Census.h"
+#include "game/DeltaWatch.h"
+#include "game/Ledger.h"
 
 #include <algorithm>
 #include <cctype>
@@ -308,6 +311,27 @@ namespace FUI
             }
             if (key == "!pooltrace") {
                 Grid::SetPoolTrace(rest == "1" || rest == "true");
+                continue;
+            }
+            // 1.4 / B0: engine-delta observation. Writes a lot and changes
+            // nothing -- see DeltaWatch.h.
+            if (key == "!delta") {
+                DeltaWatch::SetEnabled(rest == "1" || rest == "true");
+                continue;
+            }
+            // 1.4 / B1: kind-level audit. See Census.h.
+            if (key == "!census") {
+                Census::SetEnabled(rest == "1" || rest == "true");
+                continue;
+            }
+            // 1.4 / B2: request ledger. See Ledger.h.
+            if (key == "!ledger") {
+                Ledger::SetEnabled(rest == "1" || rest == "true");
+                continue;
+            }
+            // Test switch, not a setting: see Ledger::SimRefuse.
+            if (key == "!simrefuse") {
+                try { Ledger::SetSimRefuse(std::stoi(rest)); } catch (...) {}
                 continue;
             }
             if (key == "!lang") {
@@ -755,6 +779,9 @@ namespace FUI
         // only while ON, so an ordinary install never carries them.
         if (Grid::PoolTrace()) out << "!pooltrace = 1\n";
         if (Grid::SimDrift())  out << "!simdrift = 1\n";
+        if (DeltaWatch::Enabled()) out << "!delta = 1\n";
+        if (Census::Enabled())     out << "!census = 1\n";
+        if (Ledger::Enabled())     out << "!ledger = 1\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
         out << "!caplight = " << Theme::CaptureLightAz()
             << ", " << Theme::CaptureLightEl() << "\n";

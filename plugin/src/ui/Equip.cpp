@@ -1,4 +1,5 @@
 ﻿#include "ui/Equip.h"
+#include "game/Ledger.h"
 
 #include <SKSE/SKSE.h>
 #include "ui/Fallback.h"
@@ -788,6 +789,17 @@ namespace FUI::Equip
         // this line is what says which record type to go look at next.
         SKSE::log::info("[USE] '{}' formType={}", a_obj->GetName(),
                         static_cast<int>(a_obj->GetFormType()));
+        // ★1.4/B0. Round 2 turned up the step's first MISMATCH here: applying a
+        // poison logged ONE use and produced TWO -1 container events, while the
+        // stack fell by one. Registering the consumable kinds -- and only those,
+        // so a use that consumes nothing does not sit in the queue expiring --
+        // is what tells the next round whether the surplus event is ours or the
+        // engine's.
+        if (Ledger::Enabled() &&
+            (a_obj->As<RE::AlchemyItem>() || a_obj->As<RE::ScrollItem>())) {
+            Ledger::Submit(a_obj->GetFormID(),
+                -EquipCountFor(a_obj, a_tileCount), "use", a_uid, a_sig);
+        }
         g_pending.push_back({ a_obj->GetFormID(), "", false, a_uid, a_xlIdx,
                               a_sig, a_srcKey, 0,
                               EquipCountFor(a_obj, a_tileCount) });

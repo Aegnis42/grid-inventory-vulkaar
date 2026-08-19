@@ -47,6 +47,12 @@ set(SOURCES
     src/game/Costume.cpp
     src/game/DualRing.h
     src/game/DualRing.cpp
+    src/game/DeltaWatch.h
+    src/game/DeltaWatch.cpp
+    src/game/Census.h
+    src/game/Census.cpp
+    src/game/Ledger.h
+    src/game/Ledger.cpp
     src/ui/ItemPreview.h
     src/ui/ItemPreview.cpp
     src/ui/GridMenu.h

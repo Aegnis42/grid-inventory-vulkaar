@@ -1,6 +1,9 @@
 ﻿#include "api/HostApi.h"
 #include "game/BagFilter.h"
+#include "game/Census.h"
 #include "game/Costume.h"
+#include "game/DeltaWatch.h"
+#include "game/Ledger.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "ui/Editor.h"
@@ -181,6 +184,11 @@ namespace
         RE::BSEventNotifyControl ProcessEvent(const RE::TESEquipEvent* a_event,
             RE::BSTEventSource<RE::TESEquipEvent>*) override
         {
+            // ★1.4/B0: this sink is the one that genuinely throws its delta
+            // away -- it reads IsPlayerRef() and nothing else. Before it can be
+            // extended (PLAN §2 row 2) we need to see whether baseObject +
+            // uniqueID + equipped actually name the unit that moved.
+            FUI::DeltaWatch::OnEquip(a_event);
             if (a_event && a_event->actor && a_event->actor->IsPlayerRef()) {
                 FUI::Grid::MarkCapacityDirty();
                 // The active preset IS what the player is wearing, so anything
@@ -278,6 +286,12 @@ namespace
             if (!a_event) {
                 return RE::BSEventNotifyControl::kContinue;
             }
+            // ★1.4/B0 FIRST, before any consumer below reacts -- the whole point
+            // is to see the delta as it ARRIVES, in the order it arrived, and
+            // to know where the existing consumers sit relative to it. A sink
+            // of our own would be delivered in an order we do not control.
+            // Observation only; returns immediately unless "!delta = 1".
+            FUI::DeltaWatch::OnContainer(a_event);
             // W2: any change touching the player's inventory can flip the
             // capacity state (shop buys, scripted AddItem, drops, sells)
             if (a_event->newContainer == 0x14 || a_event->oldContainer == 0x14) {
@@ -1538,6 +1552,10 @@ namespace
                 // RemoveItem(kDropping) = the vanilla drop path; DropObject
                 // direct is a known CTD from task context
                 player->PlayPickUpSound(a_obj, false, false);
+                // 1.4/B0: the first round showed drops arriving as req=? simply
+                // because nothing had registered them -- which inflates the
+                // "external delta" share and makes the echo figure unreadable.
+                FUI::Ledger::Submit(a_obj->GetFormID(), -count, "drop");
                 player->RemoveItem(a_obj, count, RE::ITEM_REMOVE_REASON::kDropping,
                     a_xl, nullptr);   // GI25: the named sub-stack
             });
@@ -1776,15 +1794,31 @@ namespace
         case SKSE::MessagingInterface::kDataLoaded:
             Setup();
             FUI::GoldCoins::InitForms();   // G1: resolve Grid Inventory.esp
+            // ★B3-a: close the loop the ledger opened. Registered once, here,
+            // where the forms are already resolved.
+            FUI::Ledger::SetOnExpire([](const FUI::Ledger::Expired& a_e) {
+                FUI::Grid::OnRequestExpired(a_e.form, a_e.delta, a_e.who);
+            });
+            FUI::Ledger::SetOnConfirm([](const FUI::Ledger::Expired& a_e) {
+                if (a_e.delta < 0) FUI::Grid::CommitSlotDrop(a_e.form, -a_e.delta);
+            });
             break;
         case SKSE::MessagingInterface::kNewGame:
             ResetSession();
+            FUI::DeltaWatch::Reset("new game");
+            FUI::Census::Reset("new game");
+            FUI::Ledger::Reset("new game");
             // no cosave load callback fires on new game — start with an empty
             // grid layout instead of migrating the legacy ini (old saves only)
             FUI::Grid::MarkLayoutFresh();
             break;
         case SKSE::MessagingInterface::kPreLoadGame:
             ResetSession();
+            // ★Before, not after: the engine swaps the inventory during the
+            // load and any event that crosses it belongs to neither side.
+            FUI::DeltaWatch::Reset("load");
+            FUI::Census::Reset("load");
+            FUI::Ledger::Reset("load");
             break;
         case SKSE::MessagingInterface::kPostLoadGame:
             ResetSession();
