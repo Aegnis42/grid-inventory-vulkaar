@@ -343,6 +343,21 @@ namespace FUI::Grid
         // per form; CommitSlotDrop erases them, CancelSlotDrop lets them live.
         std::unordered_map<RE::FormID, std::vector<std::string>> g_pendingSlotDrop;
 
+        // ---- B3-c: rebuild provenance ---------------------------------------
+        bool                       g_rbTrace = false;
+        std::map<std::string, int> g_rbAsk;      // askers since the last rebuild
+        int                        g_rbRuns = 0; // rebuilds since the last report
+        std::chrono::steady_clock::time_point g_rbWindow{};
+
+        // "F:/.../ui/Grid.cpp:1234" -> "Grid.cpp:1234"
+        std::string ShortSite(const std::source_location& a_w)
+        {
+            std::string f = a_w.file_name() ? a_w.file_name() : "?";
+            const auto cut = f.find_last_of("/\\");
+            if (cut != std::string::npos) f = f.substr(cut + 1);
+            return f + ":" + std::to_string(a_w.line());
+        }
+
         // *THE LIST POSITIONS behind those counts, per pool, in the order they
         // were queued. The pool name is a crowd (three separately tempered
         // daggers hash to one pool) and the count alone cannot say WHICH of
@@ -3004,7 +3019,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     GoldCoins::UnpinTile(it.key);
                                 GoldCoins::DropAsGold(it.coinValue);
                                 g_layout.erase(it.key);   // free THIS slot; rebuild re-maps survivors by position
-                                g_needRebuild = true;
+                                RequestRebuild();
                             } else {
                                 if (it.count <= 1) {   // last unit: tile disappears
                                     g_layout.erase(it.key);
@@ -3020,7 +3035,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                         ResolveExitUnit(it.obj, it.uid, it.sig, 1,
                                                         it.fav ? 1 : 0, it.xlIdx));
                                 }
-                                g_needRebuild = true;
+                                RequestRebuild();
                             }
                         }
                         // F: vanilla favorite toggle (feeds the Q menu);
@@ -3030,7 +3045,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             !GoldCoins::IsCoinForm(fid)) {
                             ToggleFavorite(it.key, it.obj, it.uid, it.xlIdx);
                             Sfx::Favorite();
-                            g_needRebuild = true;
+                            RequestRebuild();
                         }
                     }
                     if (tileClicked(ImGuiMouseButton_Left)) {   // C1: pickup
@@ -3080,7 +3095,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     it.obj->GetName(), it.key, le.col, le.row);
                             }
                             if (g_sound) g_sound(it.obj, true);
-                            g_needRebuild = true;   // cells free next frame (C1)
+                            RequestRebuild();   // cells free next frame (C1)
                         }
                     } else if (tileClicked(ImGuiMouseButton_Right)) {
                         // bag / pouch right-click is ALWAYS manage (toggle /
@@ -3305,7 +3320,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 g_drainHint = { FormKey(it.obj), it.key };
                             }
                         }
-                        g_needRebuild = true;
+                        RequestRebuild();
                     }
                 }
             }
@@ -3706,7 +3721,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 a_obj->GetName(), a_hand, a_uid, a_sig, g_held->key);
         }
         if (g_sound) g_sound(a_obj, true);
-        g_needRebuild = true;
+        RequestRebuild();
     }
 
     void BeginPartnerCarry(RE::TESBoundObject* a_obj, int a_count, int a_value,
@@ -3760,9 +3775,51 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         RequestRebuild();
     }
 
-    void RequestRebuild()
+    bool RebuildTrace() { return g_rbTrace; }
+
+    void SetRebuildTrace(bool a_on)
     {
+        g_rbTrace = a_on;
+        if (a_on) SKSE::log::info("[RB] rebuild provenance ON (B3-c)");
+    }
+
+    void RequestRebuild(const std::source_location& a_where)
+    {
+        // ★A rebuild request is COALESCED -- many asks, one run -- so the
+        // interesting number is not "who asked" but "who was asking when it
+        // finally ran". Both are recorded; the run drains the list.
+        if (g_rbTrace) ++g_rbAsk[ShortSite(a_where)];
         g_needRebuild = true;
+    }
+
+    // Called by Rebuild(), which is where an ask actually becomes work.
+    void NoteRebuildRan(const std::source_location& a_direct)
+    {
+        if (!g_rbTrace) return;
+        ++g_rbRuns;
+
+        std::string who;
+        for (const auto& [site, n] : g_rbAsk) {
+            if (!who.empty()) who += ", ";
+            who += site;
+            if (n > 1) who += "x" + std::to_string(n);
+        }
+        g_rbAsk.clear();
+        // ★No pending ask means somebody called Rebuild() outright. That is a
+        // legitimate thing to do -- it just has to be visible, because B3 has to
+        // account for every path that rebuilds the board.
+        if (who.empty()) who = "DIRECT " + ShortSite(a_direct);
+        SKSE::log::info("[RB] run #{} <- {}", g_rbRuns, who);
+
+        // A rate line once a second: the oscillation in §4-2 is a RATE problem,
+        // and a per-run line alone does not show it.
+        const auto now = std::chrono::steady_clock::now();
+        if (g_rbWindow.time_since_epoch().count() == 0) g_rbWindow = now;
+        if (now - g_rbWindow >= std::chrono::seconds{ 1 }) {
+            SKSE::log::info("[RB] ---- {} rebuild(s) in the last second ----", g_rbRuns);
+            g_rbRuns = 0;
+            g_rbWindow = now;
+        }
     }
 
     void RefreshDefs()
@@ -6440,8 +6497,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
     }
 
-    void Rebuild()
+    void Rebuild(const std::source_location& a_where)
     {
+        NoteRebuildRan(a_where);   // B3-c: provenance, drained at the entry
         // ★The search set is keyed by tile, so any rebuild can invalidate it.
         // Bumping a counter here and recomputing lazily beats calling into the
         // search from every one of this function's exits.
@@ -6788,7 +6846,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // rebuilt once the change has actually landed. Without this the toggle
         // applied a frame later than the draw that was supposed to show it and F
         // looked like it did nothing.
-        g_needRebuild = true;
+        RequestRebuild();
     }
 
     // GI36: resolve the sub-stack that is ACTUALLY leaving the bag, and drop its
@@ -7419,7 +7477,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g.preSplit = true;
             g_held = g;
             if (g_sound) g_sound(cform, true);   // the purse audibly lifts
-            g_needRebuild = true;
+            RequestRebuild();
             return;
         }
 
@@ -7451,7 +7509,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
         g_held = h;
         if (g_sound) g_sound(a_obj, true);   // split confirmed -> pickup sound
-        g_needRebuild = true;
+        RequestRebuild();
     }
 
     int CellSpanOf(RE::TESBoundObject* a_obj)
@@ -9924,7 +9982,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 } else {
                     g_held.reset();   // window chrome: cancel back
                 }
-                g_needRebuild = true;
+                RequestRebuild();
                 return true;
             }
             // F7-swap: a partner item dropped on a SINGLE occupied player tile
@@ -9947,7 +10005,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // F2: a partner item can't be taken INTO the trash — cancel
                 if (v.bagKey == kTrashKey) {
                     g_held.reset();
-                    g_needRebuild = true;
+                    RequestRebuild();
                     return true;
                 }
                 const int cnt = a_held.count;
@@ -10050,13 +10108,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         g_held->SetRot(d.rot);       // GI62
                         HoldByPivot(*g_held, d.def);
                         if (g_sound) g_sound(d.obj, true);
-                        g_needRebuild = true;
+                        RequestRebuild();
                         return true;
                     }
                 }
             }
             g_held.reset();
-            g_needRebuild = true;
+            RequestRebuild();
             return true;
         }
 
@@ -10413,7 +10471,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                Equip::WornCountAt(g_slotTarget)),
                            swapSameForm);
             }
-            g_needRebuild = true;
+            RequestRebuild();
             return true;
         }
 
@@ -10430,7 +10488,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 PlaceTile(a_held.key, g_target.col, g_target.row, v.bagKey, a_held.count, a_held.rot);
                 if (g_sound) g_sound(a_held.obj, false);
                 g_held.reset();
-                g_needRebuild = true;
+                RequestRebuild();
             // ★The swap/merge branch runs when the cell is NOT valid, so the
             // filter check above does not cover it — a sword dropped onto an
             // ore tile would trade places with it and end up inside the ore
@@ -10463,7 +10521,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         if (wasPinned) g_layout.erase(a_held.key);
                         if (g_sound) g_sound(a_held.obj, false);
                         g_held.reset();
-                        g_needRebuild = true;
+                        RequestRebuild();
                     } else if (wasPinned) {
                         GoldCoins::PinAmount(a_held.key, v2);   // no room: restore
                     }
@@ -10474,7 +10532,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // remainder rides the cursor as a pin)
                     MergeGoldInto(a_held, disp.key, disp.coinValue,
                         { g_target.col, g_target.row, v.bagKey, 1 });
-                    g_needRebuild = true;
+                    RequestRebuild();
                 } else if (!heldCoin && !dispCoin && disp.key != a_held.key &&
                            !a_held.isBag && disp.def.bag == 0 &&
                            PoolOfSlot(disp.key) == HeldPool(a_held) &&
@@ -10496,7 +10554,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         } else {
                             g_layout[a_held.key].count = a_held.count;
                         }
-                        g_needRebuild = true;
+                        RequestRebuild();
                     }
                     if (g_poolTrace) {
                         SKSE::log::info("[SWAP] merge '{}' into '{}' absorbed={} "
@@ -10539,7 +10597,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     g_held->quest  = disp.quest;
                     g_held->SetRot(disp.rot);               // GI62
                     HoldByPivot(*g_held, disp.def);
-                    g_needRebuild = true;
+                    RequestRebuild();
                 }
             }
             // other invalid targets (2+ blockers, bag-in-bag): keep carrying.
@@ -10571,7 +10629,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     GoldCoins::DebitLedger(moved);
                     if (g_sound) g_sound(a_held.obj, false);
                     g_held.reset();
-                    g_needRebuild = true;
+                    RequestRebuild();
                     return true;
                 }
             }
@@ -10630,7 +10688,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                               -1.0f, -1.0f,
                                               sd.occUid, sd.occXlIdx, sd.occOrd, sd.occRot);
                             LootBarter::NoteCarriedSpot(sd.occSpotKey);
-                            g_needRebuild = true;
+                            RequestRebuild();
                             return true;
                         }
                         // F7 rule 3: a FREE spot = stored right there
@@ -10642,7 +10700,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
             g_held.reset();
-            g_needRebuild = true;
+            RequestRebuild();
             return true;
         }
 
@@ -10683,7 +10741,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
             g_held.reset();
-            g_needRebuild = true;
+            RequestRebuild();
             return true;
         }
 
@@ -10707,7 +10765,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
             g_held.reset();
-            g_needRebuild = true;
+            RequestRebuild();
             return true;
         }
 
@@ -10728,7 +10786,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // (accidental loss during looting) — cancel back to the spot.
             if (LootBarter::CurrentMode() == LootBarter::Mode::kNormal) return false;
             g_held.reset();
-            g_needRebuild = true;
+            RequestRebuild();
             return true;
         }
 
@@ -10747,13 +10805,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 GoldCoins::DropAsGold(a_held.coinValue);
                 g_layout.erase(a_held.key);   // free this coin's slot
                 g_held.reset();
-                g_needRebuild = true;
+                RequestRebuild();
             } else if (a_held.quest) {
                 // Phase 7: quest items can't be discarded — cancel back to
                 // their spot (Rebuild restores the tile).
                 Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
                 g_held.reset();
-                g_needRebuild = true;
+                RequestRebuild();
             } else {
                 g_layout.erase(a_held.key);
                 if (a_held.isBag) {
@@ -10771,7 +10829,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                         a_held.fav ? a_held.count : 0, a_held.xlIdx));
                 }
                 g_held.reset();
-                g_needRebuild = true;
+                RequestRebuild();
             }
             return true;
         }
@@ -10882,7 +10940,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             g_trashReturn.erase(a_key);
             g_trashXl.erase(a_key);
-            g_needRebuild = true;
+            RequestRebuild();
         }
 
         // evict oldest parked tiles until a_mask fits (FIFO, per spec)
@@ -10930,7 +10988,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_trashOrder.push_back(a_key);
             g_openBags.erase(a_key);   // a parked (empty) bag closes its window
             if (g_sound && a_obj) g_sound(a_obj, false);
-            g_needRebuild = true;
+            RequestRebuild();
         }
 
         // ---- F2: drop handlers ----
@@ -10942,7 +11000,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
             if (!TrashIntakeAllowed(a_held.obj, a_held.quest, a_held.key, a_held.isBag)) {
                 g_held.reset();   // blocked: snaps back (layout entry intact)
-                g_needRebuild = true;
+                RequestRebuild();
                 return true;
             }
             const int col = g_target.valid ? g_target.col : -1;
@@ -10953,7 +11011,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                a_held.xlIdx, a_held.uid, a_held.sig };
                 Sfx::SelectOn();
                 g_held.reset();
-                g_needRebuild = true;
+                RequestRebuild();
                 return true;
             }
             TrashMakeRoomFor(a_held.mask);
@@ -11014,7 +11072,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             GoldCoins::DebitLedger(moved);
             if (g_sound) g_sound(a_held.obj, false);
             g_held.reset();
-            g_needRebuild = true;
+            RequestRebuild();
             return true;
         }
 
@@ -11083,7 +11141,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (rows[i].handler(a_held)) break;
             }
             // no consuming route: keep carrying (window chrome etc.)
-            if (alwaysRebuild) g_needRebuild = true;
+            if (alwaysRebuild) RequestRebuild();
         }
     }
 
@@ -11098,7 +11156,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 g_held.reset();            // C7: cancel, item resumes its spot
                 Sfx::SelectOff();
-                g_needRebuild = true;
+                RequestRebuild();
             } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 // Phase 3: the old 6~7-deep else-if chain lives in the
                 // drop-route tables above (ResolveDrop) — no consuming
@@ -11133,7 +11191,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             CloseTrash();
         } else {
             g_trashOpen = true;
-            g_needRebuild = true;
+            RequestRebuild();
             Sfx::BagOpen();
         }
     }
@@ -11153,7 +11211,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_trashXl.clear();
         g_trashAsk = {};
         g_trashOpen = false;
-        g_needRebuild = true;
+        RequestRebuild();
         Sfx::BagClose();
         return true;
     }
@@ -11341,7 +11399,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         NotePendingRemove(obj, g_held->key, g_held->count, g_held->xlIdx);
         if (g_sound) g_sound(obj, false);
         g_held.reset();
-        g_needRebuild = true;
+        RequestRebuild();
         return true;
     }
 
@@ -11378,7 +11436,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (!g_held) return;
         if (g_sound) g_sound(g_held->obj, false);
         g_held.reset();
-        g_needRebuild = true;
+        RequestRebuild();
     }
 
     // ---- cosave persistence ('GLAY' v5) ----

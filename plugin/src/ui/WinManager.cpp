@@ -324,6 +324,11 @@ namespace FUI
                 Census::SetEnabled(rest == "1" || rest == "true");
                 continue;
             }
+            // 1.4 / B3-c: where do rebuilds come from.
+            if (key == "!rbtrace") {
+                Grid::SetRebuildTrace(rest == "1" || rest == "true");
+                continue;
+            }
             // 1.4 / B2: request ledger. See Ledger.h.
             if (key == "!ledger") {
                 Ledger::SetEnabled(rest == "1" || rest == "true");
@@ -782,6 +787,7 @@ namespace FUI
         if (DeltaWatch::Enabled()) out << "!delta = 1\n";
         if (Census::Enabled())     out << "!census = 1\n";
         if (Ledger::Enabled())     out << "!ledger = 1\n";
+        if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
         out << "!caplight = " << Theme::CaptureLightAz()
             << ", " << Theme::CaptureLightEl() << "\n";

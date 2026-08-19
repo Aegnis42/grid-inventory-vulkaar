@@ -1,5 +1,7 @@
 ﻿#pragma once
 
+#include <source_location>
+
 #include "ui/ItemDef.h"
 #include "ui/Lang.h"
 #include "ui/Theme.h"
@@ -168,7 +170,15 @@ namespace FUI::Grid
                            int a_rot = 0);
 
     // Deferred rebuild (safe to request mid-draw; runs at FinishFrame).
-    void RequestRebuild();
+    // ★B3-c: who asked, without touching thirty call sites. Before the board
+    // can stop rebuilding, we have to know what has been making it rebuild --
+    // the log shows several per second with the item count oscillating by one
+    // (PLAN §4-2), and nobody has ever established why.
+    void RequestRebuild(const std::source_location& a_where =
+                            std::source_location::current());
+    // Trace switch: "!rbtrace = 1".
+    [[nodiscard]] bool RebuildTrace();
+    void               SetRebuildTrace(bool a_on);
     // ★B3-a: an engine request that was never confirmed. Registered with the
     // Ledger at startup; see Ledger::SetOnExpire.
     void OnRequestExpired(std::uint32_t a_form, std::int32_t a_delta,
@@ -222,7 +232,11 @@ namespace FUI::Grid
 
     // Collect the player's inventory, place items (saved spots -> first-fit,
     // grid seniority), persist new placements, queue icon captures.
-    void Rebuild();
+    // ★B3-c: a DIRECT rebuild bypasses the request gate entirely, so it has
+    // to name itself the same way. These are the calls that showed up as
+    // "(no ask?)" -- they were never wrong, just invisible.
+    void Rebuild(const std::source_location& a_where =
+                     std::source_location::current());
 
     // Capacity system: true when a_obj could be added right now — it stacks
     // onto an existing tile, or its footprint first-fits into the HARD
