@@ -1761,20 +1761,42 @@ namespace FUI
         m_queued.clear();
     }
 
+    bool IconCache::InspectShotStale() const
+    {
+        if (!m_inspectValid) return true;   // nothing on screen yet
+        return m_inspectShotRx != m_inspectDef.rx ||
+               m_inspectShotRy != m_inspectDef.ry ||
+               m_inspectShotRz != m_inspectDef.rz ||
+               m_inspectShotH != ImGui::GetIO().DisplaySize.y;
+    }
+
     void IconCache::PreRender()
     {
         auto* pv = ItemPreview::GetSingleton();
         if (!pv->IsRunning()) return;
 
-        // INSPECT owns the preview while the overlay is open: it re-arms every
-        // frame (continuous live view at the dragged rotation) and its result
-        // goes to m_inspectIcon, so the tile queue is simply paused — no keys,
-        // no disk, nothing of the icon cache is touched.
+        // INSPECT owns the preview while the overlay is open: its result goes
+        // to m_inspectIcon, so the tile queue is simply paused — no keys, no
+        // disk, nothing of the icon cache is touched.
+        //
+        // ★It re-arms only when the rotation has actually moved. Holding still
+        // now costs one early return per frame; it used to cost a full engine
+        // re-render of a 900px model plus a mipped-texture upload, every frame,
+        // to redraw a picture that had not changed.
         if (m_inspect && !m_pendingBusy) {
-            m_pending = Pending{ m_inspect, m_inspect ? m_inspect->GetFormID() : 0u, 0 };
-            m_pendingInspect = true;
-            m_pendingBusy = true;
-            m_frames = 0;
+            if (InspectShotStale()) {
+                m_pending = Pending{ m_inspect, m_inspect ? m_inspect->GetFormID() : 0u, 0 };
+                m_pendingInspect = true;
+                m_pendingBusy = true;
+                m_frames = 0;
+            } else {
+                // ★Nothing to re-shoot: leave with the preview untouched. This
+                // MUST return rather than fall through -- everything below
+                // belongs to the tile queue and the idle cleanup, and both
+                // borrow the very scene the open inspect is standing on
+                // (ResetScene would drop its model outright).
+                return;
+            }
         }
         // GI68: the retry pass owns the generous window only while ITS entries
         // are in flight. Once the queue drains, ordinary captures must go back
@@ -1861,6 +1883,13 @@ namespace FUI
             def.rx = m_inspectDef.rx;
             def.ry = m_inspectDef.ry;
             def.rz = m_inspectDef.rz;
+            // record what THIS request is taken at -- the gate compares the
+            // landed shot against the live rotation, so a drag that moves while
+            // the capture is in flight still re-arms afterwards
+            m_inspectReqRx = def.rx;
+            m_inspectReqRy = def.ry;
+            m_inspectReqRz = def.rz;
+            m_inspectReqH = ImGui::GetIO().DisplaySize.y;
         }
         // Always capture at the STANDARD crop — def.scale is applied when the
         // tile draws (linear, instant, no capture-boundary nonlinearities).
@@ -2582,6 +2611,10 @@ namespace FUI
                 ReleaseIcon(m_inspectIcon);
                 m_inspectIcon = icon;
                 m_inspectValid = true;
+                m_inspectShotRx = m_inspectReqRx;
+                m_inspectShotRy = m_inspectReqRy;
+                m_inspectShotRz = m_inspectReqRz;
+                m_inspectShotH = m_inspectReqH;
             } else {
                 // closed mid-capture: this texture was never drawn — drop it
                 ReleaseIcon(icon);

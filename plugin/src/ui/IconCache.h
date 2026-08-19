@@ -214,9 +214,16 @@ namespace FUI
         // spells out one screen down; the style switch just never got it.
         bool m_pixelDropPending = false;
 
-        // INSPECT mode (C key = vanilla "Item Zoom"): one item is captured
-        // every frame at a mouse-driven rotation and drawn large, so the player
-        // can read model detail the icon can't show (dragon-claw glyphs).
+        // INSPECT mode (C key = vanilla "Item Zoom"): one item is captured at
+        // a mouse-driven rotation and drawn large, so the player can read model
+        // detail the icon can't show (dragon-claw glyphs).
+        //
+        // ★The capture is taken when the ROTATION CHANGES, not every frame.
+        // Re-arming unconditionally is what turned 120fps into 30 while the
+        // model just sat there: a 900px model re-rendered by the engine and
+        // re-uploaded as a mipped texture, at full framerate, showing a picture
+        // identical to the one already on screen. Zoom does not re-capture
+        // either -- it scales the sprite that is already there.
         //
         // FULLY SEPARATE from the icon cache: the capture lands in its own
         // texture slot, keyed by nothing, never persisted, and the item's
@@ -365,6 +372,17 @@ namespace FUI
         void RewriteSlow();                    // after a retry resolves entries
         Pending                                m_pending;
         RE::TESBoundObject*                    m_pin = nullptr;   // editor selection
+        // Re-capture gate. "req" is what the in-flight request was armed with,
+        // "shot" is what the texture on screen was actually taken at -- they
+        // differ while a capture is in flight, and comparing against the wrong
+        // one would either re-shoot forever or miss the last drag frame.
+        // Height is in there because the request size is clamped to the screen.
+        float m_inspectShotRx = 0.0f, m_inspectShotRy = 0.0f, m_inspectShotRz = 0.0f;
+        float m_inspectShotH = 0.0f;
+        float m_inspectReqRx = 0.0f, m_inspectReqRy = 0.0f, m_inspectReqRz = 0.0f;
+        float m_inspectReqH = 0.0f;
+        [[nodiscard]] bool InspectShotStale() const;
+
         RE::TESBoundObject*                    m_inspect = nullptr;   // C-key overlay
         IconDef                                m_inspectDef{};        // live drag rotation
         Icon                                   m_inspectIcon{};       // its OWN texture

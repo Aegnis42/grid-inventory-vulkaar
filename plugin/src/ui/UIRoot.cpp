@@ -3416,8 +3416,10 @@ namespace FUI::UIRoot
                     g_inspZoom = kInspZoomMin;   // R returns to the opening shot
                     moved = true;
                 }
-                // the capture itself is driven by IconCache::PreRender, which
-                // gives the preview to the inspected item every frame
+                // ★The capture is driven by IconCache::PreRender, and this is
+                // the ONLY thing that makes it re-shoot. Anything that changes
+                // what the model should look like has to set `moved`; zoom does
+                // not, because it scales the existing sprite below.
                 if (moved) icons->SetInspectRot(g_inspRx, g_inspRy, g_inspRz);
 
                 // the sprite: native pixels, capped so it always fits

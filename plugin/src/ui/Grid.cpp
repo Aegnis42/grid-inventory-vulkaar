@@ -2607,6 +2607,31 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const float  w = it.mask.w * CellPx();
                 const float  h = it.mask.h * CellPx();
 
+                // ★See g_liveObjs: membership only, never a read. A tile
+                // whose object was not on the board at the last rebuild is not
+                // drawn, and says so once with enough to find it by.
+                //
+                // ★★It asks about it.obj, and it asks FIRST. The test used to
+                // run on the icon object, one line after that object had been
+                // resolved through it.obj->GetFormID() -- so it dereferenced
+                // the very pointer it existed to distrust, and then judged a
+                // DIFFERENT pointer. The icon variants are static forms
+                // GoldCoins resolved once from the plugin; they never sit in
+                // the player's inventory, so they can never be in a set built
+                // from the board, and testing them meant every pouch tile was
+                // skipped for a reason that had nothing to do with liveness.
+                if (!ObjLooksLive(it.obj)) {
+                    static bool s_said = false;
+                    if (!s_said) {
+                        s_said = true;
+                        SKSE::log::error("[GRID] tile '{}' (view '{}', idx {}) holds an "
+                                         "object that was not on the board at the last "
+                                         "rebuild ({}). Tile skipped.",
+                            it.key, a_view.bagKey, idx,
+                            static_cast<const void*>(it.obj));
+                    }
+                    continue;
+                }
                 // pouch tile: the ICON follows the stored amount (N/S/M/F
                 // variants) while the item itself stays the pouch form
                 RE::TESBoundObject* iconObj = it.obj;
@@ -2615,21 +2640,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // this asked the player-wide total.
                     if (auto* v = GoldCoins::PouchIconObjectFor(
                             GoldCoins::PouchStoredOf(it.key))) iconObj = v;
-                }
-                // ★See g_liveObjs: membership only, never a read. A tile whose
-                // object was not on the board at the last rebuild is not drawn,
-                // and says so once with enough to find it by.
-                if (!ObjLooksLive(iconObj)) {
-                    static bool s_said = false;
-                    if (!s_said) {
-                        s_said = true;
-                        SKSE::log::error("[GRID] tile '{}' (view '{}', idx {}) holds an "
-                                         "object that was not on the board at the last "
-                                         "rebuild ({}). Tile skipped.",
-                            it.key, a_view.bagKey, idx,
-                            static_cast<const void*>(iconObj));
-                    }
-                    continue;
                 }
                 const IconCache::Icon* iconPtr = cache->Get(iconObj);
                 if (iconObj != it.obj) {
@@ -5212,7 +5222,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             it.inBag.clear();
                         }
                     }
-                    g_liveObjs.insert(it.obj);
                     g_items.push_back(std::move(it));
                 };
 
@@ -6386,6 +6395,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // has just walked back into the inventory. (1.3.0: the helper
             // splits fresh tiles from known ones so the returner claims.)
             ClaimIncomingPouchGold();
+            // ★Built from the FINISHED board. It used to be filled at ONE of
+            // the two places a tile enters g_items, and the one it missed is
+            // the coin/purse path -- so every gold tile failed the draw-time
+            // membership test and was skipped, silently, for as long as the
+            // test has existed. Deriving it from the finished list is the only
+            // shape a future entry path cannot forget to feed.
+            g_liveObjs.clear();
+            for (const auto& liveIt : g_items) g_liveObjs.insert(liveIt.obj);
             SKSE::log::info("[GRID] rebuilt: {} items, {} views, gold {}",
                 g_items.size(), g_views.size(), g_gold);
             // ★DIAG: a tile with no column, or parked in the overflow zone, is
