@@ -179,6 +179,16 @@ namespace FUI::Grid
     // Trace switch: "!rbtrace = 1".
     [[nodiscard]] bool RebuildTrace();
     void               SetRebuildTrace(bool a_on);
+    // ★TEST ONLY: "!rbdrop = Equip.cpp:890, Grid.cpp:3323" -- a comma separated
+    // list of call sites whose rebuild requests are IGNORED.
+    //
+    // This is the instrument B3 actually needs. The board rebuilds because
+    // seventy-five places ask it to, and the honest question about each one is
+    // "what breaks if it does not". Answering that by deleting the call and
+    // rebuilding the dll is slow and destructive; answering it from an ini line
+    // costs a restart and leaves the code untouched. What breaks IS the answer:
+    // it names exactly what that rebuild was maintaining.
+    void SetRebuildDrop(const char* a_csv);
     // ★B3-a: an engine request that was never confirmed. Registered with the
     // Ledger at startup; see Ledger::SetOnExpire.
     void OnRequestExpired(std::uint32_t a_form, std::int32_t a_delta,

@@ -345,6 +345,7 @@ namespace FUI::Grid
 
         // ---- B3-c: rebuild provenance ---------------------------------------
         bool                       g_rbTrace = false;
+        std::vector<std::string>   g_rbDrop;    // TEST ONLY, see SetRebuildDrop
         std::map<std::string, int> g_rbAsk;      // askers since the last rebuild
         int                        g_rbRuns = 0; // rebuilds since the last report
         std::chrono::steady_clock::time_point g_rbWindow{};
@@ -3783,12 +3784,42 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (a_on) SKSE::log::info("[RB] rebuild provenance ON (B3-c)");
     }
 
+    void SetRebuildDrop(const char* a_csv)
+    {
+        g_rbDrop.clear();
+        std::string s = a_csv ? a_csv : "";
+        std::size_t at = 0;
+        while (at <= s.size()) {
+            const auto comma = s.find(',', at);
+            std::string one = s.substr(at, comma == std::string::npos
+                                              ? std::string::npos : comma - at);
+            // trim
+            const auto b = one.find_first_not_of(" \t");
+            const auto e2 = one.find_last_not_of(" \t");
+            if (b != std::string::npos) g_rbDrop.push_back(one.substr(b, e2 - b + 1));
+            if (comma == std::string::npos) break;
+            at = comma + 1;
+        }
+        for (const auto& d : g_rbDrop) {
+            SKSE::log::warn("[RB] ★!rbdrop -- rebuild requests from '{}' will be "
+                            "IGNORED", d);
+        }
+    }
+
     void RequestRebuild(const std::source_location& a_where)
     {
         // ★A rebuild request is COALESCED -- many asks, one run -- so the
         // interesting number is not "who asked" but "who was asking when it
         // finally ran". Both are recorded; the run drains the list.
-        if (g_rbTrace) ++g_rbAsk[ShortSite(a_where)];
+        const bool needSite = g_rbTrace || !g_rbDrop.empty();
+        const std::string site = needSite ? ShortSite(a_where) : std::string{};
+        for (const auto& d : g_rbDrop) {
+            if (site == d) {
+                if (g_rbTrace) SKSE::log::info("[RB] dropped ask from {}", site);
+                return;   // the experiment: pretend nobody asked
+            }
+        }
+        if (g_rbTrace) ++g_rbAsk[site];
         g_needRebuild = true;
     }
 

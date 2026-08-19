@@ -324,6 +324,11 @@ namespace FUI
                 Census::SetEnabled(rest == "1" || rest == "true");
                 continue;
             }
+            // Test switch, not a setting: see Grid::SetRebuildDrop.
+            if (key == "!rbdrop") {
+                Grid::SetRebuildDrop(rest.c_str());
+                continue;
+            }
             // 1.4 / B3-c: where do rebuilds come from.
             if (key == "!rbtrace") {
                 Grid::SetRebuildTrace(rest == "1" || rest == "true");

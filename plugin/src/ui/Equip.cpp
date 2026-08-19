@@ -886,8 +886,13 @@ namespace FUI::Equip
         // late pass: rebuild + FORCE the biped 3D refresh once the equip data
         // has settled — while paused the engine never runs the actor update
         // that would apply it (the "only visible after closing" root cause)
+        // ★1.4/B3-c: this used to rebuild the WHOLE board here as well, and it
+        // did not need to. Measured with !rbdrop over a full session -- 28
+        // suppressed calls, no doll mismatch, no error, nothing visibly wrong.
+        // It was the third of THREE full rebuilds per equip. The 3D refresh
+        // below is what this late pass was actually for; the rebuild was along
+        // for the ride.
         if (g_rebuildLag > 0 && --g_rebuildLag == 0) {
-            Grid::RequestRebuild();
             if (auto* proc = player->GetActorRuntimeData().currentProcess) {
                 proc->Update3DModel(player);
             }
