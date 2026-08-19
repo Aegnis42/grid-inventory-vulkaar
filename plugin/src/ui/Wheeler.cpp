@@ -157,6 +157,18 @@ namespace FUI::Wheeler
             int                 xl = -1;    // extraLists index, -1 = plain
             int                 count = 0;
             bool                worn = false;   // snapshot; see Items::current
+            // ★★★THE ENGINE'S OWN NAME FOR THE UNIT, and its absence was the
+            // whole bug. The wheel asked for its starred unit with uid 0, and a
+            // pool request with uid 0 EXPLICITLY SKIPS every list that carries a
+            // uniqueID -- "a uid unit is the sole member of its own pool", by
+            // design. The engine hands uniqueIDs to the things it tracks, which
+            // is exactly what gets worn: weapons and armour came back "named
+            // unit gone -- equip skipped" every time, while potions and rings
+            // (which never earn one) worked fine. That is the split the reports
+            // described, down to the item kinds.
+            // ★Appended LAST so the seven-value initialisers below stay valid --
+            // the magic ring has no unit to name and leaves it 0.
+            std::uint16_t       uid = 0;
         };
         // ★Two lists, not one shared ten. Gear and magic are starred from
         // different screens and reached for at different moments, and sharing a
@@ -1167,9 +1179,13 @@ namespace FUI::Wheeler
                     // ★A pool, not a list: the sig is what distinguishes the
                     // tempered pool from the plain one, which is exactly the
                     // grain the favourites system works at.
+                    std::uint16_t starUid = 0;
+                    if (const auto* xu = star->GetByType<RE::ExtraUniqueID>()) {
+                        starUid = xu->uniqueID;
+                    }
                     g_fav[g_favN] = { obj, obj, FavKind::kItem,
                                       Grid::InstanceSigOf(star), -1,
-                                      data.first, entry->IsWorn() };
+                                      data.first, entry->IsWorn(), starUid };
                     ++g_favN;   // one tile per form: a starred pool is one thing
                 }
             }
@@ -1845,10 +1861,11 @@ namespace FUI::Wheeler
             if (a_slot < 0 || a_slot >= kSlots || !a_list[a_slot].form) return;
             // ★The wheel logged nothing at all about what a click DID, so a
             // report of "it does not work" had no way to say where it stopped.
-            SKSE::log::info("[WHEEL] use slot={} '{}' kind={} sig {:04X} worn={} hand={}",
+            SKSE::log::info("[WHEEL] use slot={} '{}' kind={} uid {:04X} sig {:04X} "
+                            "worn={} hand={}",
                 a_slot, a_list[a_slot].form->GetName(),
-                static_cast<int>(a_list[a_slot].kind), a_list[a_slot].sig,
-                a_list[a_slot].worn, a_leftHand ? "L" : "R");
+                static_cast<int>(a_list[a_slot].kind), a_list[a_slot].uid,
+                a_list[a_slot].sig, a_list[a_slot].worn, a_leftHand ? "L" : "R");
             g_itemActed = true;   // the release must not fire on top of this
             // ★The gear tick comes off a 330ms snapshot, because the LIST comes
             // off the inventory and that is what costs (see Items::current) --
@@ -1900,7 +1917,7 @@ namespace FUI::Wheeler
             // ★Reads the snapshot, so it lags a rebuild at most -- a third of a
             // second, and the alternative is walking the inventory per click.
             if (a_list[a_slot].worn) {
-                Equip::UnequipItem(obj, 0, a_list[a_slot].sig,
+                Equip::UnequipItem(obj, a_list[a_slot].uid, a_list[a_slot].sig,
                                    a_leftHand ? 2 : 0, a_list[a_slot].count);
                 return;
             }
@@ -1910,7 +1927,8 @@ namespace FUI::Wheeler
             // reason a scripted mod item still works here.
             const bool twoHanded = obj->Is(RE::FormType::Weapon) || obj->Is(RE::FormType::Light);
             if (!twoHanded && !obj->Is(RE::FormType::Armor)) {
-                Equip::UseItem(obj, 0, -1, a_list[a_slot].sig, {}, a_list[a_slot].count);
+                Equip::UseItem(obj, a_list[a_slot].uid, -1, a_list[a_slot].sig, {},
+                               a_list[a_slot].count);
                 return;
             }
             // ★Armour ignores the hand: there is one place a cuirass goes. The
@@ -1918,7 +1936,8 @@ namespace FUI::Wheeler
             const char* slot = obj->Is(RE::FormType::Armor)
                                    ? ""                        // let Equip resolve it
                                    : (a_leftHand ? "shieldL" : "weapon");
-            Equip::EquipItem(obj, slot, 0, -1, a_list[a_slot].sig, {}, a_list[a_slot].count);
+            Equip::EquipItem(obj, slot, a_list[a_slot].uid, -1, a_list[a_slot].sig, {},
+                             a_list[a_slot].count);
         }
 
         // ★★ONE ROTATION FOR EVERY WHEEL. What travels differs -- the item
