@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 
@@ -63,12 +63,18 @@ namespace FUI::LootBarter
     // a_fromWorn: the cell came from the actor'''s BODY. A worn unit with no
     // signature has no pool handle at all, so this is the only way to say
     // "the equipped one, not a spare".
+    // a_useAfter: SHELF USE MODE (shift + right-click). The unit is taken and
+    // then used exactly as a right-click on the player's own board would use it
+    // -- the engine can only consume from the player's inventory, so passing
+    // through it is not a shortcut but the only road there is.
     void RequestTake(RE::TESBoundObject* a_obj, int a_count,
                      std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                     bool a_fromWorn = false);
+                     bool a_fromWorn = false, bool a_useAfter = false);
+    // a_xlIdx: where the outgoing unit sits, so the sink removes THAT one
+    // (see XferReq::xlIdx). -1 = unknown, historical behaviour.
     void RequestStore(RE::TESBoundObject* a_obj, int a_count,
                       std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                      bool a_fav = false);   // player -> partner (GI36: a_fav)
+                      bool a_fav = false, int a_xlIdx = -1);   // player -> partner (GI36: a_fav)
     // barter (Phase 5): item move + gold settlement + speech xp, all on Tick.
     // a_baseTotal = total BASE value of the goods — vanilla speech XP points
     // (the haggled price doesn't matter for XP).
@@ -76,7 +82,7 @@ namespace FUI::LootBarter
                     std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);   // merchant -> player
     void RequestSell(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal = 0,
                      std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                     bool a_fav = false);  // player -> merchant (GI36: a_fav)
+                     bool a_fav = false, int a_xlIdx = -1);  // player -> merchant (GI36: a_fav)
     // F6b: pickpocket moves — each rolls PlayerCharacter::AttemptPickpocket
     // on the Tick (crime / XP / detection handled by the engine); a failed
     // roll force-closes the menu, already-succeeded moves stay.
@@ -86,7 +92,7 @@ namespace FUI::LootBarter
     void RequestPickStore(RE::TESBoundObject* a_obj, int a_count,                       // player -> target
                           std::uint16_t a_uid, std::uint16_t a_sig,
                           const std::string& a_srcKey = {},
-                          bool a_fav = false);                                          // (reverse-pickpocket)
+                          bool a_fav = false, int a_xlIdx = -1);                         // (reverse-pickpocket)
     void ProcessTransfers();   // UIRoot::Tick
 
     // ★(1.3.0) the gold riding the CARRIED shelf slot, or -1 when the
@@ -171,7 +177,8 @@ namespace FUI::LootBarter
                     const std::string& a_srcKey = {}, int a_unitValue = 0,
                     std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
                     bool a_worn = false,    // a_worn: the cell came off the body
-                    bool a_fav = false);    // GI36: the cell wore a star
+                    bool a_fav = false,     // GI36: the cell wore a star
+                    int a_xlIdx = -1);      // (1.3.3) which unit leaves
     void DrawSlider();   // UIRoot::Render (top level)
     [[nodiscard]] bool SliderActive();
 
@@ -179,7 +186,8 @@ namespace FUI::LootBarter
     void AskSellConfirm(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal = 0,
                         const std::string& a_srcKey = {},
                         std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                        bool a_fav = true);   // GI25 / GI36 (this popup only fires for a star)
+                        bool a_fav = true,
+                        int a_xlIdx = -1);   // GI25 / GI36 (this popup only fires for a star)
     void DrawConfirm();   // UIRoot::Render (top level)
     [[nodiscard]] bool ConfirmActive();
 

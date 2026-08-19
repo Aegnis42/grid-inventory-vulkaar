@@ -922,7 +922,8 @@ namespace FUI::Equip
                     const int starred =
                         (bxl && bxl->HasType<RE::ExtraHotkey>()) ? 1 : 0;
                     player->RemoveItem(book, 1, RE::ITEM_REMOVE_REASON::kRemove,
-                        Grid::ResolveExitUnit(book, act.uid, act.sig, 1, starred),
+                        Grid::ResolveExitUnit(book, act.uid, act.sig, 1, starred,
+                                              act.xlIdx),
                         nullptr);
                     Grid::RequestRebuild();
                     SKSE::log::info("[EQUIP] learned spell '{}'", spell->GetName());

@@ -144,9 +144,14 @@ namespace FUI::Grid
     // a_count: how many units ride the cursor. One for anything worn a copy at
     // a time — but a quiver is unequipped whole, so the carry has to be whole
     // too, or the rest of it lands in the pack the instant it comes off.
+    // a_swapSameForm: the item that DISPLACED this one is of the same form.
+    // Only then can the worn list left on the body after the replacement's
+    // equip lands be mistaken for this unit's own -- see the clock in
+    // OffBoardUnitsFor. Meaningless unless a_swappedOut.
     void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0,
                     std::uint16_t a_sig = 0, int a_hand = 0,
-                    bool a_swappedOut = false, int a_count = 1);
+                    bool a_swappedOut = false, int a_count = 1,
+                    bool a_swapSameForm = false);
 
     // Phase 5-B: carry a PARTNER (merchant/container) item on the cursor.
     // Dropping it onto the player grid takes (loot) or buys (barter).
@@ -180,9 +185,13 @@ namespace FUI::Grid
     // The pool holds that cell open until the engine applies the equip.
     // a_units: how many the equip takes. 1 for anything worn a copy at a time;
     // the whole tile for ammo, which is equipped by the quiverful.
+    // a_xlIdx: where the unit sits in the entry's extraLists. The one handle
+    // that cannot drift while the equip is in flight -- see the exclusion
+    // ladder. -1 for a listless (plain) unit, which is the honest answer.
     void NotePendingEquip(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
                           std::uint16_t a_sig, int a_hand = 0,
-                          const std::string& a_srcKey = {}, int a_units = 1);
+                          const std::string& a_srcKey = {}, int a_units = 1,
+                          int a_xlIdx = -1);
     // Right-click on a book or note: show it in the game's OWN Book Menu.
     // Queued here, opened on the Tick — the menu must not be raised from
     // inside the render pass. While it is up, UIRoot stands down completely
@@ -260,7 +269,13 @@ namespace FUI::Grid
     // transfer Tick. The rebuild subtracts them immediately and drains the
     // NAMED tile in place (a_key may be empty for carried fragments). Clear is
     // called right after the engine RemoveItem lands; ClearAll on window close.
-    void NotePendingRemove(RE::TESBoundObject* a_obj, const std::string& a_key, int a_count);
+    // a_xlIdx: WHERE the outgoing unit sits in the engine entry, when the
+    // caller knows (-1 = it does not). The pool name and the count cannot
+    // say which of several look-alike units is leaving, and a signature
+    // that moves mid-flight leaves the exclusion nothing to match -- the
+    // list position cannot move when the values inside it do.
+    void NotePendingRemove(RE::TESBoundObject* a_obj, const std::string& a_key,
+                           int a_count, int a_xlIdx = -1);
     void ClearPendingRemove(RE::TESBoundObject* a_obj, int a_count);
     void ClearAllPendingRemoves();
     // B2: expire the partner-drop placement hint (qty slider cancelled/closed)
@@ -296,11 +311,17 @@ namespace FUI::Grid
     // hands it over rather than making the tooltip guess.
     struct TileContext
     {
-        std::string_view key;              // layout key: quest / stolen lookup
+        std::string_view key;
         bool             isBag    = false;
         bool             parked   = false;   // sitting in the trash
         bool             partner  = false;   // the other side's grid
         bool             equipSlot = false;  // equipment doll, not a grid cell
+        // ★These used to be looked up FROM `key`, in a cache keyed by the
+        // item's mutable state. The tile already knows -- it read them off its
+        // own live sub-stack this rebuild -- so it simply says so.
+        // (Appended last: the five-element aggregate initialisers stay valid.)
+        bool             stolen   = false;
+        bool             quest    = false;
     };
 
     // The cell lattice for a cols x rows board at `base` — tiles, a carve or a
@@ -536,7 +557,17 @@ namespace FUI::Grid
     [[nodiscard]] RE::ExtraDataList* ResolveExitUnit(RE::TESBoundObject* a_obj,
                                                      std::uint16_t a_uid,
                                                      std::uint16_t a_sig,
-                                                     int a_count, int a_starred);
+                                                     int a_count, int a_starred,
+                                                     // ★a_xlIdx: WHERE the unit
+                                                     // the player pointed at sits.
+                                                     // A pool is a crowd -- without
+                                                     // this, whichever list comes
+                                                     // first leaves, so selling the
+                                                     // front dagger sold the back
+                                                     // one. Verified before use; a
+                                                     // stale position simply falls
+                                                     // back to the pool rule.
+                                                     int a_xlIdx = -1);
 
     // GI42: how a transfer NAMES the unit it moves. RemoveItem's a_extraList is
     // the only selector the engine has, and nullptr is not a fallback -- it is
@@ -691,6 +722,10 @@ namespace FUI::Grid
 
     // GI65: the menu is closing — everything on the board counts as seen, and
     // the counts become the baseline the next opening is measured against.
+    // ★Shelf USE MODE: this form is arriving only to be consumed, so typed-bag
+    // routing must leave it alone (see g_transientArrivals).
+    void NoteTransientArrival(RE::FormID a_form);
+
     void NoteInventorySeen();
 
     // ★One form counts as seen. EQUIPPING something is a stronger "I have

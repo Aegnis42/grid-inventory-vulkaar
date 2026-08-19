@@ -549,12 +549,36 @@ namespace
     // fall back to the def of ANY overridden item sharing their model path.
     std::string ModelPathOf(RE::TESBoundObject* a_obj)
     {
+        if (!a_obj) return {};
         const char* p = nullptr;
-        if (auto* armo = a_obj->As<RE::TESObjectARMO>()) {
-            // armor is NOT a TESModel — its GND model lives on the biped form
-            p = armo->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
-        } else if (const auto* mdl = skyrim_cast<RE::TESModel*>(a_obj)) {
-            p = mdl->GetModel();
+        // ★★THIS CAST TOOK THE GAME DOWN, and the shape of the failure says
+        // what kind of pointer reached it: As<> survived (it reads the form
+        // TYPE, a plain field) and skyrim_cast threw __non_rtti_object (it
+        // reads the VTABLE). So the memory was readable and the vtable was not
+        // a game vtable -- a pointer into something that is not a form.
+        //
+        // Where it comes from is still open: the icon path is fed a tile's
+        // object, and a view holds INDICES into g_items rather than copies, so
+        // a stale index is the obvious candidate (guarded separately in
+        // Grid.cpp). Either way a bad icon is not worth a CTD, and the log line
+        // below is what will identify the source next time instead of another
+        // round of guessing.
+        // ★The pointer is printed, not the name: asking a suspect object for
+        // its name is the very dereference that just failed.
+        try {
+            if (auto* armo = a_obj->As<RE::TESObjectARMO>()) {
+                // armor is NOT a TESModel — its GND model lives on the biped form
+                p = armo->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
+            } else if (const auto* mdl = skyrim_cast<RE::TESModel*>(a_obj)) {
+                p = mdl->GetModel();
+            }
+        } catch (...) {
+            static std::set<const void*> s_said;
+            if (s_said.size() < 8 && s_said.insert(a_obj).second) {
+                SKSE::log::error("[DEFS] model lookup refused a non-form pointer "
+                                 "({}); icon skipped", static_cast<const void*>(a_obj));
+            }
+            return {};
         }
         if (!p || !*p) return {};
         std::string s(p);
@@ -1841,6 +1865,12 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
     InitializeLog();
     SKSE::Init(a_skse);
+    // ★Say so in the log itself. A diagnostic build is otherwise
+    // indistinguishable from the release one, and a report is worth much less
+    // when nobody can tell which binary produced it.
+    if (FUI::Grid::PoolTrace()) {
+        SKSE::log::info("=== DIAGNOSTIC BUILD: pool/take tracing is ON by default ===");
+    }
 
     // no trampoline: every hook here is a vtable swap (write_vfunc)
     UpdateHook::Install();

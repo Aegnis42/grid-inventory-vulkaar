@@ -231,15 +231,42 @@ namespace FUI::UIRoot
         // Win32 backend (Modex-style). Mouse stays on the Scaleform relay.
         WNDPROC g_origWndProc = nullptr;
         HWND    g_gameWnd = nullptr;   // for ScreenToClient in MouseHandler
+        // ★★Keystrokes reach ImGui through ONE road -- this chained window
+        // proc -- and a report exists of that road being dead: no typing at all
+        // in the search box or the preset rename, English, digits and Hangul
+        // alike. The same player could not rotate with A/D either, which was
+        // "fixed" only because that path grew a GetAsyncKeyState fallback that
+        // bypasses ImGui entirely. Two symptoms, one cause: WM_CHAR / WM_KEYDOWN
+        // never arriving.
+        //
+        // It cannot be reproduced here, so the build has to answer it by itself:
+        // count what arrives, and say so when a text field has been waiting with
+        // nothing coming.
+        std::atomic<unsigned> g_wmCharSeen{ 0 };
+        std::atomic<unsigned> g_wmKeySeen{ 0 };
+        // Every message that reaches the thunk, of any kind. This is how you ask
+        // "am I still in the chain" -- by whether you are being called, not by
+        // comparing a pointer the OS may refuse to hand back (see below).
+        std::atomic<unsigned> g_thunkMsgs{ 0 };
+        // Key messages AT THE WINDOW, counted before our own guard: "did a key
+        // message arrive at all" and "did we pass it on" are different
+        // questions, and the report line below wants the first.
+        std::atomic<unsigned> g_wmKeyRaw{ 0 };
+        bool g_kbFallback = false;   // latched: synthesise characters from polling
 
         LRESULT CALLBACK WndProcThunk(HWND h, UINT m, WPARAM w, LPARAM l)
         {
+            g_thunkMsgs.fetch_add(1, std::memory_order_relaxed);
             switch (m) {
             case WM_CHAR:
             case WM_KEYDOWN:
             case WM_KEYUP:
             case WM_SYSKEYDOWN:
             case WM_SYSKEYUP:
+                // ★Counted BEFORE the guard: "did a key message reach the window"
+                // and "did we let it through" are different questions, and the
+                // fallback latch below needs the first one.
+                g_wmKeyRaw.fetch_add(1, std::memory_order_relaxed);
                 // ★★KEYS REACH US BY TWO ROADS, and only one of them was
                 // watched. GridMenu::ProcessScaleformEvent drops key events
                 // while the console is up — but this thunk is a SEPARATE,
@@ -255,6 +282,11 @@ namespace FUI::UIRoot
                     ui && ui->IsMenuOpen("GridInventoryMenu"sv) &&
                     !ui->IsMenuOpen(RE::Console::MENU_NAME) &&
                     ImGui::GetCurrentContext()) {
+                    if (m == WM_CHAR) {
+                        g_wmCharSeen.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        g_wmKeySeen.fetch_add(1, std::memory_order_relaxed);
+                    }
                     ImGui_ImplWin32_WndProcHandler(h, m, w, l);
                 }
                 break;
@@ -263,6 +295,142 @@ namespace FUI::UIRoot
             }
             return CallWindowProcA(g_origWndProc, h, m, w, l);
         }
+
+        // ---- THE MISSING ROAD IS CHARACTERS, NOT KEYS ------------------------
+        //
+        // ★★★Keys and characters do NOT travel together here:
+        //   keys  -> Scaleform GFx events   -> GridInventoryMenu::OnKeyEvent
+        //   chars -> the chained window proc -> ImGui_ImplWin32_WndProcHandler
+        //
+        // OnCharEvent is deliberately empty ("chars come from the WndProc now"),
+        // so keys have TWO roads and characters have exactly ONE. On a setup
+        // where the window never receives key messages -- measured on a
+        // reporter's machine as `chars 0 keys 0 msgs 2067`, our thunk called two
+        // thousand times with not one keystroke among them -- every hotkey still
+        // works and ONLY typing dies. Which is exactly what they reported:
+        // "every key in the prompt bar works; the search box and preset rename
+        // take nothing."
+        //
+        // (The same split explains why A/D rotation needed its own
+        // GetAsyncKeyState fallback: in menu mode WASD arrives PRE-TRANSLATED
+        // into arrow GFx codes, so the Scaleform road never carries an 'A' at
+        // all -- see the arrow block in GridMenu::OnKeyEvent.)
+        //
+        // ★So this synthesises CHARACTERS ONLY. Emitting key events as well
+        // would double every keystroke on that machine, because the Scaleform
+        // road is alive and already delivering them.
+        //
+        // GetAsyncKeyState asks the OS for the physical key, with no window and
+        // no focus in the question -- the one road that cannot be taken away.
+        // The keys a name or a search term can be made of. Nothing else is
+        // swept: this road exists for TEXT, and every other key already has one.
+        bool TypedVk(int a_vk)
+        {
+            if (a_vk >= 'A' && a_vk <= 'Z') return true;
+            if (a_vk >= '0' && a_vk <= '9') return true;
+            if (a_vk >= VK_NUMPAD0 && a_vk <= VK_NUMPAD9) return true;
+            switch (a_vk) {
+            case VK_SPACE: case VK_OEM_7: case VK_OEM_COMMA: case VK_OEM_MINUS:
+            case VK_OEM_PERIOD: case VK_OEM_2: case VK_OEM_1: case VK_OEM_PLUS:
+            case VK_OEM_4: case VK_OEM_5: case VK_OEM_6: case VK_OEM_3:
+            case VK_MULTIPLY: case VK_ADD: case VK_SUBTRACT: case VK_DECIMAL:
+            case VK_DIVIDE:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        void PollTypedCharacters(ImGuiIO& a_io)
+        {
+            static bool     s_down[256] = {};
+            static unsigned s_lastChars = 0;
+            static int      s_contradictions = 0;
+
+            // Only ever while a text field is waiting. Outside one there is
+            // nothing to type into, and ToUnicodeEx is stateful (dead keys) --
+            // calling it for every key at all times would leave half-composed
+            // accents lying around for the next field that opens.
+            if (!a_io.WantTextInput) {
+                for (auto& d : s_down) d = false;
+                return;
+            }
+
+            const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+
+            const unsigned chars = g_wmCharSeen.load(std::memory_order_relaxed);
+            const bool     wmAlive = chars != s_lastChars;
+            s_lastChars = chars;
+
+            BYTE ks[256] = {};
+            if (g_kbFallback) {
+                // ToUnicodeEx reads the WHOLE table, so the modifiers have to be
+                // in it or every letter comes out lower case.
+                if (shift) { ks[VK_SHIFT] = 0x80; ks[VK_LSHIFT] = 0x80; }
+                if (ctrl)  { ks[VK_CONTROL] = 0x80; }
+                if (alt)   { ks[VK_MENU] = 0x80; }
+                if (GetKeyState(VK_CAPITAL) & 1) ks[VK_CAPITAL] = 0x01;
+            }
+
+            for (int vk = 0; vk < 256; ++vk) {
+                if (!TypedVk(vk)) continue;
+                const bool now = (GetAsyncKeyState(vk) & 0x8000) != 0;
+                if (now == s_down[vk]) continue;
+                s_down[vk] = now;
+                if (!now) continue;
+
+                if (!g_kbFallback) {
+                    // ★THE LATCH, and it is a CONTRADICTION rather than a
+                    // timeout: a printable key went down while a text field was
+                    // focused, and no WM_CHAR arrived for it. One such frame
+                    // could be a race; three cannot. On a healthy setup this can
+                    // never fire, so the road stays inert -- one sweep a frame
+                    // while typing, and no events at all.
+                    if (!wmAlive && ++s_contradictions >= 3) {
+                        g_kbFallback = true;
+                        SKSE::log::warn(
+                            "[UI] input: printable keys are being pressed and no "
+                            "WM_CHAR is arriving (chars {} rawKeys {} msgs {}). "
+                            "Typing falls back to polled characters. NOTE: an IME "
+                            "language cannot be composed this way -- IME needs the "
+                            "window messages that are missing.",
+                            chars, g_wmKeyRaw.load(std::memory_order_relaxed),
+                            g_thunkMsgs.load(std::memory_order_relaxed));
+                    }
+                    continue;
+                }
+
+                if (ctrl || alt) continue;   // a shortcut, not a character
+                const UINT sc = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC);
+                WCHAR     buf[8] = {};
+                const int n = ToUnicodeEx(static_cast<UINT>(vk), sc, ks, buf,
+                                          static_cast<int>(std::size(buf)), 0,
+                                          GetKeyboardLayout(0));
+                for (int i = 0; i < n && i < static_cast<int>(std::size(buf)); ++i) {
+                    if (buf[i] >= 0x20) a_io.AddInputCharacterUTF16(buf[i]);
+                }
+            }
+        }
+        // ★★★YOU CANNOT ASK A WINDOW WHETHER ITS PROC IS YOURS.
+        //
+        // A "self-heal" lived here for one build and crashed the game on the
+        // first inventory open. It compared GetWindowLongPtrA against our thunk
+        // -- and Skyrim's window is UNICODE, so when anything sets the proc with
+        // the W entry point, the A getter stops returning an address and returns
+        // an OPAQUE HANDLE instead (measured: 0xffff0923). That never equals our
+        // pointer, so the check read "not ours" every single time, re-installed,
+        // and stored the handle it got back as the next link in the chain.
+        //
+        // The handle it got back was OUR OWN THUNK. CallWindowProcA then called
+        // us from inside us: infinite recursion, stack overflow, CTD.
+        //
+        // The measurement was still worth having -- it proved another mod hooks
+        // after us with the W variant on a real setup, and that it CHAINS
+        // correctly, because typing works there. So there was nothing to heal.
+        // What remains below is observation only: counts of what actually
+        // arrives. Liveness is a thing you measure, never a pointer you compare.
 
         // fonts are BAKED at the current UI scale (bitmap-scaling hangul via
         // FontGlobalScale mushes the strokes). While the slider drags we
@@ -3123,7 +3291,17 @@ namespace FUI::UIRoot
         // pick between and no 9-slice to stretch.
 
         g_initialized.store(true);
-        SKSE::log::info("[UI] ImGui initialized (hwnd={:#x})", reinterpret_cast<uintptr_t>(hwnd));
+        // ★The windows, side by side. If the swapchain's output window is not
+        // the one the OS is sending input to (a proxy DXGI layer, a borderless
+        // helper, a second render window), every keystroke goes somewhere else
+        // and no amount of care inside the thunk can help. One line, and the
+        // question is answered from a report instead of guessed at.
+        SKSE::log::info("[UI] ImGui initialized (hwnd={:#x} fg={:#x} active={:#x} "
+                        "chainedProc={})",
+            reinterpret_cast<std::uintptr_t>(hwnd),
+            reinterpret_cast<std::uintptr_t>(GetForegroundWindow()),
+            reinterpret_cast<std::uintptr_t>(GetActiveWindow()),
+            g_origWndProc != nullptr);
         return true;
     }
 
@@ -3767,6 +3945,48 @@ namespace FUI::UIRoot
         // grant/release still went NET -1 per typing session (log-proven,
         // textEntryCount -1 -> -2) and movement/attack died.
         g_textInputOn = io.WantTextInput;
+
+        // ★The polled CHARACTER road. Inert until it has proven that printable
+        // keys are pressed and no WM_CHAR follows -- see PollTypedCharacters.
+        PollTypedCharacters(io);
+
+        // ---- input road health (OBSERVATION ONLY -- see the note above) ------
+        // A text field focused for two seconds with ZERO characters delivered is
+        // not a slow typist; it is a dead road, and this line is the only way
+        // that fact reaches a report from a machine we cannot reproduce on.
+        {
+            static int      s_wantFrames = 0;
+            static unsigned s_charsAtFocus = 0;
+            static bool     s_said = false;
+            if (io.WantTextInput) {
+                if (s_wantFrames == 0) {
+                    s_charsAtFocus = g_wmCharSeen.load(std::memory_order_relaxed);
+                }
+                ++s_wantFrames;
+                if (s_wantFrames == 120 && !s_said &&
+                    g_wmCharSeen.load(std::memory_order_relaxed) == s_charsAtFocus) {
+                    s_said = true;
+                    // ★`msgs` is the liveness signal: it counts EVERY message
+                    // through our thunk, so 0 means the road itself is gone,
+                    // while a rising number with no chars means the road is fine
+                    // and the characters are being taken somewhere upstream.
+                    // Two very different faults, one line apart.
+                    SKSE::log::error(
+                        "[UI] input: a text field has been focused for 120 frames "
+                        "and NO WM_CHAR arrived (chars {} keys {} raw {} msgs {}, "
+                        "hwnd {:#x} fg {:#x} polled {}).",
+                        g_wmCharSeen.load(std::memory_order_relaxed),
+                        g_wmKeySeen.load(std::memory_order_relaxed),
+                        g_wmKeyRaw.load(std::memory_order_relaxed),
+                        g_thunkMsgs.load(std::memory_order_relaxed),
+                        reinterpret_cast<std::uintptr_t>(g_gameWnd),
+                        reinterpret_cast<std::uintptr_t>(GetForegroundWindow()),
+                        g_kbFallback);
+                }
+            } else {
+                s_wantFrames = 0;
+            }
+        }
 
         if (g_menuOpenSfx > 0 && --g_menuOpenSfx == 0) {
             // UIInventoryOpen resolved but stayed inaudible — the Tab-menu

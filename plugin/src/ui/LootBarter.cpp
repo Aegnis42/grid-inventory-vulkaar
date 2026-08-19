@@ -1,5 +1,6 @@
 ﻿#include "ui/Badges.h"
 #include "ui/Editor.h"
+#include "ui/Equip.h"
 #include "ui/Fallback.h"
 #include "ui/LootBarter.h"
 
@@ -56,6 +57,23 @@ namespace FUI::LootBarter
             bool                fromWorn = false;
             // GI36: the outgoing units wore a star -- rule 58 kills it at the sink.
             bool                fav = false;
+            // ★(1.3.3) ...and WHERE it sat, for the store/sell sinks. The pool
+            // is a crowd -- two identical daggers share one signature, so the
+            // sink took whichever list came first and the front one was never
+            // what left. The position is VERIFIED at the sink (same pool,
+            // unworn) so a stale one costs accuracy, never correctness -- which
+            // is what the note above was guarding against.
+            int                 xlIdx = -1;
+            // ★(1.3.0) USE MODE: consume / read / learn the moment it lands,
+            // rather than merely landing.
+            // ★★LAST, and this time actually last. The first attempt put it
+            // after `fromWorn` while calling it "appended last", and the three
+            // braced initialisers further down silently shifted by one field --
+            // the compiler caught it only because bool/int narrowing happened to
+            // be involved. The same shape cost a whole test round in
+            // OffBoardUnit, where no narrowing saved it. New fields go at the
+            // END, and the site that sets this one builds the struct FIELD-WISE.
+            bool                useAfter = false;
         };
         std::vector<XferReq> g_xfer;
 
@@ -149,6 +167,7 @@ namespace FUI::LootBarter
             int                 unitValue = 0;   // kBuy/kSell: base value per unit
             bool                worn = false;    // the cell came off the body
             bool                fav = false;     // GI36
+            int                 xlIdx = -1;      // (1.3.3) which unit leaves
         };
         SliderState g_slider;
 
@@ -165,6 +184,7 @@ namespace FUI::LootBarter
             std::uint16_t       uid = 0;     // GI25
             std::uint16_t       sig = 0;
             bool                fav = false;   // GI36
+            int                 xlIdx = -1;    // (1.3.3) which unit leaves
         };
         SellConfirm g_confirm;
 
@@ -198,6 +218,19 @@ namespace FUI::LootBarter
             // any other death simply spills them onto the shelf (the hiding
             // is derived from live bundles, so dropping one un-hides).
             std::vector<BundleItem> bundle;
+            // ★★WHICH UNIT THIS SPOT IS SHOWING -- as data, not as a name.
+            // These used to live inside the spot's KEY, which made a shelf
+            // position depend on the item's mutable state: clear an ownership
+            // stamp, spend a charge, and the spot belonged to a pool nothing
+            // answered to. It was replaced by a fresh one, and because a
+            // pouch's gold and a bag's contents hang off the SPOT, the amount
+            // and the bag went with it. Mirrors Grid::LayoutEntry.
+            std::uint16_t uid = 0;
+            std::uint16_t sig = 0;
+            // GI41: a worn unit is never interchangeable with a spare (one is
+            // locked, the other is not), so worn-ness partitions the match
+            // rather than merely scoring it.
+            bool worn = false;
         };
         struct ContLayout
         {
@@ -610,7 +643,8 @@ namespace FUI::LootBarter
 
     void OpenSlider(RE::TESBoundObject* a_obj, int a_max, XferDir a_dir,
                     const std::string& a_srcKey, int a_unitValue,
-                    std::uint16_t a_uid, std::uint16_t a_sig, bool a_worn, bool a_fav)
+                    std::uint16_t a_uid, std::uint16_t a_sig, bool a_worn, bool a_fav,
+                    int a_xlIdx)
     {
         if (!a_obj || a_max <= 1) return;
         // player-receiving dirs: cap the slider at what the boards (main +
@@ -638,6 +672,7 @@ namespace FUI::LootBarter
         g_slider.sig = a_sig;
         g_slider.worn = a_worn;
         g_slider.fav = a_fav;   // GI36
+        g_slider.xlIdx = a_xlIdx;   // (1.3.3)
         Sfx::SelectOn();   // click / shift+click opened the quantity popup
     }
 
@@ -707,7 +742,8 @@ namespace FUI::LootBarter
     }
 
     void RequestTake(RE::TESBoundObject* a_obj, int a_count,
-                     std::uint16_t a_uid, std::uint16_t a_sig, bool a_fromWorn)
+                     std::uint16_t a_uid, std::uint16_t a_sig, bool a_fromWorn,
+                     bool a_useAfter)
     {
         if (a_obj && a_count > 0) {
             // GI42: refuse BEFORE arming any suppression -- a transfer that will
@@ -716,8 +752,15 @@ namespace FUI::LootBarter
                 Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
                 return;
             }
-            g_xfer.push_back({ XferReq::kTake, a_obj, a_count, 0, 0, {}, a_uid, a_sig,
-                               a_fromWorn });
+            XferReq req;
+            req.dir      = XferReq::kTake;
+            req.obj      = a_obj;
+            req.count    = a_count;
+            req.uid      = a_uid;
+            req.sig      = a_sig;
+            req.fromWorn = a_fromWorn;
+            req.useAfter = a_useAfter;
+            g_xfer.push_back(std::move(req));
             NoteOut(a_obj, a_uid, a_sig, a_count);
             ConsumeActingSpot(a_obj);   // GI20: the hovered cell's slot, not the last one
             ConsumeBundleCarry(a_obj, a_count);   // (1.3.1) a shelf-bag carry taken home
@@ -725,11 +768,12 @@ namespace FUI::LootBarter
     }
 
     void RequestStore(RE::TESBoundObject* a_obj, int a_count,
-                      std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav)
+                      std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav,
+                      int a_xlIdx)
     {
         if (a_obj && a_count > 0)
             g_xfer.push_back({ XferReq::kStore, a_obj, a_count, 0, 0, {}, a_uid, a_sig,
-                               false, a_fav });
+                               false, a_fav, a_xlIdx });
     }
 
     void RequestBuy(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
@@ -750,11 +794,12 @@ namespace FUI::LootBarter
     }
 
     void RequestSell(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
-                     std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav)
+                     std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav,
+                     int a_xlIdx)
     {
         if (a_obj && a_count > 0)
             g_xfer.push_back({ XferReq::kSell, a_obj, a_count, a_price, a_baseTotal,
-                               {}, a_uid, a_sig, false, a_fav });
+                               {}, a_uid, a_sig, false, a_fav, a_xlIdx });
     }
 
     void RequestPickTake(RE::TESBoundObject* a_obj, int a_count,
@@ -776,18 +821,18 @@ namespace FUI::LootBarter
 
     void RequestPickStore(RE::TESBoundObject* a_obj, int a_count,
                           std::uint16_t a_uid, std::uint16_t a_sig,
-                          const std::string& a_srcKey, bool a_fav)
+                          const std::string& a_srcKey, bool a_fav, int a_xlIdx)
     {
         if (a_obj && a_count > 0) {
             g_xfer.push_back({ XferReq::kPickStore, a_obj, a_count, 0, 0, a_srcKey,
-                               a_uid, a_sig, false, a_fav });
+                               a_uid, a_sig, false, a_fav, a_xlIdx });
             // Every other player -> partner direction suppresses the tile at
             // REQUEST time; only this one waited for the Tick, so the planted
             // item sat back down on the board for a frame or two before being
             // taken away. Same rule as store/sell: the unit leaves the board the
             // moment the player commits, and ProcessTransfers clears it when the
             // engine count actually drops (or when the roll is lost).
-            Grid::NotePendingRemove(a_obj, a_srcKey, a_count);
+            Grid::NotePendingRemove(a_obj, a_srcKey, a_count, a_xlIdx);
         }
     }
 
@@ -899,13 +944,28 @@ namespace FUI::LootBarter
                 });
                 ClearOut(r.obj, r.uid, r.sig, r.count);   // engine moved it
                 itemSound(r.obj, true);
+                // ★(1.3.0) SHELF USE MODE. The unit is in the player's pack as
+                // of the RemoveItem above, so from here it is an ordinary
+                // right-click -- the player-side path already knows every kind
+                // (potion, food, scroll, spell tome). QUEUED, not called: the
+                // engine call belongs to Equip::ProcessPending, and this is not
+                // its turn.
+                // ★xlIdx -1 on purpose: a list POSITION captured on the shelf
+                // means nothing in the pack it has just arrived in. The
+                // signature travelled with the ExtraDataList and still names it.
+                if (r.useAfter) {
+                    // ★It is passing through, not moving in: a typed bag must not
+                    // adopt a unit that is about to be drunk.
+                    Grid::NoteTransientArrival(r.obj->GetFormID());
+                    Equip::UseItem(r.obj, r.uid, -1, r.sig, {}, r.count);
+                }
                 break;
             }
             case XferReq::kStore: {
                 // GI36: resolve + strip the star in one call, then hand the very
                 // list we got to the engine (rule 58).
                 auto* sxl = Grid::ResolveExitUnit(r.obj, r.uid, r.sig, r.count,
-                                                  r.fav ? r.count : 0);
+                                                  r.fav ? r.count : 0, r.xlIdx);
                 GuardedRemove(player, r.obj, sxl == nullptr, "store", [&]() {   // GI42
                     player->RemoveItem(r.obj, r.count,
                         RE::ITEM_REMOVE_REASON::kStoreInContainer, sxl, source);
@@ -951,7 +1011,7 @@ namespace FUI::LootBarter
                 // lets the engine clear ownership/stolen flags.
                 {
                 auto* sxl = Grid::ResolveExitUnit(r.obj, r.uid, r.sig, r.count,   // GI36
-                                                  r.fav ? r.count : 0);
+                                                  r.fav ? r.count : 0, r.xlIdx);
                 GuardedRemove(player, r.obj, sxl == nullptr, "sell", [&]() {   // GI42
                     player->RemoveItem(r.obj, r.count, RE::ITEM_REMOVE_REASON::kSelling,
                         sxl, source);
@@ -1090,7 +1150,7 @@ namespace FUI::LootBarter
                     // GI36: only inside the WIN branch -- a failed roll must
                     // leave the star exactly where it was.
                     auto* sxl = Grid::ResolveExitUnit(r.obj, r.uid, r.sig, r.count,
-                                                      r.fav ? r.count : 0);
+                                                      r.fav ? r.count : 0, r.xlIdx);
                     GuardedRemove(player, r.obj, sxl == nullptr, "plant", [&]() {   // GI42
                         player->RemoveItem(r.obj, r.count,
                             RE::ITEM_REMOVE_REASON::kStoreInContainer, sxl, source);
@@ -1331,7 +1391,7 @@ namespace FUI::LootBarter
                 // pending-remove is noted on the WIN inside the Tick (a lost
                 // roll must leave the tile untouched)
                 RequestPickStore(g_slider.obj, g_slider.value, g_slider.uid, g_slider.sig,
-                                 g_slider.srcKey, g_slider.fav);
+                                 g_slider.srcKey, g_slider.fav, g_slider.xlIdx);
                 break;
             case XferDir::kStore:
                 // ★(1.3.3) a follower's pack is 10 x 8 -- asked here too, so
@@ -1342,11 +1402,12 @@ namespace FUI::LootBarter
                     break;
                 }
                 RequestStore(g_slider.obj, g_slider.value, g_slider.uid, g_slider.sig,
-                             g_slider.fav);
+                             g_slider.fav, g_slider.xlIdx);
                 // outgoing units leave their tile IN PLACE (engine removal is
                 // still queued on the Tick — without this the interim rebuild
                 // re-seats them at the front)
-                Grid::NotePendingRemove(g_slider.obj, g_slider.srcKey, g_slider.value);
+                Grid::NotePendingRemove(g_slider.obj, g_slider.srcKey, g_slider.value,
+                                        g_slider.xlIdx);
                 // F7: a stack dropped on an empty container cell carried its
                 // drop spot through the slider — apply it on confirm
                 if (g_storeHint.obj == g_slider.obj && g_storeHint.col >= 0) {
@@ -1378,8 +1439,9 @@ namespace FUI::LootBarter
                 } else {
                     RequestSell(g_slider.obj, g_slider.value, total,
                         g_slider.unitValue * g_slider.value,
-                        g_slider.uid, g_slider.sig, g_slider.fav);
-                    Grid::NotePendingRemove(g_slider.obj, g_slider.srcKey, g_slider.value);
+                        g_slider.uid, g_slider.sig, g_slider.fav, g_slider.xlIdx);
+                    Grid::NotePendingRemove(g_slider.obj, g_slider.srcKey, g_slider.value,
+                                            g_slider.xlIdx);
                 }
                 break;
             }
@@ -1395,11 +1457,11 @@ namespace FUI::LootBarter
 
     void AskSellConfirm(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
                         const std::string& a_srcKey, std::uint16_t a_uid, std::uint16_t a_sig,
-                        bool a_fav)
+                        bool a_fav, int a_xlIdx)
     {
         if (a_obj && a_count > 0) {
             g_confirm = { true, a_obj, a_count, a_price, a_baseTotal, a_srcKey, a_uid, a_sig,
-                          a_fav };
+                          a_fav, a_xlIdx };
             Sfx::SelectOn();
         }
     }
@@ -1464,8 +1526,9 @@ namespace FUI::LootBarter
                             ImGui::IsKeyPressed(ImGuiKey_Escape, false);
         if (ok) {
             RequestSell(g_confirm.obj, g_confirm.count, g_confirm.price, g_confirm.base,
-                        g_confirm.uid, g_confirm.sig, g_confirm.fav);
-            Grid::NotePendingRemove(g_confirm.obj, g_confirm.srcKey, g_confirm.count);
+                        g_confirm.uid, g_confirm.sig, g_confirm.fav, g_confirm.xlIdx);
+            Grid::NotePendingRemove(g_confirm.obj, g_confirm.srcKey, g_confirm.count,
+                                    g_confirm.xlIdx);
             g_confirm.active = false;
         } else if (cancel) {
             g_confirm.active = false;
@@ -2677,23 +2740,25 @@ namespace
             // ORDER. Nothing is ever renumbered, so nothing can jump -- which is
             // what the old exact-key lookup could not promise, because the key
             // carried an ordinal that shifted whenever the set changed.
-            auto poolOf = [](const std::string& k) {
+            // The FORM part of a spot key: everything before the first @ ~ or #
+            // that FOLLOWS the '|' (a plugin filename may legitimately contain
+            // those characters). Handles keys from before 1.3.2, which still
+            // carry a signature in the name, and new ones, which do not.
+            auto baseOfSpotKey = [](const std::string& k) {
                 const auto bar = k.find('|');
-                const auto h = k.find('#', bar == std::string::npos ? 0 : bar + 1);
-                return h == std::string::npos ? k : k.substr(0, h);
+                const auto cut = k.find_first_of("@~#!",
+                                                 bar == std::string::npos ? 0 : bar + 1);
+                return cut == std::string::npos ? k : k.substr(0, cut);
             };
-            // GI41: a WORN unit is its own pool. It is not interchangeable with a
-            // spare -- one is locked and the other is not -- and sharing a pool
-            // meant the slots were handed out by position: plant a spare on a
-            // pickpocket mark and the worn cell was pushed off its slot, taking
-            // the lock's apparent position with it. A separate pool keeps the
-            // worn cell where it is no matter what arrives beside it.
-            auto poolPrefix = [](const PartnerCell& c) {
-                return PartnerKey(c.obj, c.uid, c.sig, 0) + (c.worn ? "!worn" : "");
+            auto baseOf = [](const PartnerCell& c) {
+                return PartnerKey(c.obj, 0, 0, 0);
             };
-            auto freshInPool = [&](const std::string& prefix) {
+            // ★Minted from the FORM, never from the pool: an ordinal is a spot
+            // NAME now, and a name that never changes is the whole point.
+            auto freshSpot = [&](const PartnerCell& c) {
+                const std::string base = PartnerKey(c.obj, 0, 0, 0);
                 for (int n = 0;; ++n) {
-                    std::string k = n == 0 ? prefix : prefix + "#" + std::to_string(n);
+                    std::string k = n == 0 ? base : base + "#" + std::to_string(n);
                     if (!cl->spots.contains(k)) return k;
                 }
             };
@@ -2710,7 +2775,7 @@ namespace
                         if (it.obj->GetFormID() == ps->form && it.sig == ps->sig) { match = &it; break; }
                     }
                     if (!match) { ++ps; continue; }   // not here yet: keep waiting
-                    const std::string prefix = poolPrefix(*match);
+
                     // GI23: a REARRANGE names the slot it is moving; a STORE has
                     // none here yet and takes a fresh one. The old code guessed
                     // ("if the pool is already full, reuse its first slot"),
@@ -2718,7 +2783,7 @@ namespace
                     // the vacated cell -- the two appeared to swap.
                     const bool reused =
                         !ps->slotKey.empty() && cl->spots.contains(ps->slotKey);
-                    const std::string key = reused ? ps->slotKey : freshInPool(prefix);
+                    const std::string key = reused ? ps->slotKey : freshSpot(*match);
                     // GI62: the hint's angle defines the new slot's footprint --
                     // match->w/h is the upright pair, so swap it when the drop
                     // was made on its side.
@@ -2747,6 +2812,14 @@ namespace
                         sp.h = turned ? match->w : match->h;
                         sp.rot = ps->rot & 3;
                         sp.gold = prev + carried;
+                        // ★Stamp the binding AT BIRTH. Pass 1 would stamp it a
+                        // few lines later anyway, but only after choosing which
+                        // cell this spot belongs to -- and with two identical
+                        // items in the chest, an unstamped spot is exactly the
+                        // ambiguity that makes it choose the other one.
+                        sp.uid  = match->uid;
+                        sp.sig  = match->sig;
+                        sp.worn = match->worn;
                         if (!reused) {
                             sp.bundle = TakePendingBundle(match->obj->GetFormID());
                         }
@@ -2758,133 +2831,162 @@ namespace
                     ps = g_pendingSpots.erase(ps);
                 }
 
-                // drop slots of pools that are not here at all any more. Not
-                // while something from this container rides the cursor: that
-                // cell is absent by design, and its slot is what restores it.
-                if (!Grid::HeldPartnerObject()) {
-                    std::set<std::string> livePools;
-                    for (const auto& it : cells) livePools.insert(poolPrefix(it));
-                    for (auto si = cl->spots.begin(); si != cl->spots.end();) {
-                        if (livePools.contains(poolOf(si->first))) { ++si; continue; }
-                        // ★THE GOLD GOES HOME WITH IT. A spot dies because its
-                        // item is gone from this container -- taken back, most
-                        // often -- so anything the shelf was holding for it is
-                        // handed to g_awayGold, which is exactly where
-                        // OnPouchReturned looks when the pouch reaches the
-                        // player. Dropping the spot without this would delete
-                        // the gold silently.
-                        if (si->second.gold > 0) {
-                            SKSE::log::info("[LOOT] pouch left the shelf with {} G",
-                                si->second.gold);
-                            GoldCoins::GiveAwayGold(si->second.gold);
+                // ★The "drop slots of pools that are not here any more" sweep
+                // that used to sit here is GONE, subsumed by the matcher's own
+                // prune below -- which asks the better question. This one asked
+                // whether a spot's POOL was still present, so a signature that
+                // merely moved read as "that pool left the chest" and the spot
+                // was destroyed with the pouch's gold inside it (handed home,
+                // but the position and any bundle died). The matcher prunes
+                // what NOTHING CLAIMED, which is what a dead spot actually is.
+
+                // pass 1: bind each live cell to the shelf spot that was showing
+                // it, then place it where that spot says.
+                //
+                // This used to group cells into POOLS and look each pool's spots
+                // up BY NAME -- and a spot's name carried the item's signature,
+                // so a stored item whose signature moved (ownership cleared by a
+                // sale, a quest flag landing, a charge spent on a companion's
+                // weapon) belonged to a pool with no spots at all. It got a fresh
+                // spot: a new position, and -- because a pouch's gold and a bag's
+                // contents hang off the SPOT -- a lost amount and a spilled bag.
+                //
+                // Matching instead asks: of the spots this FORM already owns in
+                // this container, which was showing this cell? The tiers are
+                // evidence, strongest first, and the last accepts any leftover,
+                // so a signature that moved costs a weaker match rather than a
+                // lost spot. Mirrors Grid::EnumerateUnitTiles exactly, on
+                // purpose: two boards, one rule.
+                //
+                // WORN is a hard partition rather than a tier (GI41): a worn cell
+                // is locked and a spare is not, so they are never interchangeable
+                // and must never trade spots. Plant a spare on a pickpocket mark
+                // and the worn cell stays exactly where it is.
+                // a carried cell takes its spot with it. Excluding BOTH (the
+                // cell is already absent from `cells`) is what keeps the
+                // survivors where they are -- otherwise one cell faces two
+                // spots, and position order hands the back dagger the front
+                // spot the moment the front one is lifted.
+                const bool carrying = Grid::HeldPartnerObject() != nullptr;
+                std::vector<PartnerCell*> live;
+                for (auto& it : cells) live.push_back(&it);
+
+                std::vector<std::pair<std::string, ContSpot>> slots;
+                for (const auto& [k, s] : cl->spots) {
+                    if (carrying && k == g_actingSpot) continue;   // reserved
+                    slots.push_back({ k, s });
+                }
+                std::sort(slots.begin(), slots.end(), [](const auto& x, const auto& y) {
+                    if (x.second.row != y.second.row) return x.second.row < y.second.row;
+                    return x.second.col < y.second.col;
+                });
+
+                std::vector<int>  spotOf(live.size(), -1);
+                std::vector<char> claimed(slots.size(), 0);
+                const auto bind = [&](auto&& a_ok) {
+                    for (std::size_t u = 0; u < live.size(); ++u) {
+                        if (spotOf[u] >= 0) continue;
+                        for (std::size_t s = 0; s < slots.size(); ++s) {
+                            if (claimed[s]) continue;
+                            // form and worn-ness are absolute: never crossed
+                            if (baseOfSpotKey(slots[s].first) != baseOf(*live[u])) continue;
+                            if (slots[s].second.worn != live[u]->worn) continue;
+                            if (!a_ok(*live[u], slots[s].second)) continue;
+                            spotOf[u] = static_cast<int>(s);
+                            claimed[s] = 1;
+                            break;
                         }
-                        si = cl->spots.erase(si);
                     }
+                };
+                bind([](const PartnerCell& c, const ContSpot& s) {
+                    return c.uid != 0 && s.uid == c.uid; });
+                bind([](const PartnerCell& c, const ContSpot& s) {
+                    return c.uid == 0 && s.uid == 0 && s.sig == c.sig; });
+                bind([](const PartnerCell&, const ContSpot&) { return true; });
+
+                for (std::size_t u = 0; u < live.size(); ++u) {
+                    PartnerCell* m = live[u];
+                    if (spotOf[u] >= 0) {
+                        m->spotKey = slots[spotOf[u]].first;
+                        const auto& s = slots[spotOf[u]].second;
+                        m->gold = s.gold;
+                        // GI62: the slot remembers the angle -- adopt it BEFORE
+                        // the fit test, which reads w/h.
+                        m->SetRot(s.rot);
+                        // (1.3.3) a COMPANION's board is 10 x 8, and a remembered
+                        // spot from before that cap (or from the +2 spare rows
+                        // every other container still gets) would hold the board
+                        // open past it -- the pack drew nine rows for an item
+                        // nobody could see down there. Out-of-cap spots are
+                        // refused here and first-fit back inside by pass 2.
+                        const bool inCap =
+                            !companionBoard || s.row + m->h <= kCompanionRows;
+                        if (inCap && fits(s.col, s.row, m->w, m->h)) {
+                            m->col = s.col;
+                            m->row = s.row;
+                            mark(s.col, s.row, m->w, m->h);
+                        } else if (m->rot != 0) {
+                            m->SetRot(0);   // stand it up rather than lose it
+                        }
+                    } else {
+                        m->spotKey = freshSpot(*m);
+                        // THE OTHER DOOR. A shelf slot is born in two places:
+                        // there (a drop the player aimed at a cell) and here
+                        // (everything else -- a store with no aimed cell, an item
+                        // that simply appeared). Only the first claimed the
+                        // pouch's gold, so storing a full pouch any other way
+                        // shelved it as EMPTY and left the amount stranded in
+                        // g_awayGold. Both doors take it now.
+                        m->gold = GoldCoins::IsPouch(m->obj->GetFormID())
+                                      ? GoldCoins::TakeAwayGold() : 0;
+                        if (m->gold > 0) {
+                            SKSE::log::info("[LOOT] pouch shelved with {} G ('{}', fresh slot)",
+                                            m->gold, m->spotKey);
+                        }
+                        // NEVER CLOBBER AN AMOUNT ALREADY ON THIS SHELF. This
+                        // branch re-writes the whole slot, and it runs LATER IN
+                        // THE SAME FRAME than the drop that shelved the pouch --
+                        // so a pouch stored with 6,943 G had its slot rebuilt at
+                        // zero a few lines further down, and drew empty. The
+                        // position may be rewritten; the gold may not.
+                        auto& sp = cl->spots[m->spotKey];
+                        const int keep = sp.gold > 0 ? sp.gold : m->gold;
+                        sp.col = -1;
+                        sp.row = -1;
+                        sp.w = m->w;
+                        sp.h = m->h;
+                        sp.rot = m->rot;
+                        sp.gold = keep;
+                        if (sp.bundle.empty()) {
+                            // (1.3.0-D) the OTHER door a stored bag's spot can be
+                            // born through -- its bundle rides too
+                            sp.bundle = TakePendingBundle(m->obj->GetFormID());
+                        }
+                    }
+                    // the spot records WHICH unit it is showing. A hint for the
+                    // next rebuild, never a name: writing it cannot move a cell.
+                    auto& sp = cl->spots[m->spotKey];
+                    sp.uid  = m->uid;
+                    sp.sig  = m->sig;
+                    sp.worn = m->worn;
                 }
 
-                // pass 1: assign each pool's cells to its slots, by position
-                std::map<std::string, std::vector<PartnerCell*>> pools;
-                for (auto& it : cells) pools[poolPrefix(it)].push_back(&it);
-                // a carried cell takes its slot with it. Excluding BOTH (the cell
-                // is already absent from `cells`) is what keeps the survivors
-                // where they are -- otherwise the pool has one cell and two
-                // slots, and position order hands the back dagger the front
-                // slot the moment the front one is lifted.
-                const bool carrying = Grid::HeldPartnerObject() != nullptr;
-                for (auto& [prefix, members] : pools) {
-                    std::vector<std::pair<std::string, ContSpot>> slots;
-                    for (const auto& [k, s] : cl->spots) {
-                        if (poolOf(k) != prefix) continue;
-                        if (carrying && k == g_actingSpot) continue;   // reserved
-                        slots.push_back({ k, s });
-                    }
-                    std::sort(slots.begin(), slots.end(), [](const auto& x, const auto& y) {
-                        if (x.second.row != y.second.row) return x.second.row < y.second.row;
-                        return x.second.col < y.second.col;
-                    });
-                    for (std::size_t i = 0; i < members.size(); ++i) {
-                        if (i < slots.size()) {
-                            members[i]->spotKey = slots[i].first;
-                            const auto& s = slots[i].second;
-                            members[i]->gold = s.gold;
-                            // GI62: the slot remembers the angle -- adopt it
-                            // BEFORE the fit test, which reads w/h.
-                            members[i]->SetRot(s.rot);
-                            // ★(1.3.3) a COMPANION's board is 10 x 8, and a
-                            // remembered spot from before that cap (or from
-                            // the +2 spare rows every other container still
-                            // gets) would hold the board open past it -- the
-                            // pack drew nine rows for an item nobody could
-                            // see down there. Out-of-cap spots are refused
-                            // here and first-fit back inside by pass 2.
-                            const bool inCap =
-                                !companionBoard ||
-                                s.row + members[i]->h <= kCompanionRows;
-                            if (inCap &&
-                                fits(s.col, s.row, members[i]->w, members[i]->h)) {
-                                members[i]->col = s.col;
-                                members[i]->row = s.row;
-                                mark(s.col, s.row, members[i]->w, members[i]->h);
-                            } else if (members[i]->rot != 0) {
-                                members[i]->SetRot(0);   // stand it up rather than lose it
-                            }
-                        } else {
-                            members[i]->spotKey = freshInPool(prefix);
-                            // ★★THE OTHER DOOR. A shelf slot is born in two places:
-                            // there (a drop the player aimed at a cell) and here
-                            // (everything else -- a store with no aimed cell, an
-                            // item that simply appeared). Only the first claimed
-                            // the pouch's gold, so storing a full pouch any other
-                            // way shelved it as EMPTY and left the amount stranded
-                            // in g_awayGold. Both doors take it now.
-                            members[i]->gold =
-                                GoldCoins::IsPouch(members[i]->obj->GetFormID())
-                                    ? GoldCoins::TakeAwayGold() : 0;
-                            if (members[i]->gold > 0) {
-                                SKSE::log::info("[LOOT] pouch shelved with {} G ('{}', fresh slot)",
-                                    members[i]->gold, members[i]->spotKey);
-                            }
-                            // ★★NEVER CLOBBER AN AMOUNT ALREADY ON THIS SHELF. This
-                            // branch re-writes the whole slot, and it runs LATER IN
-                            // THE SAME FRAME than the drop that shelved the pouch --
-                            // so a pouch stored with 6,943 G had its slot rebuilt at
-                            // zero a few lines further down, and drew empty. The
-                            // position may be rewritten; the gold may not.
-                            {
-                                auto& sp = cl->spots[members[i]->spotKey];
-                                const int keep = sp.gold > 0 ? sp.gold : members[i]->gold;
-                                sp.col = -1;
-                                sp.row = -1;
-                                sp.w = members[i]->w;
-                                sp.h = members[i]->h;
-                                sp.rot = members[i]->rot;
-                                sp.gold = keep;
-                                // (1.3.0-D) the OTHER door a stored bag's spot
-                                // can be born through -- its bundle rides too
-                                if (sp.bundle.empty()) {
-                                    sp.bundle =
-                                        TakePendingBundle(members[i]->obj->GetFormID());
-                                }
-                            }
+                // spots nothing claimed: the shelf shrank
+                if (!Grid::HeldPartnerObject()) {
+                    for (std::size_t s = 0; s < slots.size(); ++s) {
+                        if (claimed[s]) continue;
+                        // (1.3.0-B) same rule as every other spot death: the gold
+                        // goes home instead of dying with the slot. (Two pouches
+                        // stored in one chest merge into ONE shelf cell -- the
+                        // second slot lands here the very frame it was made.)
+                        if (const auto si = cl->spots.find(slots[s].first);
+                            si != cl->spots.end() && si->second.gold > 0) {
+                            SKSE::log::info(
+                                "[LOOT] shelf slot dropped, {} G goes home ('{}')",
+                                si->second.gold, slots[s].first);
+                            GoldCoins::GiveAwayGold(si->second.gold);
                         }
-                    }
-                    // the pool shrank: drop the trailing positions
-                    if (!Grid::HeldPartnerObject()) {
-                        for (std::size_t j = members.size(); j < slots.size(); ++j) {
-                            // ★(1.3.0-B) same rule as every other spot death:
-                            // the gold goes home instead of dying with the
-                            // slot. (Two pouches stored in one chest merge
-                            // into ONE shelf cell -- the second slot lands
-                            // here the very frame it was made.)
-                            if (const auto si = cl->spots.find(slots[j].first);
-                                si != cl->spots.end() && si->second.gold > 0) {
-                                SKSE::log::info(
-                                    "[LOOT] shelf slot dropped, {} G goes home ('{}')",
-                                    si->second.gold, slots[j].first);
-                                GoldCoins::GiveAwayGold(si->second.gold);
-                            }
-                            cl->spots.erase(slots[j].first);
-                        }
+                        cl->spots.erase(slots[s].first);
                     }
                 }
             }
@@ -3126,7 +3228,19 @@ namespace
                     // (explicit split). Either way a stack (>1) opens the quantity
                     // slider first; a single item moves at once.
                     else if (IsLootMode(g_mode)) {
-                        const bool rc = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+                        const bool rcRaw = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+                        // ★(1.3.0) USE MODE -- SkyUI's "Shift = Equip Mode",
+                        // spelled in our grammar. There the primary key is E and
+                        // Shift changes what E does; here taking is the RIGHT
+                        // button, so Shift changes what the right button does.
+                        // It cannot collide with shift+LEFT (split): different
+                        // button, which is how SkyUI keeps the two apart as well.
+                        // kLoot covers container, corpse AND companion, which is
+                        // the whole of the intended scope. Pickpocket has its own
+                        // block below and is deliberately left out -- using an
+                        // item off a living mark is not a thing to offer.
+                        const bool useRc = rcRaw && ImGui::GetIO().KeyShift;
+                        const bool rc = rcRaw && !useRc;
                         const bool splitLc = ImGui::GetIO().KeyShift &&
                                              ImGui::IsItemClicked(ImGuiMouseButton_Left);
                         // ★(1.3.1) a BAG manages on right-click HERE TOO -- the
@@ -3160,6 +3274,59 @@ namespace
                                 g_shelfBags.push_back({ it.spotKey,
                                                         it.obj->GetFormID() });
                                 Sfx::BagOpen();
+                            }
+                        // ★★USE MODE lands here -- AFTER the pouch and the bag,
+                        // whose right-click already means something of their own
+                        // (withdraw, open). Ordering does the exclusion, so there
+                        // is no list of special forms to keep in step with them.
+                        // ★★★BOOKS ONLY, and the limit is deliberate.
+                        //
+                        // Consumables went through "take one unit, then use it",
+                        // because the engine can only consume from the player's
+                        // own inventory. That worked -- and reliably took the
+                        // game down on the SECOND potion drunk out of a
+                        // container, always in the same place: the icon path,
+                        // making a virtual call on an object that is no longer
+                        // one.
+                        //
+                        // Five hypotheses were tested against crash logs and
+                        // ruled out: a stale view index, the engine's
+                        // loadedModels list, a dead form pointer, typed-bag
+                        // routing, and a tile object that was never on the
+                        // board. The last one is instructive -- the pointer WAS
+                        // valid at the previous rebuild and the memory behind it
+                        // was gone by the time it was drawn, which no test that
+                        // compares pointers can catch.
+                        //
+                        // Whatever that is, it is not this feature's to fix, and
+                        // a convenience is not worth a reproducible CTD. Books,
+                        // notes and spell tomes need no round trip through the
+                        // pack at all (a book is read where it lies), never
+                        // touched the failing path, and were verified working --
+                        // so that is what the mode does. Anything else falls
+                        // through to an ordinary take, which is what shift+right
+                        // did before this existed.
+                        } else if (useRc && it.obj->As<RE::TESObjectBOOK>()) {
+                            if (it.locked) {   // GI42: the twin is worn
+                                Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
+                            } else if (auto* bk = it.obj->As<RE::TESObjectBOOK>();
+                                       bk && !bk->TeachesSpell()) {
+                                // ★READ IN PLACE. A book needs no owner to be
+                                // read, so taking one first would leave a note
+                                // you only meant to glance at sitting in the
+                                // pack. A spell tome is NOT this case -- reading
+                                // one destroys it, so it has to be ours first.
+                                Grid::RequestBookRead(bk, it.uid, it.sig);
+                            } else if (!Grid::CanFitNewItem(it.obj)) {
+                                Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
+                            } else {
+                                // One unit, taken and then used: the engine can
+                                // only consume from the player's own inventory,
+                                // so passing through it is the only road there
+                                // is, not a shortcut.
+                                g_actingSpot = it.spotKey;   // GI20
+                                RequestTake(it.obj, 1, it.uid, it.sig, it.worn,
+                                            /*useAfter=*/true);
                             }
                         } else if (rc || splitLc) {
                             if (it.locked) {   // GI42
@@ -3935,7 +4102,30 @@ namespace
     {
         constexpr std::uint32_t kContMaxStr = 512;
         constexpr std::uint32_t kContMaxEntries = 65536;
-        constexpr std::uint32_t kContCosaveVersion = 8;   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag
+        constexpr std::uint32_t kContCosaveVersion = 9;   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints
+
+        // ★v9 migration: before this, a spot's binding lived inside its KEY
+        // ("form~B825!worn#1"). Read it back out and put it where it belongs.
+        // The key itself is left alone -- nothing recomputes it any more, so an
+        // old one is simply an opaque spot name.
+        void SpotHintsFromKey(const std::string& a_key, std::uint16_t& a_uid,
+                              std::uint16_t& a_sig, bool& a_worn)
+        {
+            const auto bar = a_key.find('|');
+            const auto from = bar == std::string::npos ? 0 : bar + 1;
+            a_worn = a_key.find("!worn", from) != std::string::npos;
+            const auto at = a_key.find('@', from);
+            if (at != std::string::npos) {
+                a_uid = static_cast<std::uint16_t>(
+                    std::strtoul(a_key.c_str() + at + 1, nullptr, 16));
+                return;
+            }
+            const auto tilde = a_key.find('~', from);
+            if (tilde != std::string::npos) {
+                a_sig = static_cast<std::uint16_t>(
+                    std::strtoul(a_key.c_str() + tilde + 1, nullptr, 16));
+            }
+        }
 
         bool ContWriteStr(SKSE::SerializationInterface* a_intfc, const std::string& a_s)
         {
@@ -3988,6 +4178,12 @@ namespace
                     // v8: someone else's goods
                     a_intfc->WriteRecordData(static_cast<std::int32_t>(b.stolen ? 1 : 0));
                 }
+                // ★v9: which unit this spot is showing. A hint, not a name:
+                // a stale one only weakens the next match, and the fallback
+                // keeps the spot (and the gold and the bundle riding on it).
+                a_intfc->WriteRecordData(static_cast<std::uint32_t>(s.uid));
+                a_intfc->WriteRecordData(static_cast<std::uint32_t>(s.sig));
+                a_intfc->WriteRecordData(static_cast<std::int32_t>(s.worn ? 1 : 0));
             }
         }
         SKSE::log::info("[LOOT] cosave: saved {} container layouts", g_contLayouts.size());
@@ -4073,8 +4269,21 @@ namespace
                         }
                     }
                 }
-                cl.spots[std::move(key)] = { col, row, w, h, rot & 3, gold,
-                                             std::move(bundle) };
+                ContSpot sp{ col, row, w, h, rot & 3, gold, std::move(bundle) };
+                if (a_version >= 9) {
+                    std::uint32_t su = 0, ss = 0;
+                    std::int32_t  sw = 0;
+                    if (!a_intfc->ReadRecordData(su) || !a_intfc->ReadRecordData(ss) ||
+                        !a_intfc->ReadRecordData(sw)) {
+                        return;
+                    }
+                    sp.uid  = static_cast<std::uint16_t>(su);
+                    sp.sig  = static_cast<std::uint16_t>(ss);
+                    sp.worn = sw != 0;
+                } else {
+                    SpotHintsFromKey(key, sp.uid, sp.sig, sp.worn);
+                }
+                cl.spots[std::move(key)] = std::move(sp);
             }
             if (ok && resolved != 0) {
                 maxStamp = (std::max)(maxStamp, stamp);

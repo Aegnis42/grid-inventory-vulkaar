@@ -795,8 +795,9 @@ namespace FUI::Wheeler
             // and stood beside an EQUIP tab meaning the same thing; EQUIP took
             // the job and the row went, leaving every group answering no. The
             // same fate as seed above, for the same reason.
-            // ★A click, with the hand it came from. Null for groups where a
-            // click means nothing -- a preset has one answer, not two hands.
+            // ★A click, with the hand it came from. Every group answers now;
+            // the hand is only meaningful for gear and magic, and PRESET /
+            // COSTUME ignore it -- they have one answer, not two hands.
             void (*click)(int slot, bool leftHand);
             // ★Move a slot's contents to another slot. Null where there is
             // nothing to arrange at all.
@@ -849,6 +850,13 @@ namespace FUI::Wheeler
                 const int t = TabOf(kPreset, s);
                 if (t >= 0 && t != Loadout::Active()) Loadout::RequestSwitch(t);
             }
+            // ★A click puts it on NOW, instead of waiting for the wheel to
+            // close. Gear and magic have always worked that way; a preset had
+            // to be selected and then released, which reads as the click having
+            // done nothing. `apply` already refuses a preset that is current,
+            // so clicking and then releasing on the same slot is one switch.
+            // The hand is meaningless here -- a preset has one answer.
+            void click(int s, bool) { apply(s); }
             bool reorder(int from, int to);
         }
 
@@ -886,6 +894,7 @@ namespace FUI::Wheeler
                 const int want = (t == 0) ? -1 : t;
                 if (want != Costume::Tab()) Costume::SetTab(want);
             }
+            void click(int s, bool) { apply(s); }   // same as PRESET above
             // ★PRESET and COSTUME arrange SEPARATELY, though they list the same
             // tabs. The set you reach for in a hurry and the look you reach for
             // are different preferences about the same things, and one wheel is
@@ -944,10 +953,10 @@ namespace FUI::Wheeler
             // the player recognises; there is no weapon in it to name.
             { "PRESET", Preset::filled, Preset::eligible, Preset::name,
               Preset::current, Preset::apply,
-              Art::presetMedallion, Art::noFace, nullptr, Preset::reorder },
+              Art::presetMedallion, Art::noFace, Preset::click, Preset::reorder },
             { "COSTUME", Costume_::filled, Costume_::eligible, Costume_::name,
               Costume_::current, Costume_::apply,
-              Art::noMedallion, Art::costumeFace, nullptr, Costume_::reorder },
+              Art::noMedallion, Art::costumeFace, Costume_::click, Costume_::reorder },
             { "GEAR", Items::filled, Items::eligible, Items::name,
               Items::current, Items::apply,
               Art::itemMedallion, Art::itemFace, Items::click, Items::reorder },
@@ -1114,8 +1123,39 @@ namespace FUI::Wheeler
                 if (Costume::IsAnchor(obj)) continue;
                 auto* entry = data.second.get();
                 if (!entry || !entry->extraLists) continue;
+                // ★★★PREFER A SPARE'S SIGNATURE, NEVER THE WORN ONE.
+                //
+                // This signature exists to be handed to EQUIP -- and the equip
+                // resolver refuses worn lists by design (a worn list belongs to
+                // the copy already on the body). The star, however, MOVES onto
+                // the worn list the moment the item is put on: the engine
+                // carries ExtraHotkey across, which PoolHasStar relies on
+                // elsewhere.
+                //
+                // So the first starred list is the WORN one for anything the
+                // player has ever worn, and every later equip from the wheel was
+                // refused -- "[EQUIP] named unit gone -- equip skipped", a dozen
+                // times in one reporter's session, while unequipping kept
+                // working because that path resolves through WornExtraMatching
+                // instead. "Only equip is broken" was the shape of it.
+                //
+                // Take the first NON-WORN starred list; fall back to the worn
+                // one only when there is nothing else, where the click means
+                // unequip anyway.
+                RE::ExtraDataList* star = nullptr;
+                RE::ExtraDataList* wornStar = nullptr;
                 for (auto* xl : *entry->extraLists) {
                     if (!xl || !xl->HasType<RE::ExtraHotkey>()) continue;
+                    if (xl->HasType<RE::ExtraWorn>() ||
+                        xl->HasType<RE::ExtraWornLeft>()) {
+                        if (!wornStar) wornStar = xl;
+                        continue;
+                    }
+                    star = xl;
+                    break;
+                }
+                if (!star) star = wornStar;
+                if (star) {
                     // ★★★KEEP THE SIGNATURE OF THE UNIT THAT CARRIES THE STAR.
                     // The star sits on one ExtraDataList and we are holding it
                     // -- but sig was written as 0, which means "no instance" all
@@ -1128,10 +1168,9 @@ namespace FUI::Wheeler
                     // tempered pool from the plain one, which is exactly the
                     // grain the favourites system works at.
                     g_fav[g_favN] = { obj, obj, FavKind::kItem,
-                                      Grid::InstanceSigOf(xl), -1,
+                                      Grid::InstanceSigOf(star), -1,
                                       data.first, entry->IsWorn() };
-                    ++g_favN;
-                    break;   // one tile per form: a starred pool is one thing
+                    ++g_favN;   // one tile per form: a starred pool is one thing
                 }
             }
             // ★...and the magic side of the same star. The engine keeps spells
@@ -1804,6 +1843,12 @@ namespace FUI::Wheeler
             // does nothing rather than acting on whatever used to be there.
             (void)a_n;
             if (a_slot < 0 || a_slot >= kSlots || !a_list[a_slot].form) return;
+            // ★The wheel logged nothing at all about what a click DID, so a
+            // report of "it does not work" had no way to say where it stopped.
+            SKSE::log::info("[WHEEL] use slot={} '{}' kind={} sig {:04X} worn={} hand={}",
+                a_slot, a_list[a_slot].form->GetName(),
+                static_cast<int>(a_list[a_slot].kind), a_list[a_slot].sig,
+                a_list[a_slot].worn, a_leftHand ? "L" : "R");
             g_itemActed = true;   // the release must not fire on top of this
             // ★The gear tick comes off a 330ms snapshot, because the LIST comes
             // off the inventory and that is what costs (see Items::current) --

@@ -610,9 +610,35 @@ namespace FUI
                 // variants never matched and every one timed out. Check both.
                 for (RE::TESForm* src : { lm.itemBase,
                          static_cast<RE::TESForm*>(lm.modelObj) }) {
-                    const auto* mdl2 = src ? skyrim_cast<RE::TESModel*>(src) : nullptr;
-                    if (mdl2 && mdl2->GetModel() &&
-                        _stricmp(mdl2->GetModel(), path) == 0) {
+                    // ★★THE ENGINE'S LIST CAN HOLD A DEAD POINTER, AND A NULL
+                    // CHECK CANNOT SEE IT.
+                    //
+                    // These two are raw form pointers inside the engine's
+                    // loadedModels, and during a model swap an entry can keep
+                    // its spModel while the form beside it has already gone.
+                    // skyrim_cast then walks a vtable that is not there any
+                    // more and the RTTI machinery THROWS (__non_rtti_object) --
+                    // which reaches the render thread as an unhandled exception
+                    // and takes the game down.
+                    //
+                    // Measured: drinking two potions straight out of a container
+                    // in quick succession churns the board, the typed bag's
+                    // preview reloads, and the crash log named our own bag MISC
+                    // as the object whose RTTI could not be read. The list
+                    // belongs to the engine and there is nothing here to lock,
+                    // so the cast is guarded and a bad entry is skipped.
+                    // GetModel() is inside the guard for the same reason: it
+                    // dereferences the very object we could not verify.
+                    if (!src) continue;
+                    const char* p2 = nullptr;
+                    try {
+                        if (const auto* mdl2 = skyrim_cast<RE::TESModel*>(src)) {
+                            p2 = mdl2->GetModel();
+                        }
+                    } catch (...) {
+                        continue;   // recycled entry -- it is not our model
+                    }
+                    if (p2 && _stricmp(p2, path) == 0) {
                         return lm.spModel.get();
                     }
                 }
