@@ -1138,7 +1138,16 @@ namespace FUI::Equip
         // the rebuild behind this is a whole-actor one.
         Costume::MarkDirty();
         Grid::MarkEquipsApplied();   // suppression has done its job
-        Grid::RequestRebuild();
+        // ★★1.4/B3: no rebuild here any more, and the reason is measured
+        // (!rbdrop, §8-8). Equipping does not need one -- NotePendingEquip
+        // already took the unit off the board when the player committed. Only
+        // UNequipping did, because putting a unit back is work nobody does.
+        //
+        // So the rebuild moved to where an unequip is actually known: the
+        // engine's own TESEquipEvent with equipped == false. That also covers
+        // the case this code could never see -- the engine taking something off
+        // by itself to resolve a slot conflict, which is most equips in
+        // practice.
         g_rebuildLag = 2;
     }
 

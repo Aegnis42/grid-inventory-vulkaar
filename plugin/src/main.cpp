@@ -184,12 +184,22 @@ namespace
         RE::BSEventNotifyControl ProcessEvent(const RE::TESEquipEvent* a_event,
             RE::BSTEventSource<RE::TESEquipEvent>*) override
         {
-            // ★1.4/B0: this sink is the one that genuinely throws its delta
-            // away -- it reads IsPlayerRef() and nothing else. Before it can be
-            // extended (PLAN §2 row 2) we need to see whether baseObject +
-            // uniqueID + equipped actually name the unit that moved.
+            // ★1.4/B0: this sink used to throw its delta away -- it read
+            // IsPlayerRef() and nothing else. B0 measured what the event can
+            // and cannot say (§8-2): uniqueID is always zero, so it never names
+            // the unit -- but `equipped` is exactly the one bit we need.
             FUI::DeltaWatch::OnEquip(a_event);
             if (a_event && a_event->actor && a_event->actor->IsPlayerRef()) {
+                // ★1.4/B3: an unequip puts a unit BACK on the board, and that
+                // is the only direction without an optimistic path. Includes
+                // the engine's own slot-conflict removals, which our equip code
+                // never sees. Deferred to the main thread: these arrive on
+                // whatever thread the engine was on.
+                if (!a_event->equipped) {
+                    SKSE::GetTaskInterface()->AddTask([]() {
+                        FUI::Grid::RequestRebuild();
+                    });
+                }
                 FUI::Grid::MarkCapacityDirty();
                 // The active preset IS what the player is wearing, so anything
                 // that changes the worn gear changes that tab.
