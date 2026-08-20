@@ -55,4 +55,13 @@ namespace FUI::Census
     // which is why the miss is an empty optional and not a zero.
     [[nodiscard]] std::optional<std::uint16_t> TakePair(RE::FormID a_form,
                                                         std::uint16_t a_goneSig);
+
+    // Non-consuming twin for the GEAR matcher, whose tier predicate runs once
+    // per (unit, slot) pair and so cannot afford to retire the answer on
+    // first read. Its binding retires itself instead: the slot's sig is
+    // rewritten to the unit's on commit, so the next rebuild matches on
+    // contents without asking here again. (All the relabels B1 ever measured
+    // were gear -- this, not the stackable block, is the rule's main seat.)
+    [[nodiscard]] std::optional<std::uint16_t> PeekPair(RE::FormID a_form,
+                                                        std::uint16_t a_goneSig);
 }

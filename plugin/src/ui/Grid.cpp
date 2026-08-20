@@ -4736,14 +4736,38 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 //    whereas contents only change when the ITEM changes.
                 pass([](const UnitRef& u, const LayoutEntry& e) {
                     return u.uid == 0 && e.uid == 0 && e.sig == u.sig; });
-                // 3: same place in the list, contents changed -- exactly what a
+                // 3: ★the CENSUS paired the vanished kind this slot is still
+                //    labelled with against the new contents this unit carries
+                //    (fewest changed axes first, normalised distance as the
+                //    tiebreak -- the B1 rule promoted, §8-4). Content
+                //    evidence, so it outranks the list POSITION below: xlIdx
+                //    is the engine's to reorder, and every relabel B1 ever
+                //    measured was gear walking THIS ladder -- the stackable
+                //    relabel block was the rule's second seat, not its first.
+                //    Peeked, not taken: this predicate runs once per
+                //    (unit, slot) pair, and the binding retires itself -- the
+                //    slot's sig is rewritten to the unit's on commit, so the
+                //    next rebuild matches at tier 1/2 without asking again.
+                {
+                    const RE::FormID cform = a_entry && a_entry->object
+                                                 ? a_entry->object->GetFormID()
+                                                 : 0;
+                    pass([cform](const UnitRef& u, const LayoutEntry& e) {
+                        if (!cform || u.uid != 0 || e.uid != 0) return false;
+                        if (e.sig == u.sig) return false;   // tier 2's business
+                        const auto want = Census::PeekPair(cform, e.sig);
+                        return want && *want == u.sig;
+                    });
+                }
+                // 4: same place in the list, contents changed -- exactly what a
                 //    poison, a spent charge or a grindstone does. This is the
-                //    tier the whole redesign exists for.
+                //    tier the whole redesign exists for. (Was tier 3 before
+                //    the census pass above -- old logs read one lower.)
                 pass([](const UnitRef& u, const LayoutEntry& e) {
                     return u.uid == 0 && e.uid == 0 &&
                            u.xlIdx >= 0 && e.xlIdx == u.xlIdx; });
             }
-            // 4: anything left, in position order. Units that reach here are
+            // 5: anything left, in position order. Units that reach here are
             //    interchangeable as far as any evidence we have can tell, and
             //    "keep the board the player arranged" is the right answer for
             //    interchangeable things.

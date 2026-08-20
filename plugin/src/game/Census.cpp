@@ -174,6 +174,14 @@ namespace FUI::Census
         return to;
     }
 
+    std::optional<std::uint16_t> PeekPair(RE::FormID a_form,
+                                          std::uint16_t a_goneSig)
+    {
+        const auto it = g_picks.find({ a_form, a_goneSig });
+        if (it == g_picks.end()) return std::nullopt;
+        return it->second;
+    }
+
     void Take(const char* a_when)
     {
         if (!g_on) return;
