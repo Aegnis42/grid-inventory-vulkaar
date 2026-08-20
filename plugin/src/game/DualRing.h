@@ -40,6 +40,12 @@ namespace FUI::DualRing
     // the carrier: everything above the game layer -- doll, tooltips,
     // transfers -- wants the item the player thinks they are wearing.
     [[nodiscard]] RE::TESObjectARMO* Second();
+    // The carried unit's content signature (0 = plain / unknown). Captured at
+    // Wear from the list the drop resolved; the off-board accounting needs it
+    // to exclude the RIGHT unit when a player-enchanted ring has plain
+    // siblings. A router-path wear (no list resolved yet) records 0, which is
+    // correct for every vanilla ring -- their enchant lives on the FORM.
+    [[nodiscard]] std::uint16_t SecondSig();
 
     // ★The carrier is not the player's property. Hide it exactly where the
     // costume anchors are hidden -- grid, doll, capacity, tooltips, transfers.

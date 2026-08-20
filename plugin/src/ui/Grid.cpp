@@ -1618,6 +1618,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     out.push_back(std::move(t));
                 }
             }
+            // ★THE SECOND RING. Its unit stands in the PACK while a carrier
+            // wears its effect, so no worn list ever names it -- the stackable
+            // branch subtracts it by hand (wornUnits += 1) but the GEAR walk
+            // had no idea, listed it, and a pair of enchanted rings drew three
+            // tiles for two units (user report: "복사된 걸로 보인다"). One
+            // off-board unit, form-level identity: the carrier records only
+            // the FORM, and the units it can stand in for are interchangeable
+            // to the effect rule anyway. mayBeWorn=false -- the body never
+            // wears this unit, so it must not consume a worn list.
+            if (auto* second = DualRing::Second();
+                second && FormKey(second) == a_base) {
+                OffBoardUnit r;
+                r.base = a_base;
+                r.sig  = DualRing::SecondSig();   // 0 for every vanilla ring
+                r.why  = "ring2";
+                out.push_back(std::move(r));
+            }
             return out;
         }
 
@@ -11159,14 +11176,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                Equip::WornCountAt(g_slotTarget)),
                            swapSameForm);
             }
-            // ★No tail rebuild any more. The !rbdrop interrogation measured
-            // every doll-drop shape without it: plain equips, swaps, same-form
-            // swaps, stackables, potions and tomes were all fine -- the carry
-            // had already left the board at lift, so there was nothing for a
-            // full rebuild to draw. The one real job it had (drawing the
-            // DualRing carrier's stand-down, which has no engine unequip
-            // event) moved into DualRing::TakeOff itself, where every caller
-            // gets it (rule 6).
+            // ★No tail rebuild for ACCEPTED drops. The !rbdrop interrogation
+            // measured every accepted shape without it: plain equips, swaps,
+            // same-form swaps, stackables, potions and tomes were all fine --
+            // the carry had already left the board at lift, so there was
+            // nothing for a full rebuild to draw. The carrier's stand-down
+            // moved into DualRing::TakeOff itself (rule 6).
+            // ★★A REJECTED drop is the case the interrogation never ran: the
+            // carry is consumed either way (g_held.reset above), the layout
+            // entry is intact, and the only thing that ever put the tile back
+            // on screen was this rebuild -- without it a refused ring vanished
+            // until the next reopen (user report). The reject path keeps it.
+            if (!accepted) RequestRebuild();
             return true;
         }
 

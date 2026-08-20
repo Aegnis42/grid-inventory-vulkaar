@@ -1,6 +1,7 @@
 #include "ui/Wheeler.h"
 
 #include "game/Costume.h"
+#include "game/DualRing.h"
 #include "ui/Equip.h"
 #include "ui/Fallback.h"
 #include "ui/IconCache.h"
@@ -1183,9 +1184,16 @@ namespace FUI::Wheeler
                     if (const auto* xu = star->GetByType<RE::ExtraUniqueID>()) {
                         starUid = xu->uniqueID;
                     }
+                    // ★"worn" includes the SECOND RING: a carrier wears its
+                    // effect while the ring stands in the pack, so IsWorn says
+                    // no -- and the wheel then showed no check mark and
+                    // offered equip instead of unequip for a ring plainly on
+                    // the doll (user report).
+                    const bool wornHere = entry->IsWorn() ||
+                                          DualRing::Second() == obj;
                     g_fav[g_favN] = { obj, obj, FavKind::kItem,
                                       Grid::InstanceSigOf(star), -1,
-                                      data.first, entry->IsWorn(), starUid };
+                                      data.first, wornHere, starUid };
                     ++g_favN;   // one tile per form: a starred pool is one thing
                 }
             }
@@ -1917,6 +1925,14 @@ namespace FUI::Wheeler
             // ★Reads the snapshot, so it lags a rebuild at most -- a third of a
             // second, and the alternative is walking the inventory per click.
             if (a_list[a_slot].worn) {
+                // ★The second ring is not ENGINE-worn -- a carrier stands in
+                // for it -- so the engine unequip below is a no-op for it.
+                // The carrier's own gate does the whole job (sound, redraw).
+                if (auto* armo = obj->As<RE::TESObjectARMO>();
+                    armo && DualRing::Second() == armo) {
+                    DualRing::RequestTakeOff();
+                    return;
+                }
                 Equip::UnequipItem(obj, a_list[a_slot].uid, a_list[a_slot].sig,
                                    a_leftHand ? 2 : 0, a_list[a_slot].count);
                 return;

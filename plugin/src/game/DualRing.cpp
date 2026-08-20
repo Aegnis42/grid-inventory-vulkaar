@@ -22,8 +22,9 @@ namespace FUI::DualRing
         constexpr std::uint32_t kCarrierId = 0x84A;
         constexpr const char*   kPlugin    = "Grid Inventory.esp";
 
-        RE::FormID g_ringId  = 0;      // the ring the carrier stands in for
-        bool       g_wantOff = false;  // take-off asked for from the render pass
+        RE::FormID    g_ringId  = 0;   // the ring the carrier stands in for
+        std::uint16_t g_ringSig = 0;   // its content signature (see SecondSig)
+        bool          g_wantOff = false;  // take-off asked for from the render pass
 
         // ★What the carrier borrowed, so it can be handed back. The carrier is
         // OUR form and no other actor wears it, so this is bookkeeping rather
@@ -151,6 +152,8 @@ namespace FUI::DualRing
 
     RE::TESObjectARMO* Second() { return RingById(g_ringId); }
 
+    std::uint16_t SecondSig() { return g_ringSig; }
+
     bool WouldDuplicate(RE::TESObjectARMO* a_ring)
     {
         auto* second = RingById(g_ringId);
@@ -272,6 +275,7 @@ namespace FUI::DualRing
         em->EquipObject(p, c, nullptr, 1, nullptr, false, false, false, true);
 
         g_ringId = a_ring->GetFormID();
+        g_ringSig = Grid::InstanceSigOf(a_xl);   // nullptr -> 0 (plain)
         // ★The carrier bypasses the engine's equip of the RING itself, which
         // is where the vanilla equip sound lives -- so the second slot wore
         // rings in total silence (user report). The pickup clink is the same
@@ -280,7 +284,6 @@ namespace FUI::DualRing
         SKSE::log::info("[DUALRING] second ring '{}' on slot {} (0x{:08X}), ench '{}'",
             NameOf(a_ring), slot + 30, mask,
             a_ring->formEnchanting ? NameOf(a_ring->formEnchanting) : "none");
-        (void)a_xl;
         return true;
     }
 
@@ -310,6 +313,7 @@ namespace FUI::DualRing
         Grid::RequestRebuild();
         SKSE::log::info("[DUALRING] second ring '{}' removed", NameOf(ring));
         g_ringId = 0;
+        g_ringSig = 0;
     }
 
     void RequestTakeOff() { g_wantOff = true; }
