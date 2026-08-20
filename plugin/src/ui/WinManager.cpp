@@ -334,7 +334,9 @@ namespace FUI
                 Grid::SetRebuildTrace(rest == "1" || rest == "true");
                 continue;
             }
-            // 1.4 / B2: request ledger. See Ledger.h.
+            // Request ledger -- ON BY DEFAULT since its promotion to permanent
+            // wiring; this line is the escape hatch ("!ledger = 0"), kept for
+            // bisecting reports. See Ledger.h.
             if (key == "!ledger") {
                 Ledger::SetEnabled(rest == "1" || rest == "true");
                 continue;
@@ -791,7 +793,10 @@ namespace FUI
         if (Grid::SimDrift())  out << "!simdrift = 1\n";
         if (DeltaWatch::Enabled()) out << "!delta = 1\n";
         if (Census::Enabled())     out << "!census = 1\n";
-        if (Ledger::Enabled())     out << "!ledger = 1\n";
+        // ★Inverted since the ledger's promotion: ON is the default, so the
+        // line is written only while OFF -- the escape hatch survives a
+        // restart, and an ordinary install still carries no line.
+        if (!Ledger::Enabled())    out << "!ledger = 0\n";
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
         out << "!caplight = " << Theme::CaptureLightAz()

@@ -8,7 +8,14 @@ namespace FUI::Ledger
 {
     namespace
     {
-        bool g_on = false;
+        // ★Promoted to PERMANENT WIRING (was B2 observation, "!ledger = 1").
+        // The two-phase slot drop's confirm half only runs through this, so a
+        // default-off ledger left gear cells to the rebuild prune and let
+        // trash-parked gear leak layout entries forever (REVIEW §E-2 -- "the
+        // middle state is the worst of both"). The escape hatch remains:
+        // "!ledger = 0" in the ini disables it for a session, for bisecting a
+        // report -- never for shipping.
+        bool g_on = true;
 
         // ★Events arrive on arbitrary threads (B0 saw five), so Confirm can be
         // called from anywhere while Submit/Tick run on the main thread.
@@ -50,7 +57,10 @@ namespace FUI::Ledger
     void SetEnabled(bool a_on)
     {
         g_on = a_on;
-        if (a_on) logger::info("[LEDGER] request ledger ON (B2)");
+        // ON is the default and not worth a line; OFF is the unusual state
+        // and the log has to say the safety net is gone.
+        if (!a_on) logger::warn("[LEDGER] ★request ledger DISABLED (!ledger = 0) "
+                                "-- slot drops fall back to the rebuild prune");
     }
 
     void SetOnExpire(ExpireFn a_fn) { g_onExpire = a_fn; }
@@ -162,6 +172,10 @@ namespace FUI::Ledger
 
     bool SimRefuse()
     {
+        // ★Gated on the ledger: without it the request is never on the books,
+        // so skipping the engine call would have NO recovery path at all --
+        // that is a state the game cannot produce (§10-7), not a test.
+        if (!g_on) return false;
         std::lock_guard lk(g_mtx);
         if (g_simRefuse <= 0) return false;
         --g_simRefuse;
@@ -173,6 +187,13 @@ namespace FUI::Ledger
     {
         std::lock_guard lk(g_mtx);
         g_simRefuse = a_count;
+        if (a_count > 0 && !g_on) {
+            logger::warn("[LEDGER] !simrefuse ignored -- the ledger is disabled "
+                         "(!ledger = 0) and a refusal without a ledger entry has "
+                         "no recovery path");
+            g_simRefuse = 0;
+            return;
+        }
         if (a_count > 0) {
             logger::warn("[LEDGER] ★!simrefuse = {} -- the next {} store request(s) "
                          "will NOT reach the engine", a_count, a_count);
@@ -181,7 +202,8 @@ namespace FUI::Ledger
 
     void Reset(const char* a_why)
     {
-        if (!g_on) return;
+        // Unconditional: clearing an empty ledger is free, and a boundary
+        // reset that depends on a switch is rule 6's next victim.
         std::lock_guard lk(g_mtx);
         g_open.clear();
         g_landed.clear();

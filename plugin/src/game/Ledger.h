@@ -3,7 +3,11 @@
 #include <cstdint>
 #include <string>
 
-// 1.4 / B2 — the request ledger.
+// 1.4 / B2 — the request ledger. ★PERMANENT WIRING since the A-section
+// repairs: on by default, because the two-phase slot drop (B3-b) completes
+// only through Confirm/Expire -- a default-off ledger left the commit half
+// ownerless. "!ledger = 0" is a per-session escape hatch for bisecting a
+// report, never a shipping configuration.
 //
 // Every ask we make of the engine is written down here BEFORE the call, and
 // struck off when the engine's event confirms it. This is condition (A) of
@@ -101,6 +105,9 @@ namespace FUI::Ledger
     // Arms N refusals. Each call returns true once and decrements, and the
     // caller then SKIPS its engine call while the request stays on the books --
     // so no confirmation can ever arrive and the expiry path runs for real.
+    // ★Refuses to arm while the ledger is disabled ("!ledger = 0"): a skipped
+    // engine call with no ledger entry has no recovery path, which is a state
+    // the game cannot produce (§10-7).
     //
     // ★Why this has to exist: B2 measured ZERO refusals over two sessions, and
     // the reason is that our own pre-checks (WouldOverflow, the follower cap,
