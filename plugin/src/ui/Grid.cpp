@@ -7487,6 +7487,28 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
     }
 
+    void ReleaseLandedPendingEquip(RE::FormID a_form)
+    {
+        // ★An UNEQUIP event for a form whose equip already LANDED closes that
+        // record's whole story: the unit arrived on the body and has now left
+        // it, so the suppression has nothing more to suppress. Without this,
+        // a rapid same-form swap run left landed records whose worn lists
+        // were gone before the match-release saw them -- and the record then
+        // hid an innocent unit until a sweep that (after B4-1) might never
+        // run. Oldest landed entry of the form, one per event, same FIFO
+        // discipline as everything else the events drive.
+        auto* form = RE::TESForm::LookupByID(a_form);
+        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+        if (!obj) return;
+        const std::string base = FormKey(obj);
+        for (auto it = g_pendingEquip.begin(); it != g_pendingEquip.end(); ++it) {
+            if (it->base == base && it->landed) {
+                g_pendingEquip.erase(it);
+                return;
+            }
+        }
+    }
+
     void NoteEquipLanded(RE::FormID a_form)
     {
         // B4-2c: the engine's own confirm, one event landing one entry --
@@ -12061,6 +12083,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
     void FinishFrame()
     {
+        // ★The pending-equip TTL, freed from Rebuild. Both sweeps for a stuck
+        // entry (this TTL and the applied-erase) lived inside Rebuild -- and
+        // B4-1's quiet open means an idle board may never rebuild again, so a
+        // record orphaned by a rapid swap run (its equip landed, its unit was
+        // unequipped again, its worn list vanished before the match-release
+        // could fire) hid a unit for the rest of the session (measured:
+        // engine=2 worn=0 off=[equipping] drawn=1, held for good). The sweep
+        // belongs to the frame, not to the rebuild that may never come.
+        if (!g_pendingEquip.empty() &&
+            std::chrono::steady_clock::now() - g_pendingEquipWhen > kPendingEquipTTL) {
+            SKSE::log::warn("[GRID] pending equip expired ({} units) -- releasing"
+                            " (frame sweep)", g_pendingEquip.size());
+            g_pendingEquip.clear();
+            RequestRebuild();
+        }
         if (g_held) {
             auto& held = *g_held;
             DrawHeldCursorIcon(held);

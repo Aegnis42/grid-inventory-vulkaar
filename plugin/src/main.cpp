@@ -208,6 +208,10 @@ namespace
                         // unequip, including the engine's own slot-conflict
                         // removals -- the case our equip code never sees.
                         FUI::WornLedger::OnUnequip(fid);
+                        // B4-4: a landed equip record's story ends at the
+                        // unequip -- retire it before the partial reconcile
+                        // reads the exclusions.
+                        FUI::Grid::ReleaseLandedPendingEquip(fid);
                         if (!FUI::Grid::OnFormDelta(fid)) {
                             FUI::Grid::RequestRebuild();
                         }
@@ -1054,7 +1058,8 @@ namespace
                 on = !val.empty() && val[0] != '0';
             }
             key.erase(0, key.find_first_not_of(" 	"));
-            if (const auto e = key.find_last_not_of(" 	"); e != std::string::npos) {
+            if (const auto e = key.find_last_not_of(" 	
+"); e != std::string::npos) {
                 key.erase(e + 1);
             } else {
                 continue;

@@ -291,6 +291,11 @@ namespace FUI::Grid
     // This is the worn-clock's authority now; called from the sink's task.
     void NoteEquipLanded(RE::FormID a_form);
 
+    // ★...and its closing half: an unequip event retires the oldest LANDED
+    // entry of the form -- arrived and left again, story over. See the
+    // implementation note for the rapid-swap orphan it prevents.
+    void ReleaseLandedPendingEquip(RE::FormID a_form);
+
     // Capacity system: true when a_obj could be added right now — it stacks
     // onto an existing tile, or its footprint first-fits into the HARD
     // 10 x 14 main board after every current occupant placed (bag-assigned
