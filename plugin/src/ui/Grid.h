@@ -350,6 +350,11 @@ namespace FUI::Grid
     void NotePendingRemove(RE::TESBoundObject* a_obj, const std::string& a_key,
                            int a_count, int a_xlIdx = -1);
     void ClearAllPendingRemoves();
+
+    // ★B4-4: take one tile off the display -- the ring router's partial exit
+    // (its tail rebuild repainted the swap window for one tile's removal).
+    // The layout half is ForgetTile's, called by rule 13 at the same site.
+    void DropTileDisplay(const std::string& a_key, RE::TESBoundObject* a_obj);
     // B2: expire the partner-drop placement hint (qty slider cancelled/closed)
     void ClearDropHint();
 

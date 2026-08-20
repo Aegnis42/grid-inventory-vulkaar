@@ -1012,7 +1012,9 @@ namespace FUI::Equip
                     if (toSecond && DualRing::Wear(ringIn, nullptr)) {
                         Grid::ForgetTile(act.srcKey);   // rule 13, same as the drop path
                         Grid::NoteFormSeen(obj);
-                        Grid::RequestRebuild();
+                        // B4-4: one tile's exit, not a repaint (see the ringL
+                        // branch below -- same window, same reason)
+                        Grid::DropTileDisplay(act.srcKey, obj);
                         SKSE::log::info("[EQUIP] '{}' -> second ring slot (routed)",
                             obj->GetName());
                         continue;
@@ -1150,7 +1152,12 @@ namespace FUI::Equip
                         // unlike every other piece of gear in the inventory.
                         Grid::ForgetTile(act.srcKey);
                     }
-                    Grid::RequestRebuild();
+                    // ★B4-4: one tile's exit, not a repaint -- the tail
+                    // rebuild here ran in the middle of the ring2 exclusion
+                    // handoff (the deferred blink's window). The doll-drop
+                    // path removed the display at lift, so this is a no-op
+                    // there; the router path drops its tile now.
+                    Grid::DropTileDisplay(act.srcKey, obj);
                     continue;
                 }
             }

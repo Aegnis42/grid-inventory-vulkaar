@@ -3848,7 +3848,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 a_obj->GetName(), a_hand, a_uid, a_sig, g_held->key);
         }
         if (g_sound) g_sound(a_obj, true);
-        RequestRebuild();
+        // ★B4-4: a CARRIER lift changes nothing the board draws -- the unit
+        // was never on it (carrier-worn, ring2-excluded) and its exclusion
+        // hands off to `held` without a gap. The redraw here was one of the
+        // frames painted mid-handoff in the ring swap window (the deferred
+        // blink's habitat). An engine-worn lift keeps its redraw: the
+        // parked-star bookkeeping (GI30/31) still draws through it.
+        if (!a_fromCarrier) RequestRebuild();
     }
 
     void BeginPartnerCarry(RE::TESBoundObject* a_obj, int a_count, int a_value,
@@ -7069,6 +7075,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (obj->IsGold() || GoldCoins::IsCoinForm(a_form)) {
             return decline("coin mirror");
         }
+        // ★B4-4: a form the board NEVER SHOWS is a full answer, not a
+        // decline. The ring carrier, the costume anchors and non-playable
+        // scripting copies move containers and fire equip events like
+        // anything else -- and every one of those used to fall through to
+        // "decline -> full rebuild": three rebuilds per ring swap for a form
+        // with no tile anywhere (log-measured; that window is the deferred
+        // ring blink's habitat). SkipInventoryEntry is the board's own door
+        // policy, so the same rules decide here.
+        {
+            const char* nm = obj->GetName();
+            if (!obj->GetPlayable() || Costume::IsAnchor(obj) ||
+                DualRing::IsCarrier(obj) || !nm || !*nm) {
+                SKSE::log::info("[B3] partial add ({:08X}): board-invisible "
+                                "form -- nothing to do", a_form);
+                return true;
+            }
+        }
         const GridDef gdef = g_resolver ? g_resolver(obj) : GridDef{};
         if (gdef.bag != 0) return decline("bag form (window wiring)");
         const int cap = EffectiveCap(obj, gdef);
@@ -7432,6 +7455,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 a_obj->GetName(), a_key);
             return true;
         }
+    }
+
+    void DropTileDisplay(const std::string& a_key, RE::TESBoundObject* a_obj)
+    {
+        // ★B4-4: one tile leaves the DISPLAY, nothing else -- the ring
+        // router's replacement for its tail rebuild. Rule 13 (ForgetTile)
+        // already handled the layout at the call site; a key that is not
+        // displayed (the doll-drop path removed it at lift) is a no-op, which
+        // is exactly what lets both ring paths share this line. Runs from
+        // Tick, before the frame draws -- no deferral needed.
+        (void)TryUseClickPartialRemove(a_key, a_obj,
+                                       (std::numeric_limits<int>::max)(),
+                                       /*a_drained=*/false);
     }
 
     int GoldAmount()
