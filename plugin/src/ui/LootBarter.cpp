@@ -606,6 +606,35 @@ namespace FUI::LootBarter
         }
     }
 
+    namespace
+    {
+        // ★B4-3b: a struck queue withdraws its ledger entries. Outgoing
+        // requests submit at COMMIT time now (RequestStore/Sell/PickStore),
+        // so anything still queued when the queue is cleared -- a lost
+        // pickpocket roll force-closing the menu, a teardown whose flush
+        // failed -- holds an open entry that no event will ever confirm.
+        // Left alone they only expire noisily (the recovery is harmless),
+        // but a cancelled request's SLOT KEY must come back deliberately:
+        // queued, it would be consumed by the form's next confirmation --
+        // the bug the two-phase drop exists to prevent. Entries already
+        // processed this Tick were confirmed by their own events and match
+        // nothing here -- the cancel is naturally idempotent.
+        void CancelQueuedOutgoing(const char* a_why)
+        {
+            for (const auto& q : g_xfer) {
+                if (!q.obj) continue;
+                if (q.dir != XferReq::kStore && q.dir != XferReq::kSell &&
+                    q.dir != XferReq::kPickStore) {
+                    continue;
+                }
+                for (const auto& e :
+                     Ledger::Cancel(q.obj->GetFormID(), q.count, a_why)) {
+                    if (!e.slot.empty()) Grid::CancelSlotDrop(e.form, e.slot);
+                }
+            }
+        }
+    }
+
     void Reset()
     {
         // B12: a transfer queued on the final render frame would be dropped
@@ -616,6 +645,7 @@ namespace FUI::LootBarter
         if (!g_xfer.empty()) ProcessTransfers();
         g_mode = Mode::kNormal;
         g_partner = {};
+        CancelQueuedOutgoing("session teardown");   // B4-3b: their ledger halves
         g_xfer.clear();   // anything STILL queued (flush failed) is dropped...
         Grid::ClearAllPendingRemoves();   // ...so their pending marks must go too
         Grid::ClearDropHint();            // B2
@@ -772,9 +802,19 @@ namespace FUI::LootBarter
                       std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav,
                       int a_xlIdx, const std::string& a_srcKey)
     {
-        if (a_obj && a_count > 0)
+        if (a_obj && a_count > 0) {
             g_xfer.push_back({ XferReq::kStore, a_obj, a_count, 0, 0, a_srcKey,
                                a_uid, a_sig, false, a_fav, a_xlIdx });
+            // ★B4-3b: the ledger's books open when the PLAYER commits -- the
+            // same moment the removal counters arm (NotePendingRemove rides
+            // beside every caller of this function). Submitting from the
+            // transfer Tick put the two on different clocks, and the click-
+            // to-Tick window would go unsuppressed the day the counters are
+            // absorbed. A queue struck before its Tick (a lost pickpocket
+            // roll clears everything behind it) withdraws through Cancel.
+            Ledger::Submit(a_obj->GetFormID(), -a_count, "store", a_uid, a_sig,
+                           a_srcKey);
+        }
     }
 
     void RequestBuy(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
@@ -798,9 +838,13 @@ namespace FUI::LootBarter
                      std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav,
                      int a_xlIdx, const std::string& a_srcKey)
     {
-        if (a_obj && a_count > 0)
+        if (a_obj && a_count > 0) {
             g_xfer.push_back({ XferReq::kSell, a_obj, a_count, a_price, a_baseTotal,
                                a_srcKey, a_uid, a_sig, false, a_fav, a_xlIdx });
+            // B4-3b: see RequestStore -- the books open at the commit
+            Ledger::Submit(a_obj->GetFormID(), -a_count, "sell", a_uid, a_sig,
+                           a_srcKey);
+        }
     }
 
     void RequestPickTake(RE::TESBoundObject* a_obj, int a_count,
@@ -834,6 +878,9 @@ namespace FUI::LootBarter
             // moment the player commits, and ProcessTransfers clears it when the
             // engine count actually drops (or when the roll is lost).
             Grid::NotePendingRemove(a_obj, a_srcKey, a_count, a_xlIdx);
+            // B4-3b: see RequestStore -- the books open at the commit
+            Ledger::Submit(a_obj->GetFormID(), -a_count, "plant", a_uid, a_sig,
+                           a_srcKey);
         }
     }
 
@@ -932,11 +979,16 @@ namespace FUI::LootBarter
                     r.dir == XferReq::kPickTake  ? "steal" : "plant";
                 // ★uid+sig ride along: B0 proved the engine's events never
                 // name the unit (§8-2), so this is the only record that does.
-                // ★And the SLOT rides along for the outgoing directions (B3-b):
-                // the confirmation retires the request's own cell, no other.
-                Ledger::Submit(r.obj->GetFormID(), incoming ? r.count : -r.count,
-                               who, r.uid, r.sig,
-                               incoming ? std::string{} : r.srcKey);
+                // ★B4-3b: INCOMING only. The outgoing directions submit where
+                // the player commits (RequestStore/Sell/PickStore), the same
+                // moment their suppression arms -- submitting them here put
+                // the ledger and the removal counters on different clocks.
+                // An arrival has no click-time suppression and its engine
+                // call is this very Tick, so here stays its moment.
+                if (incoming) {
+                    Ledger::Submit(r.obj->GetFormID(), r.count, who,
+                                   r.uid, r.sig, {});
+                }
             }
             switch (r.dir) {
             case XferReq::kTake: {
@@ -1092,6 +1144,7 @@ namespace FUI::LootBarter
                     // request and the ones still queued behind it armed.
                     g_outPool.clear();
                     g_outForm.clear();
+                    CancelQueuedOutgoing("pickpocket caught");   // B4-3b
                     g_xfer.clear();
                     UIRoot::Close();
                     Grid::RequestRebuild();
@@ -1168,6 +1221,9 @@ namespace FUI::LootBarter
                             Grid::ClearPendingRemove(q.obj, q.count);
                         }
                     }
+                    // B4-3b: r rides in g_xfer too -- its own entry cancels
+                    // with the queue's in one sweep
+                    CancelQueuedOutgoing("pickpocket roll lost");
                     g_xfer.clear();
                     UIRoot::Close();
                     Grid::RequestRebuild();

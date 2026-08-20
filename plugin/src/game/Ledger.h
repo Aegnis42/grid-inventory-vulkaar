@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <vector>
 
 // 1.4 / B2 — the request ledger. ★PERMANENT WIRING since the A-section
 // repairs: on by default, because the two-phase slot drop (B3-b) completes
@@ -95,6 +96,17 @@ namespace FUI::Ledger
     // queue, never by the removal counters, so counting it here would report
     // a divergence that is really a difference in jurisdiction.
     [[nodiscard]] std::map<std::uint32_t, int> OpenOutgoing();
+
+    // ★B4-3b: withdraw open OUTGOING entries of a form -- the rollback
+    // flavour, for requests struck from the queue before their engine call
+    // ever ran (a lost pickpocket roll force-closes the menu and clears
+    // everything queued behind it). Oldest first, up to a_count units,
+    // "use" excluded as everywhere. Returns what was withdrawn so the CALLER
+    // can release each entry's slot key (Grid::CancelSlotDrop): a cancelled
+    // request whose key stayed queued would be consumed by the form's next
+    // confirmation -- the exact bug the two-phase drop exists to prevent.
+    [[nodiscard]] std::vector<Expired> Cancel(std::uint32_t a_form, int a_count,
+                                              const char* a_why);
 
     // One frame passed. Ages the outstanding requests and expires the stale.
     void Tick();

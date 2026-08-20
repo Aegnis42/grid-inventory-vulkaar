@@ -139,6 +139,43 @@ namespace FUI::Ledger
         return out;
     }
 
+    std::vector<Expired> Cancel(std::uint32_t a_form, int a_count, const char* a_why)
+    {
+        std::vector<Expired> out;
+        if (!g_on || a_count <= 0) return out;
+        std::lock_guard lk(g_mtx);
+        int left = a_count;
+        for (auto it = g_open.begin(); it != g_open.end() && left > 0;) {
+            if (it->form != a_form || it->delta >= 0 ||
+                (it->who && std::strcmp(it->who, "use") == 0)) {
+                ++it;
+                continue;
+            }
+            const int units = -it->delta;
+            const int take = (std::min)(units, left);
+            Expired e;
+            e.form  = it->form;
+            e.delta = -take;
+            e.who   = it->who;
+            e.uid   = it->uid;
+            e.sig   = it->sig;
+            e.slot  = it->slot;
+            out.push_back(std::move(e));
+            left -= take;
+            if (take == units) {
+                it = g_open.erase(it);
+            } else {
+                it->delta += take;   // partial: the rest of the request stands
+                ++it;
+            }
+        }
+        if (!out.empty()) {
+            logger::info("[LEDGER] cancelled {} entr{} of {:08X} ({})",
+                out.size(), out.size() == 1 ? "y" : "ies", a_form, a_why);
+        }
+        return out;
+    }
+
     void Tick()
     {
         if (!g_on) return;
