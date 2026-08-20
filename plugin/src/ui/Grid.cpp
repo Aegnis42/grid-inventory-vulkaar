@@ -327,29 +327,14 @@ namespace FUI::Grid
         // bought item can't claim the freed cells (it spills to a bag instead).
         int  g_paidGold = 0;
 
-        // Phase 7: sold/stored units whose ENGINE removal is still queued on
-        // the transfer Tick (mirror of the coins' pending-drop pattern). The
-        // rebuild subtracts these immediately so the interim frame doesn't
-        // re-seat the outgoing units as a fresh pickup. WHICH tile they leave
-        // is not tracked here: NotePendingRemove decrements that tile's
-        // remembered quantity in g_layout at confirm time (in-place removal).
-        std::unordered_map<RE::FormID, int> g_pendingRemoveForm;
-        // B3: pending entries must not outlive a FAILED engine removal — a
-        // transfer that never lands would keep the form under-counted and the
-        // tile invisible until the menu closed. Every entry carries a stamp;
-        // Rebuild expires stale ones (safety net, not the normal path).
-        std::unordered_map<RE::FormID, std::chrono::steady_clock::time_point>
-                                            g_pendingRemoveWhen;
-        constexpr std::chrono::seconds      kPendingRemoveTTL{ 3 };
-
-        // GI22: ...and WHICH pool they are leaving from. The form-level counter
-        // above only says "one iron dagger is on its way out"; the walk then
-        // dropped a unit from whichever pool it reached first (plain, always).
-        // So storing the TEMPERED dagger deducted a PLAIN one instead: the plain
-        // pool lost a slot it still needed, and the tempered unit -- whose own
-        // slot NotePendingRemove had already erased -- came back as a fresh
-        // arrival and first-fit into the front gap on its way out the door.
-        std::map<std::string, int>          g_pendingRemovePool;
+        // ★B4-3c: the pending-removal counters that lived here for three
+        // versions -- g_pendingRemoveForm / Pool / Xl and their TTL stamps,
+        // rule 5's "traces in many places" -- are ABSORBED into the request
+        // ledger. Every reader asks Ledger::OpenOutgoingOf/Count now: the
+        // entry carries the same uid/sig the pool prefix used to encode, the
+        // slot key for the two-phase drop, and one frame-count expiry instead
+        // of a parallel TTL. Measured to agree across two submit phases (28
+        // boundary audits, zero mismatches) before the counters went.
         // ★B3-b: gear slots whose drop is waiting on the engine's answer. FIFO
         // per form; CommitSlotDrop erases them, CancelSlotDrop lets them live.
         std::unordered_map<RE::FormID, std::vector<std::string>> g_pendingSlotDrop;
@@ -376,16 +361,7 @@ namespace FUI::Grid
             return f + ":" + std::to_string(a_w.line());
         }
 
-        // *THE LIST POSITIONS behind those counts, per pool, in the order they
-        // were queued. The pool name is a crowd (three separately tempered
-        // daggers hash to one pool) and the count alone cannot say WHICH of
-        // them is leaving -- so a signature that moves while the removal is in
-        // flight leaves the exclusion with nothing to match. The position of a
-        // unit inside the entry cannot move when the numbers inside it do, so
-        // it is the handle that still points at the right unit. -1 entries mean
-        // "the caller did not know", which is the historical behaviour.
-        std::map<std::string, std::vector<int>> g_pendingRemoveXl;
-        // ...and the same for a tile PARKED IN THE TRASH, whose unit is still
+        // ...list position of a tile PARKED IN THE TRASH, whose unit is still
         // owned but occupies no cell. Runtime only: after a load the
         // signatures are stable again and the strict match is enough.
         std::map<std::string, int>          g_trashXl;
@@ -1601,22 +1577,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             for (const std::uint16_t sg : Loadout::ReservedSigs(a_obj->GetFormID())) {
                 out.push_back({ a_base, 0, sg, "reserved" });
             }
-            // engine removal queued (sold / stored / dropped), per pool
-            for (const auto& [pool, n] : g_pendingRemovePool) {
-                if (BaseKey(pool) != a_base) continue;
-                // ...with the list position the caller knew, so a signature
-                // that moves while the removal is in flight still matches
-                const auto xi = g_pendingRemoveXl.find(pool);
-                for (int i = 0; i < n; ++i) {
-                    const int xl = (xi != g_pendingRemoveXl.end() &&
-                                    i < static_cast<int>(xi->second.size()))
-                                       ? xi->second[i] : -1;
+            // engine removal queued (sold / stored / dropped) -- read from the
+            // LEDGER since B4-3c: the request's own record, uid and sig
+            // included (rule 2: the request is the only thing that knows the
+            // unit). ★The list position no longer rides -- PLAN §7's rule,
+            // identity carries over and coordinates are dropped. The xlIdx
+            // tier this forfeits covered one shape: a signature drifting
+            // DURING a removal window frames long; the sig and plain tiers
+            // below answer everything else, and the audit rounds (18+10, two
+            // phases) never caught the books apart.
+            for (const auto& e : Ledger::OpenOutgoingOf(a_obj->GetFormID())) {
+                for (int i = 0; i < -e.delta; ++i) {
                     OffBoardUnit r;
                     r.base  = a_base;
-                    r.uid   = dU(UidOf(pool));
-                    r.sig   = dS(SigOf(pool));
+                    r.uid   = dU(e.uid);
+                    r.sig   = dS(e.sig);
                     r.why   = "removing";
-                    r.xlIdx = xl;
+                    r.xlIdx = -1;
                     out.push_back(std::move(r));
                 }
             }
@@ -4166,9 +4143,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     a_signedOut += n;
                 }
             }
+            // B4-3c: the queued removals, per pool, from the ledger -- the
+            // entry's own uid/sig name the pool the way the slot key used to
+            std::map<std::string, int> removing;
+            if (a_entry && a_entry->object) {
+                for (const auto& e :
+                     Ledger::OpenOutgoingOf(a_entry->object->GetFormID())) {
+                    removing[PoolPrefix(a_base, e.uid, e.sig)] += -e.delta;
+                }
+            }
             for (auto& [p, n] : pools) {
-                if (const auto pi = g_pendingRemovePool.find(p);
-                    pi != g_pendingRemovePool.end()) {
+                if (const auto pi = removing.find(p); pi != removing.end()) {
                     const int gone = (std::min)(n, pi->second);
                     n -= gone;
                     a_signedOut -= gone;   // ...so the plain remainder gets it back
@@ -4570,16 +4555,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // GI22: hide the units that are on their way out -- from the pools
             // they actually left. Whatever the caller could not account for
             // (console removals) comes off the plain pool first, then the rest.
+            // B4-3c: read from the ledger -- the entry's uid/sig name the pool
+            // the way the slot key's prefix used to.
             int surplus = static_cast<int>(refs.size()) - a_units;
             std::map<std::string, int> hide;
-            for (auto& [prefix, members] : pools) {
-                if (surplus <= 0) break;
-                const auto pi = g_pendingRemovePool.find(prefix);
-                if (pi == g_pendingRemovePool.end()) continue;
-                const int t = (std::min)({ surplus, pi->second,
-                                           static_cast<int>(members.size()) });
-                hide[prefix] += t;
-                surplus -= t;
+            if (surplus > 0 && a_entry && a_entry->object) {
+                std::map<std::string, int> removing;
+                for (const auto& e :
+                     Ledger::OpenOutgoingOf(a_entry->object->GetFormID())) {
+                    removing[PoolPrefix(a_base, e.uid, e.sig)] += -e.delta;
+                }
+                for (auto& [prefix, members] : pools) {
+                    if (surplus <= 0) break;
+                    const auto pi = removing.find(prefix);
+                    if (pi == removing.end()) continue;
+                    const int t = (std::min)({ surplus, pi->second,
+                                               static_cast<int>(members.size()) });
+                    hide[prefix] += t;
+                    surplus -= t;
+                }
             }
             // L1/D4-b: an inactive preset holds ONE SPECIFIC unit. Take it from
             // the pool it actually belongs to, before the generic rule below --
@@ -4967,10 +4961,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // removal is still queued leave the sim NOW — else the gates
                 // model a fuller board than the display for a frame (pickup
                 // wrongly bounced / buy clamp too small / overload flicker)
-                if (const auto pit = g_pendingRemoveForm.find(obj->GetFormID());
-                    pit != g_pendingRemoveForm.end()) {
-                    units -= pit->second;
-                }
+                units -= Ledger::OpenOutgoingCount(obj->GetFormID());   // B4-3c
                 const std::string baseKey = FormKey(obj);
                 // F2: units parked in the trash occupy no board space — the
                 // deletion buffer must not count against capacity/overload
@@ -5345,10 +5336,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // Phase 7: units sold/stored whose engine removal is still queued
                 // leave the board NOW (pending-drop pattern) — else the interim
                 // rebuild re-seats them as a fresh pickup at the front.
-                if (const auto pit = g_pendingRemoveForm.find(obj->GetFormID());
-                    pit != g_pendingRemoveForm.end()) {
-                    units -= pit->second;
-                }
+                units -= Ledger::OpenOutgoingCount(obj->GetFormID());   // B4-3c
                 // ---- units in transit (stackables) -----------------------------
                 // This branch knew only about `carried`, `reserved` and queued
                 // removals -- none of the mid-transition machinery the gear branch
@@ -6143,11 +6131,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     }
                     const int wornN = wornUnits;
                     const int rsv = Loadout::ReservedCount(obj->GetFormID());
-                    int rm = 0;
-                    if (const auto p = g_pendingRemoveForm.find(obj->GetFormID());
-                        p != g_pendingRemoveForm.end()) {
-                        rm = p->second;
-                    }
+                    const int rm = Ledger::OpenOutgoingCount(obj->GetFormID());   // B4-3c
                     const int total = drawn + wornN + rsv + rm + carried;
                     if (total != count) {
                         SKSE::log::warn("[CHECK] {} STACK MISMATCH engine={} drawn={} "
@@ -6920,28 +6904,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_pendingEquip.clear();
         }
         {
-            const auto now = std::chrono::steady_clock::now();
-            for (auto it = g_pendingRemoveWhen.begin(); it != g_pendingRemoveWhen.end();) {
-                if (now - it->second > kPendingRemoveTTL) {
-                    if (auto pf = g_pendingRemoveForm.find(it->first);
-                        pf != g_pendingRemoveForm.end()) {
-                        SKSE::log::warn("[GRID] pending remove expired: form {:08X} x{}",
-                            it->first, pf->second);
-                        g_pendingRemoveForm.erase(pf);
-                        if (auto* f = RE::TESForm::LookupByID(it->first)) {   // GI22
-                            const std::string base = FormKey(f->As<RE::TESBoundObject>());
-                            for (auto pi = g_pendingRemovePool.begin();
-                                 pi != g_pendingRemovePool.end();) {
-                                pi = BaseKey(pi->first) == base
-                                         ? g_pendingRemovePool.erase(pi) : std::next(pi);
-                            }
-                        }
-                    }
-                    it = g_pendingRemoveWhen.erase(it);
-                } else {
-                    ++it;
-                }
-            }
+            // ★B4-3c: the counter TTL sweep that lived here is gone with the
+            // counters -- the ledger's own frame-count expiry (OnRequestExpired)
+            // is the one timeout, and it already drives the recovery.
             // ★B3-b housekeeping: a queued slot key whose layout entry is gone
             // is a dead letter -- the cell it named was already erased or
             // pruned, so neither Commit nor Cancel has anything left to do.
@@ -7158,7 +7123,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             for (const auto& u : g_pendingEquip) {
                 if (u.base == baseKey) return decline("equip in flight");
             }
-            if (g_pendingRemoveForm.contains(a_form)) return decline("removal in flight");
+            if (Ledger::OpenOutgoingCount(a_form) > 0) return decline("removal in flight");   // B4-3c
             if (Loadout::ReservedCount(a_form) > 0) return decline("reserved");
             if (TrashedUnits(baseKey) > 0) return decline("trash parked");
             if (DualRing::Second() == obj) return decline("dual ring");
@@ -7926,15 +7891,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // funnels through here WITH its tile key -- name the leaving pouch
         // for the container sink, whose event only carries the form.
         if (GoldCoins::IsPouch(fid) && !a_key.empty()) GoldCoins::NotePouchLeaving(a_key);
-        g_pendingRemoveForm[fid] += a_count;
-        g_pendingRemoveWhen[fid] = std::chrono::steady_clock::now();   // B3
-        if (!a_key.empty()) g_pendingRemovePool[PoolOfSlot(a_key)] += a_count;   // GI22
-        // ...and remember WHICH unit, when the caller knew. One entry per
-        // outgoing unit so the counts and the positions stay in step.
-        if (!a_key.empty()) {
-            auto& xs = g_pendingRemoveXl[PoolOfSlot(a_key)];
-            for (int i = 0; i < a_count; ++i) xs.push_back(a_xlIdx);
-        }
+        // ★B4-3c: the form/pool/position counters that used to arm here are
+        // GONE -- the request ledger is the one set of books now. Every
+        // caller submits its entry at the same commit (the Request funnels,
+        // the trash confirm), measured to agree with the counters across two
+        // phases (28 audits, zero mismatches) before the counters went.
+        // What stays below is what was never theirs: the layout drain for a
+        // stackable tile and the two-phase slot queue for gear.
 
         const GridDef gdef = g_resolver ? g_resolver(a_obj) : GridDef{};
         const int cap = EffectiveCap(a_obj, gdef);
@@ -8016,87 +7979,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
     }
 
-    void ClearPendingRemove(RE::TESBoundObject* a_obj, int a_count)
-    {
-        if (!a_obj || a_count <= 0) return;
-        const RE::FormID fid = a_obj->GetFormID();
-        if (auto it = g_pendingRemoveForm.find(fid); it != g_pendingRemoveForm.end()) {
-            it->second -= a_count;
-            if (it->second <= 0) {
-                g_pendingRemoveForm.erase(it);
-                g_pendingRemoveWhen.erase(fid);   // B3
-            } else {
-                g_pendingRemoveWhen[fid] = std::chrono::steady_clock::now();   // B3: still draining
-            }
-        }
-        // GI22: drain the same amount from this form's pools. Which pool no
-        // longer matters -- the engine count already reflects the move, so the
-        // only job left is to stop hiding units.
-        const std::string base = FormKey(a_obj);
-        int left = a_count;
-        for (auto pi = g_pendingRemovePool.begin();
-             pi != g_pendingRemovePool.end() && left > 0;) {
-            if (BaseKey(pi->first) != base) { ++pi; continue; }
-            const int t = (std::min)(left, pi->second);
-            pi->second -= t;
-            left -= t;
-            // the positions drain with the count they belong to
-            if (const auto xi = g_pendingRemoveXl.find(pi->first);
-                xi != g_pendingRemoveXl.end()) {
-                for (int k = 0; k < t && !xi->second.empty(); ++k) {
-                    xi->second.pop_back();
-                }
-                if (xi->second.empty()) g_pendingRemoveXl.erase(xi);
-            }
-            pi = pi->second <= 0 ? g_pendingRemovePool.erase(pi) : std::next(pi);
-        }
-    }
-
-    void AuditRemovals(const char* a_when)
-    {
-        // ★B4-3a, observation only: the removal counters and the request
-        // ledger are two sets of books for the SAME requests -- the counters
-        // written at click time and drained when the engine call returns, the
-        // ledger entries submitted before the call and retired by its event.
-        // Mid-flight the two phases differ by design; at a menu boundary the
-        // water is still and the books must agree, or the absorption B4-3
-        // plans (counters -> ledger) would change behaviour where they
-        // diverge. Same contract as the worn ledger's audit: measure to a
-        // standstill first.
-        const auto open = Ledger::OpenOutgoing();
-        int bad = 0;
-        for (const auto& [fid, n] : g_pendingRemoveForm) {
-            const auto it = open.find(fid);
-            const int  lg = it == open.end() ? 0 : it->second;
-            if (lg != n) {
-                ++bad;
-                const auto* f = RE::TESForm::LookupByID(fid);
-                SKSE::log::warn("[RMV] @{} MISMATCH {:08X} '{}': counter {} vs "
-                                "ledger {}", a_when, fid,
-                    f && f->GetName() ? f->GetName() : "?", n, lg);
-            }
-        }
-        for (const auto& [fid, n] : open) {
-            if (!g_pendingRemoveForm.contains(fid)) {
-                ++bad;
-                const auto* f = RE::TESForm::LookupByID(fid);
-                SKSE::log::warn("[RMV] @{} MISMATCH {:08X} '{}': counter 0 vs "
-                                "ledger {}", a_when, fid,
-                    f && f->GetName() ? f->GetName() : "?", n);
-            }
-        }
-        if (bad == 0) {
-            SKSE::log::info("[RMV] @{} ok -- {} form(s) in flight", a_when,
-                            g_pendingRemoveForm.size());
-        }
-    }
-
     void ClearAllPendingRemoves()
     {
-        g_pendingRemoveForm.clear();
-        g_pendingRemoveWhen.clear();   // B3
-        g_pendingRemovePool.clear();   // GI22
-        g_pendingRemoveXl.clear();
+        // (B4-3c: the counters this function once cleared are gone -- the
+        // ledger resets itself at the same boundaries)
         // ★B3-b: the slot queue is a trace this function forgot (rule 5: a
         // request leaves marks in MANY places, and a rollback that misses one
         // shows its symptom somewhere else). Keys that survived a load here
@@ -11964,6 +11850,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const auto txi = g_trashXl.find(a_key);
                 const int  txl = txi == g_trashXl.end() ? -1 : txi->second;
                 NotePendingRemove(obj, a_key, count, txl);   // drains + erases the entry
+                // B4-3c: the ledger entry opens HERE, at the commit -- the
+                // engine call runs on the Tick (ProcessTrashDeletes), and the
+                // window between the two is the ledger's to cover now.
+                Ledger::Submit(obj->GetFormID(), -count, "trash", delUid, delSig,
+                               a_key);
                 // Field-wise on purpose (§10-6): this struct has grown once.
                 TrashDelete td;
                 td.form = obj->GetFormID();
@@ -12402,11 +12293,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(d.form);
             if (!obj) continue;
             const int count = d.count;
-            Ledger::Submit(d.form, -count, "trash", d.uid, d.sig, d.key);   // 1.4/B2+B3-b
+            // B4-3c: the submit moved to ConfirmTrashDelete -- the commit,
+            // where the suppression used to arm -- so the ledger covers the
+            // confirm-to-Tick window the counters once covered. The event
+            // this call fires confirms the entry; nothing drains by hand.
             player->RemoveItem(obj, count, RE::ITEM_REMOVE_REASON::kRemove,
                 ResolveExitUnit(obj, d.uid, d.sig, count, d.fav ? count : 0,
                                 d.xlIdx), nullptr);
-            ClearPendingRemove(obj, count);
             if (g_sound && soundBudget-- > 0) g_sound(obj, false);
         }
         g_trashDeleteQ.clear();

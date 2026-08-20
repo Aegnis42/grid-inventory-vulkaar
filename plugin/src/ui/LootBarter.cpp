@@ -1060,7 +1060,8 @@ namespace FUI::LootBarter
                             RE::ITEM_REMOVE_REASON::kStoreInContainer, sxl, source);
                     });
                 }
-                Grid::ClearPendingRemove(r.obj, r.count);   // engine count dropped
+                // (B4-3c: no counter to drain -- the engine event that this
+                // call just fired has already confirmed the ledger entry)
                 itemSound(r.obj, false);
                 break;
             }
@@ -1107,7 +1108,6 @@ namespace FUI::LootBarter
                         sxl, source);
                 });
                 }
-                Grid::ClearPendingRemove(r.obj, r.count);   // engine count dropped
                 if (gold && r.price > 0) {
                     player->AddObjectToContainer(gold, nullptr, r.price, nullptr);
                     source->RemoveItem(gold, r.price, RE::ITEM_REMOVE_REASON::kRemove,
@@ -1215,14 +1215,9 @@ namespace FUI::LootBarter
                     // put in place at click time
                     g_outPool.clear();
                     g_outForm.clear();
-                    Grid::ClearPendingRemove(r.obj, r.count);
-                    for (const auto& q : g_xfer) {
-                        if (q.dir == XferReq::kPickStore) {
-                            Grid::ClearPendingRemove(q.obj, q.count);
-                        }
-                    }
-                    // B4-3b: r rides in g_xfer too -- its own entry cancels
-                    // with the queue's in one sweep
+                    // B4-3c: the counter drains that lived here went with the
+                    // counters. r rides in g_xfer too -- its own ledger entry
+                    // cancels with the queue's in one sweep.
                     CancelQueuedOutgoing("pickpocket roll lost");
                     g_xfer.clear();
                     UIRoot::Close();
@@ -1250,7 +1245,9 @@ namespace FUI::LootBarter
                             RE::ITEM_REMOVE_REASON::kStoreInContainer, sxl, source);
                     });
                 }
-                Grid::ClearPendingRemove(r.obj, r.count);
+                // (B4-3c: whichever branch moved the item -- the attempt
+                // itself or our RemoveItem above -- its container event has
+                // confirmed the ledger entry; no counter left to drain)
                 // Poisoned perk: the vanilla menu applies a planted poison to
                 // the mark OUTSIDE AttemptPickpocket, so mirror it here — cast
                 // the poison's effects on the target (self-sourced caster, no

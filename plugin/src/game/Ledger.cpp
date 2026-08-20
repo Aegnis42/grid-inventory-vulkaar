@@ -125,20 +125,6 @@ namespace FUI::Ledger
         return nullptr;
     }
 
-    std::map<std::uint32_t, int> OpenOutgoing()
-    {
-        std::map<std::uint32_t, int> out;
-        if (!g_on) return out;
-        std::lock_guard lk(g_mtx);
-        for (const auto& e : g_open) {
-            // "use" is the equip queue's jurisdiction -- see the header
-            if (e.delta < 0 && (!e.who || std::strcmp(e.who, "use") != 0)) {
-                out[e.form] += -e.delta;
-            }
-        }
-        return out;
-    }
-
     std::vector<Expired> Cancel(std::uint32_t a_form, int a_count, const char* a_why)
     {
         std::vector<Expired> out;
@@ -174,6 +160,32 @@ namespace FUI::Ledger
                 out.size(), out.size() == 1 ? "y" : "ies", a_form, a_why);
         }
         return out;
+    }
+
+    std::vector<Expired> OpenOutgoingOf(std::uint32_t a_form)
+    {
+        std::vector<Expired> out;
+        if (!g_on) return out;
+        std::lock_guard lk(g_mtx);
+        for (const auto& e : g_open) {
+            if (e.form != a_form || e.delta >= 0) continue;
+            if (e.who && std::strcmp(e.who, "use") == 0) continue;
+            out.push_back({ e.form, e.delta, e.who, e.uid, e.sig, e.slot });
+        }
+        return out;
+    }
+
+    int OpenOutgoingCount(std::uint32_t a_form)
+    {
+        if (!g_on) return 0;
+        std::lock_guard lk(g_mtx);
+        int n = 0;
+        for (const auto& e : g_open) {
+            if (e.form != a_form || e.delta >= 0) continue;
+            if (e.who && std::strcmp(e.who, "use") == 0) continue;
+            n += -e.delta;
+        }
+        return n;
     }
 
     void Tick()

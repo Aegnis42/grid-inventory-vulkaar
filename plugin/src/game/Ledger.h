@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -87,15 +86,6 @@ namespace FUI::Ledger
     using ConfirmFn = void (*)(const Expired&);
     void SetOnConfirm(ConfirmFn a_fn);
 
-    // ★B4-3a: the OPEN outgoing total per form -- how many units the ledger
-    // currently believes are LEAVING the player. The board keeps a parallel
-    // set of books for the same requests (g_pendingRemoveForm and friends,
-    // rule 5's "traces in many places"); before those can be absorbed into
-    // this ledger, the two must be measured to agree whenever the water is
-    // still. "use" entries are excluded: consumption is tracked by the equip
-    // queue, never by the removal counters, so counting it here would report
-    // a divergence that is really a difference in jurisdiction.
-    [[nodiscard]] std::map<std::uint32_t, int> OpenOutgoing();
 
     // ★B4-3b: withdraw open OUTGOING entries of a form -- the rollback
     // flavour, for requests struck from the queue before their engine call
@@ -107,6 +97,13 @@ namespace FUI::Ledger
     // confirmation -- the exact bug the two-phase drop exists to prevent.
     [[nodiscard]] std::vector<Expired> Cancel(std::uint32_t a_form, int a_count,
                                               const char* a_why);
+
+    // ★B4-3c: the open outgoing entries of ONE form, the way the reconcile
+    // reads them -- the removal counters' replacement. uid and sig are what
+    // the request knew (rule 2); the list position deliberately does not
+    // ride (PLAN §7: identity carries over, coordinates are dropped).
+    [[nodiscard]] std::vector<Expired> OpenOutgoingOf(std::uint32_t a_form);
+    [[nodiscard]] int                  OpenOutgoingCount(std::uint32_t a_form);
 
     // One frame passed. Ages the outstanding requests and expires the stale.
     void Tick();

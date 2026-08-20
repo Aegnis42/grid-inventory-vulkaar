@@ -349,13 +349,7 @@ namespace FUI::Grid
     // list position cannot move when the values inside it do.
     void NotePendingRemove(RE::TESBoundObject* a_obj, const std::string& a_key,
                            int a_count, int a_xlIdx = -1);
-    void ClearPendingRemove(RE::TESBoundObject* a_obj, int a_count);
     void ClearAllPendingRemoves();
-
-    // ★B4-3a, observation: compare the removal counters against the request
-    // ledger's open outgoing entries -- two books, one truth -- and log the
-    // verdict. Called at menu boundaries, where nothing is mid-flight.
-    void AuditRemovals(const char* a_when);
     // B2: expire the partner-drop placement hint (qty slider cancelled/closed)
     void ClearDropHint();
 
