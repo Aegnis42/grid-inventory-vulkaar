@@ -195,9 +195,17 @@ namespace
                 // the engine's own slot-conflict removals, which our equip code
                 // never sees. Deferred to the main thread: these arrive on
                 // whatever thread the engine was on.
+                // ★B3 BODY: the partial update first -- it adds the returning
+                // unit through the same walk and tile factory the rebuild
+                // uses, scoped to one form, and declines (with a logged
+                // reason) whenever it is not certain. Only a decline still
+                // costs a full rebuild.
                 if (!a_event->equipped) {
-                    SKSE::GetTaskInterface()->AddTask([]() {
-                        FUI::Grid::RequestRebuild();
+                    const RE::FormID fid = a_event->baseObject;
+                    SKSE::GetTaskInterface()->AddTask([fid]() {
+                        if (!FUI::Grid::OnEngineUnequip(fid)) {
+                            FUI::Grid::RequestRebuild();
+                        }
                     });
                 }
                 FUI::Grid::MarkCapacityDirty();

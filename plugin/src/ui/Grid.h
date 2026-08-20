@@ -176,6 +176,14 @@ namespace FUI::Grid
     // (PLAN §4-2), and nobody has ever established why.
     void RequestRebuild(const std::source_location& a_where =
                             std::source_location::current());
+    // ★B3 body: the partial board update for an engine unequip -- the return
+    // leg of NotePendingEquip's optimistic hide. Reuses the shared unit walk
+    // and MakeDisplayTile, scoped to ONE form; returns false whenever it is
+    // not CERTAIN (stackables, typed-bag claims, no room, shape drift) and
+    // the caller then runs the full rebuild -- correctness is unchanged, the
+    // fast path only covers what it can prove. Every decline logs its reason
+    // ("[B3]"), so coverage is measured, not assumed. Main thread only.
+    bool OnEngineUnequip(std::uint32_t a_form);
     // Trace switch: "!rbtrace = 1".
     [[nodiscard]] bool RebuildTrace();
     void               SetRebuildTrace(bool a_on);

@@ -6768,6 +6768,196 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         FinalizeRebuild();                      // stage 5
     }
 
+    // ---- ★B3 BODY: the partial board update ------------------------------
+    //
+    // An unequip puts ONE unit back on the board, and until now the only way
+    // to draw it was to re-derive the whole board from the engine. This is
+    // the missing half §8-10 named: RemoveUnitFromBoard has existed since
+    // NotePendingEquip (the optimistic hide); AddUnitToBoard is its return
+    // leg. It reuses the two authorities the rebuild itself uses -- the
+    // shared unit walk (identity, slot assignment, all off-board invariants)
+    // and MakeDisplayTile (the one tile factory) -- scoped to ONE form.
+    //
+    // ★Fallback discipline: any situation this path is not CERTAIN about
+    // returns false and the caller runs the full rebuild -- correctness is
+    // exactly yesterday's, the fast path only covers what it can prove. Every
+    // decline logs its reason, so the coverage is measured, not assumed
+    // (the same bargain !rbdrop struck).
+    bool OnEngineUnequip(std::uint32_t a_form)
+    {
+        const auto decline = [&](const char* a_why) {
+            SKSE::log::info("[B3] partial add declined ({:08X}): {} -- full rebuild",
+                a_form, a_why);
+            return false;
+        };
+        // Menu closed: the coalesced flag is already the cheap path -- the
+        // next open (or a capacity gate) rebuilds once for the whole batch.
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui || !ui->IsMenuOpen("GridInventoryMenu")) return false;   // quiet: normal
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !player->Is3DLoaded()) return false;              // 원칙 4
+        if (g_views.empty()) return false;   // board never built yet this session
+
+        auto* form = RE::TESForm::LookupByID(a_form);
+        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+        if (!obj) return decline("form not found");
+        if (obj->IsGold() || GoldCoins::IsCoinForm(a_form)) {
+            return decline("coin mirror");
+        }
+        const GridDef gdef = g_resolver ? g_resolver(obj) : GridDef{};
+        if (gdef.bag != 0) return decline("bag form (window wiring)");
+        if (EffectiveCap(obj, gdef) > 1) return decline("stackable (merge rules)");
+        // The rebuild would claim a fresh tile of a filtered form into a held
+        // typed bag; first-fitting it onto the main board here would diverge
+        // and the next rebuild would visibly move it.
+        if (const auto& fl = BagFilter::FilterOf(obj);
+            !fl.empty() && g_typedBagsHeld.contains(fl)) {
+            return decline("typed bag would claim it");
+        }
+        auto* entry = LiveEntryOf(player, obj);
+        if (!entry) return decline("no live entry");
+        int count = 0;
+        {
+            auto inv = player->GetInventory(
+                [&](RE::TESBoundObject& o) { return &o == obj; });
+            for (auto& [o2, d2] : inv) count = d2.first;
+        }
+        if (count <= 0) return decline("count 0");
+
+        // The same walk the rebuild runs, scoped to this form: identity,
+        // slot assignment, every off-board exclusion (held / trash / pending)
+        // -- and mutate=true mints the GI21 placeholder for the fresh unit.
+        const std::string baseKey = FormKey(obj);
+        std::vector<UnitTile> units_v;
+        EnumerateUnitTiles(baseKey, count, (std::numeric_limits<int>::max)(),
+                           entry, units_v, gdef.bag == 0, /*mutate=*/true);
+
+        // Diff against what is standing on the boards. A tile WE show that
+        // the walk no longer lists means shapes changed under us -- rebuild.
+        std::set<std::string> have;
+        for (const auto& it : g_items) {
+            if (it.obj == obj && it.inBag != kTrashKey) have.insert(it.key);
+        }
+        for (const auto& k : have) {
+            const bool listed = std::any_of(units_v.begin(), units_v.end(),
+                [&](const UnitTile& u) { return u.key == k; });
+            if (!listed) return decline("a shown tile left the set");
+        }
+        std::vector<const UnitTile*> fresh;
+        for (const auto& u : units_v) {
+            if (!have.contains(u.key)) fresh.push_back(&u);
+        }
+        // Nothing new to draw: the unit went to the cursor (doll lift), or the
+        // event was an echo. The board is already right -- skip the rebuild.
+        if (fresh.empty()) {
+            SKSE::log::info("[B3] partial add ({:08X}): nothing fresh -- no rebuild",
+                a_form);
+            return true;
+        }
+
+        // Occupancy of the MAIN view, from the tiles standing on it.
+        auto& mv = g_views[0];
+        std::vector<std::vector<bool>> occ(
+            static_cast<std::size_t>(mv.rows),
+            std::vector<bool>(static_cast<std::size_t>(mv.cols), false));
+        for (int idx : mv.items) {
+            const auto& it = g_items[static_cast<std::size_t>(idx)];
+            if (it.col < 0) continue;
+            for (std::size_t r = 0; r < it.mask.rows.size(); ++r) {
+                for (std::size_t c = 0; c < it.mask.rows[r].size(); ++c) {
+                    if (!it.mask.rows[r][c]) continue;
+                    const int rr = it.row + static_cast<int>(r);
+                    const int cc = it.col + static_cast<int>(c);
+                    if (rr >= 0 && rr < mv.rows && cc >= 0 && cc < mv.cols) {
+                        occ[static_cast<std::size_t>(rr)]
+                           [static_cast<std::size_t>(cc)] = true;
+                    }
+                }
+            }
+        }
+        const auto fits = [&](int a_c, int a_r, const Mask& a_m) {
+            for (std::size_t r = 0; r < a_m.rows.size(); ++r) {
+                for (std::size_t c = 0; c < a_m.rows[r].size(); ++c) {
+                    if (!a_m.rows[r][c]) continue;
+                    const int rr = a_r + static_cast<int>(r);
+                    const int cc = a_c + static_cast<int>(c);
+                    if (rr < 0 || rr >= mv.rows || cc < 0 || cc >= mv.cols) return false;
+                    if (occ[static_cast<std::size_t>(rr)]
+                           [static_cast<std::size_t>(cc)]) return false;
+                }
+            }
+            return true;
+        };
+        const auto firstFit = [&](const Mask& a_m, int& a_c, int& a_r) {
+            for (int r = 0; r + a_m.h <= mv.rows; ++r) {
+                for (int c = 0; c + a_m.w <= mv.cols; ++c) {
+                    if (fits(c, r, a_m)) { a_c = c; a_r = r; return true; }
+                }
+            }
+            return false;
+        };
+
+        // Decide EVERY placement before touching g_items -- a fallback after a
+        // partial commit would leave a half-updated board for the rebuild to
+        // race (rule 5: all traces or none).
+        struct Planned { const UnitTile* u; LayoutEntry le; };
+        std::vector<Planned> plan;
+        for (const auto* u : fresh) {
+            LayoutEntry le;
+            if (const auto li = g_layout.find(u->key); li != g_layout.end()) le = li->second;
+            if (!le.bag.empty()) return decline("fresh unit bound to a bag");
+            if (le.col >= 0) {
+                // a surviving saved spot (parked star, cancel) -- honour it if free
+                const Mask m = MaskOf(gdef, CanRotate(gdef) ? (le.rot & 3) : 0);
+                if (!fits(le.col, le.row, m)) return decline("saved spot occupied");
+                for (std::size_t r = 0; r < m.rows.size(); ++r)
+                    for (std::size_t c = 0; c < m.rows[r].size(); ++c)
+                        if (m.rows[r][c]) occ[le.row + r][le.col + c] = true;
+            } else {
+                // rule 13 forgot the cell at equip time: first-fit, both
+                // orientations, same as the rebuild's placer would
+                Mask m = MaskOf(gdef);
+                int  c = -1, r = -1;
+                if (firstFit(m, c, r)) {
+                    le.rot = 0;
+                } else if (CanRotate(gdef)) {
+                    m = MaskOf(gdef, 1);
+                    if (!firstFit(m, c, r)) return decline("no room (growth/spill)");
+                    le.rot = 1;
+                } else {
+                    return decline("no room (growth/spill)");
+                }
+                le.col = c;
+                le.row = r;
+                for (std::size_t mr = 0; mr < m.rows.size(); ++mr)
+                    for (std::size_t mc = 0; mc < m.rows[mr].size(); ++mc)
+                        if (m.rows[mr][mc]) occ[r + mr][c + mc] = true;
+            }
+            plan.push_back({ u, le });
+        }
+
+        // Commit: the one tile factory, then every bookkeeping trace the
+        // rebuild would have left for this tile (rule 5).
+        std::uint8_t glow = 0;
+        if (const auto* ef = obj->As<RE::TESEnchantableForm>();
+            ef && ef->formEnchanting) {
+            glow |= 1;
+        }
+        if (IsUniqueCached(obj)) glow |= 2;
+        for (const auto& p : plan) {
+            g_layout[p.u->key] = p.le;   // persist BEFORE mint: the tile reads it
+            MakeDisplayTile(obj, entry, gdef, glow, p.u->key, 1, p.le, p.u->xlIdx);
+            const int idx = static_cast<int>(g_items.size()) - 1;
+            mv.items.push_back(idx);
+            g_spaceUsed += MaskCells(g_items.back().mask.rows);
+            g_liveObjs.insert(obj);
+            SKSE::log::info("[B3] ★partial add '{}' key '{}' at [{},{}] -- no rebuild",
+                obj->GetName(), p.u->key, p.le.col, p.le.row);
+        }
+        MarkCapacityDirty();
+        return true;
+    }
+
     int GoldAmount()
     {
         return g_gold;
