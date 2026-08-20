@@ -97,6 +97,13 @@ namespace FUI::Equip
             // a time; a whole tile for ammo. (Appended last so the aggregate
             // initialisers elsewhere stay valid.)
             int           count = 1;
+            // What the SOURCE TILE held at click time (0 = unknown/legacy).
+            // Rule 13 asks "did this tile empty", and the form-wide count
+            // cannot answer that when the form is split across tiles: draining
+            // a pack potion with a second copy in the potion bag read cnt==1
+            // and kept the emptied cell, whose stale layout claim then made
+            // the reconciler eat the BAG's copy. (Appended last, same deal.)
+            int           tileCount = 0;
         };
         std::vector<PendingAction> g_pending;
         int                        g_rebuildLag = 0;   // rebuild AFTER the queued task applied
@@ -819,7 +826,7 @@ namespace FUI::Equip
         }
         g_pending.push_back({ a_obj->GetFormID(), "", false, a_uid, a_xlIdx,
                               a_sig, a_srcKey, 0,
-                              EquipCountFor(a_obj, a_tileCount) });
+                              EquipCountFor(a_obj, a_tileCount), a_tileCount });
         return true;
     }
 
@@ -849,7 +856,7 @@ namespace FUI::Equip
 
         g_pending.push_back({ a_obj->GetFormID(), a_slotId, false, a_uid, a_xlIdx,
                               a_sig, a_srcKey, 0,
-                              EquipCountFor(a_obj, a_tileCount) });
+                              EquipCountFor(a_obj, a_tileCount), a_tileCount });
         return true;
     }
 
@@ -1181,6 +1188,16 @@ namespace FUI::Equip
                     DualRing::TakeOff();
                 }
             }
+            // Rule 13 below needs to know whether the engine actually TOOK
+            // units (a consumable drunk) or left them in the pack (a scripted
+            // click-me item, a spell tome already known). Only a before/after
+            // read can tell -- the tile test alone cannot.
+            int before = 0;
+            {
+                auto inv = player->GetInventory(
+                    [&](RE::TESBoundObject& o) { return &o == obj; });
+                for (auto& [o2, d2] : inv) before = d2.first;
+            }
             em->EquipObject(player, obj, srcList, act.count, slot,
                             false, false, true, true);
 
@@ -1217,14 +1234,27 @@ namespace FUI::Equip
             // count reads 1 and the old test forgot the cell of a tile that
             // still held an apple: drinking a middle-of-board stack down to
             // its last unit teleported that unit to the front gap (user
-            // report; present since rule 13 -- 1.3.x ships it too). What a
-            // consumable's tile being empty actually means is "nothing left".
+            // report; present since rule 13 -- 1.3.x ships it too).
+            // ★★★"Nothing left of the FORM" (cnt <= 0) over-corrected for that:
+            // it is form-wide, and rule 13 is about a TILE. With the form split
+            // across tiles -- one potion in the pack, one in the potion bag --
+            // draining the pack tile read cnt==1 and KEPT the emptied cell.
+            // That stale layout claim then made the reconciler pay the deficit
+            // from the other tile: the player drank the pack's potion and the
+            // BAG's disappeared (user report). The exact question is "did the
+            // units the engine took empty the clicked tile" -- act.tileCount
+            // (what the tile held at click time) against act.count (what this
+            // action moves), gated on the engine actually having taken them so
+            // a scripted item that stays in the pack keeps its cell.
             const bool consumedType = obj->Is(RE::FormType::AlchemyItem) ||
                                       obj->Is(RE::FormType::Ingredient) ||
                                       obj->Is(RE::FormType::Book);
             const bool emptied = obj->Is(RE::FormType::Ammo) ||
                                  (consumedType
-                                      ? cnt <= 0
+                                      ? (cnt < before &&
+                                         (act.tileCount > 0
+                                              ? act.count >= act.tileCount
+                                              : cnt <= 0))
                                       : Grid::StackCap(obj) <= 1 || cnt <= 1);
             if (IsWearOrConsume(obj) && emptied) {
                 Grid::ForgetTile(act.srcKey);
