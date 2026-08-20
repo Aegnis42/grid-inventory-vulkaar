@@ -4910,7 +4910,30 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // contents even while its tile is transiently absent, and dangling bag
         // refs are cleared here — the post-load false-overload fix, now shared
         // by all three sims instead of only ComputeOverloaded.
-        void CollectCapacityTiles(CapTiles& a_out)
+        // Shared tail of both collectors: E4b nesting scope + E4 dangling-ref
+        // reflow. Pure over (tiles, owned bag forms) -- see the call sites.
+        void NormalizeBagRefs(CapTiles& a_out, const std::set<std::string>& a_bagForms)
+        {
+            {
+                std::map<std::string, std::string> bagAccept;   // bag tile key -> accept
+                for (const auto& it : a_out.tiles) {
+                    if (it.def.bag != 0) bagAccept[it.key] = it.def.accept;
+                }
+                for (auto& it : a_out.tiles) {
+                    if (it.def.bag == 0 || it.inBag.empty()) continue;
+                    const auto ba = bagAccept.find(it.inBag);
+                    if (ba == bagAccept.end() || !ba->second.empty()) it.inBag.clear();
+                }
+            }
+            for (auto& it : a_out.tiles) {
+                if (!it.inBag.empty() && !a_out.bagKeys.contains(it.inBag) &&
+                    !a_bagForms.contains(BaseKey(it.inBag))) {
+                    it.inBag.clear();
+                }
+            }
+        }
+
+        void CollectCapacityTilesEngine(CapTiles& a_out)
         {
             auto* player = RE::PlayerCharacter::GetSingleton();
             if (!player) return;
@@ -5076,32 +5099,105 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     a_out.tiles.push_back(std::move(it));
                 }
             }
-            // E4b: a bag KEEPS its place inside a general bag (manual
-            // nesting). Out of anything else — typed bag, stale key — it
-            // reflows to main (the old per-tile E3 clear, now scoped to what
-            // nesting does not allow). A LOCAL map, not g_bagAcceptByForm:
-            // this sim also runs at load time before any display rebuild has
-            // filled the global, and an empty map here would silently move
-            // every nested bag onto the sim's main board (rule 97).
-            {
-                std::map<std::string, std::string> bagAccept;   // bag tile key -> accept
-                for (const auto& it : a_out.tiles) {
-                    if (it.def.bag != 0) bagAccept[it.key] = it.def.accept;
-                }
-                for (auto& it : a_out.tiles) {
-                    if (it.def.bag == 0 || it.inBag.empty()) continue;
-                    const auto ba = bagAccept.find(it.inBag);
-                    if (ba == bagAccept.end() || !ba->second.empty()) it.inBag.clear();
+            // E4b nesting scope + E4 dangling-ref reflow -- shared with the
+            // board reader (the LOCAL bag-accept map matters: this sim also
+            // runs at load time before any display rebuild has filled the
+            // global, rule 97)
+            NormalizeBagRefs(a_out, bagForms);
+        }
+
+        // *B5: the same collection READ OFF THE BOARD. g_items is what the
+        // player sees and what the deltas maintain (B3/B4); deriving a second
+        // board from the engine re-opens every gap between the two -- H2's
+        // "refused 2x2 with a 2x2 hole in plain sight" was exactly such a
+        // gap, and H6's coin drift is another. Runs BESIDE the engine walk
+        // for one observation round; the [CAP] divergence log decides the
+        // flip (the B0~B2 precedent, once more).
+        void CollectCapacityTilesFromBoard(CapTiles& a_out)
+        {
+            // The one fact the board cannot answer alone: a bag FORM still
+            // owned anchors its contents even while its tile is transiently
+            // absent -- the tile IS the absence in question.
+            std::set<std::string> bagForms;
+            if (auto* player = RE::PlayerCharacter::GetSingleton();
+                player && g_resolver) {
+                for (auto& [obj, data] : player->GetInventory()) {
+                    if (!obj || data.first <= 0) continue;
+                    if (const GridDef bd = g_resolver(obj); bd.bag != 0) {
+                        bagForms.insert(FormKey(obj));
+                    }
                 }
             }
-            // E4 mirror: a DANGLING bag ref (no tile AND no owned form) means
-            // the contents reflow to main and stay eligible for the bag spill
-            for (auto& it : a_out.tiles) {
-                if (!it.inBag.empty() && !a_out.bagKeys.contains(it.inBag) &&
-                    !bagForms.contains(BaseKey(it.inBag))) {
-                    it.inBag.clear();
+            for (const auto& it : g_items) {
+                if (it.inBag == kTrashKey) continue;   // deletion buffer: no cells
+                Item t = it;
+                if (t.def.bag != 0) a_out.bagKeys.insert(t.key);
+                // overflow-zone spots are TEMPORARY and never honoured
+                if (t.inBag.empty() && t.row >= kMinRows) {
+                    t.col = -1;
+                    t.row = -1;
+                }
+                a_out.tiles.push_back(std::move(t));
+            }
+            NormalizeBagRefs(a_out, bagForms);
+        }
+
+        // B5 observation: the two collections must describe ONE board. Logs
+        // placement-relevant differences (the fields the sims actually read:
+        // key set, col/row/rot/inBag, bag keys); silent when they agree.
+        void CompareCapCollections(const CapTiles& a_eng, const CapTiles& a_brd)
+        {
+            struct Spot { int col, row, rot; std::string bag; };
+            auto index = [](const CapTiles& c) {
+                std::map<std::string, Spot> m;
+                for (const auto& t : c.tiles) {
+                    m[t.key] = { t.col, t.row, t.rot, t.inBag };
+                }
+                return m;
+            };
+            const auto e = index(a_eng);
+            const auto b = index(a_brd);
+            int bad = 0;
+            auto say = [&](const std::string& a_line) {
+                if (bad <= 4) SKSE::log::warn("[CAP] {}", a_line);
+            };
+            for (const auto& [k, v] : e) {
+                const auto it = b.find(k);
+                if (it == b.end()) {
+                    ++bad;
+                    say("engine-only tile '" + k + "'");
+                } else if (it->second.col != v.col || it->second.row != v.row ||
+                           it->second.rot != v.rot || it->second.bag != v.bag) {
+                    ++bad;
+                    say("placement differs '" + k + "': engine [" +
+                        std::to_string(v.col) + "," + std::to_string(v.row) +
+                        "] bag '" + v.bag + "' vs board [" +
+                        std::to_string(it->second.col) + "," +
+                        std::to_string(it->second.row) + "] bag '" +
+                        it->second.bag + "'");
                 }
             }
+            for (const auto& [k, v] : b) {
+                if (!e.contains(k)) {
+                    ++bad;
+                    say("board-only tile '" + k + "'");
+                }
+            }
+            if (a_eng.bagKeys != a_brd.bagKeys) {
+                ++bad;
+                say("bag key sets differ");
+            }
+            if (bad > 0) {
+                SKSE::log::warn("[CAP] *{} divergence(s) engine vs board", bad);
+            }
+        }
+
+        void CollectCapacityTiles(CapTiles& a_out)
+        {
+            CollectCapacityTilesEngine(a_out);
+            CapTiles board;
+            CollectCapacityTilesFromBoard(board);
+            CompareCapCollections(a_out, board);
         }
     }
 
