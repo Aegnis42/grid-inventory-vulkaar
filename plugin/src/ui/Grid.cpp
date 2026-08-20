@@ -1644,8 +1644,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // until the suppression died (user report). The entry takes over
             // when the suppression releases: a seamless handoff, one
             // exclusion at every moment.
+            // ★...and not while the carrier's own unit RIDES THE CURSOR: a
+            // fromCarrier carry IS that unit, already excluded as "held". In
+            // the drop-swap window (BeginCarry's rebuild runs before Wear's
+            // TakeOff clears the carrier next tick) both entries stood for
+            // the one unit and the second exclusion took a SPARE down with it
+            // -- the identical rings in the pack flickered (user report).
             if (auto* second = DualRing::Second();
                 second && FormKey(second) == a_base &&
+                !(g_held && g_held->fromCarrier && g_held->obj == second) &&
                 std::none_of(g_pendingEquip.begin(), g_pendingEquip.end(),
                              [&](const OffBoardUnit& u) { return u.base == a_base; })) {
                 OffBoardUnit r;
