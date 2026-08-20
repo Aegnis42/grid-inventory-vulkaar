@@ -8292,9 +8292,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             if (a_why) {
                 for (const Item* s : spill) {
-                    a_why->lines.push_back(std::format("'{}' ({}x{}) -- no general bag "
-                        "slot has room for its shape",
-                        s->obj ? s->obj->GetName() : "?", s->mask.w, s->mask.h));
+                    // ★B5 diagnostics: the key and the COLLECTED coordinates.
+                    // A stranded tile is either one that arrived placeless
+                    // (col -1: reset, or a hidden cell that lost its spot) or
+                    // one whose saved cell COLLIDED and was reflowed off the
+                    // board -- the coordinates tell those apart, and the key
+                    // says who it really was.
+                    const auto li = g_layout.find(s->key);
+                    a_why->lines.push_back(std::format(
+                        "'{}' ({}x{}) key '{}' collected [{},{}] layout [{},{}] "
+                        "bag '{}' -- no general bag slot has room for its shape",
+                        s->obj ? s->obj->GetName() : "?", s->mask.w, s->mask.h,
+                        s->key, s->col, s->row,
+                        li != g_layout.end() ? li->second.col : -99,
+                        li != g_layout.end() ? li->second.row : -99,
+                        s->inBag));
                 }
                 a_why->stranded = static_cast<int>(a_why->lines.size());
             }
