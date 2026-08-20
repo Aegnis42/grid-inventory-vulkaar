@@ -182,20 +182,20 @@ namespace FUI::Census
         return it->second;
     }
 
-    void Take(const char* a_when)
+    bool Take(const char* a_when)
     {
-        if (!g_on) return;
+        if (!g_on) return false;
         // the verdict describes ONE diff; whatever the last one left unclaimed
         // must not outlive it
         g_picks.clear();
         auto now = Snapshot();
-        if (now.empty()) return;
+        if (now.empty()) return false;
 
         if (!g_have) {
             g_have = true;
             g_prev = std::move(now);
             logger::info("[CENSUS] baseline @{}: {} kinds", a_when, g_prev.size());
-            return;
+            return false;
         }
 
         // Group the differences by FORM: a kind only ever turns into another
@@ -292,6 +292,14 @@ namespace FUI::Census
                      "{} unique / ★{} ambiguous, {} plain loss",
             a_when, now.size(), forms, unique, ambiguous, netOnly);
 
+        // ★B4-1: anything moved -- including a bare appearance the loop above
+        // rightly skipped for PAIRING purposes -- means the board's picture of
+        // at least one kind is stale. The caller turns this into a rebuild
+        // request; a quiet take leaves the board exactly as the player
+        // arranged it.
+        const bool moved = !gone.empty() || !appeared.empty();
+
         g_prev = std::move(now);
+        return moved;
     }
 }

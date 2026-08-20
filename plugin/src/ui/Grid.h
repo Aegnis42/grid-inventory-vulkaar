@@ -276,6 +276,14 @@ namespace FUI::Grid
     void Rebuild(const std::source_location& a_where =
                      std::source_location::current());
 
+    // ★B4-1: the menu-open rebuild, made conditional. Rebuilds only when the
+    // flag is up (every closed-menu count delta raised it through its event;
+    // the census gate covers the event-less value drifts) or when the board
+    // is empty (first open, post-load resets). A quiet open keeps the board
+    // exactly as the player left it -- and keeps every ladder idle.
+    void RebuildIfNeeded(const std::source_location& a_where =
+                             std::source_location::current());
+
     // Capacity system: true when a_obj could be added right now — it stacks
     // onto an existing tile, or its footprint first-fits into the HARD
     // 10 x 14 main board after every current occupant placed (bag-assigned

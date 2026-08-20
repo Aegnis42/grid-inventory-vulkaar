@@ -6804,6 +6804,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
     }
 
+    void RebuildIfNeeded(const std::source_location& a_where)
+    {
+        // B4-1: consume the flag here -- this IS the rebuild it was asking
+        // for. The empty-board test covers the openings no flag announces:
+        // the first of the session, and the post-load B6 resets.
+        if (g_needRebuild.exchange(false, std::memory_order_acq_rel) ||
+            g_items.empty()) {
+            Rebuild(a_where);
+        }
+    }
+
     void Rebuild(const std::source_location& a_where)
     {
         NoteRebuildRan(a_where);   // B3-c: provenance, drained at the entry

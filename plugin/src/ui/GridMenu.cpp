@@ -165,7 +165,14 @@ namespace FUI
         // ★B1 AFTER B0: the form-level audit is the cheaper question and its
         // answer frames the kind-level one. If the totals already disagree,
         // a kind relabel report is describing a board that was wrong anyway.
-        FUI::Census::Take("menu-open");
+        // ★B4-1: the census yes is the INTEGRITY GATE for the now-conditional
+        // menu-open rebuild. Every count change while the menu was shut raised
+        // the rebuild flag through its event -- but a VALUE change (the
+        // grindstone) moves no counts and fires no event, so the census is
+        // its only witness.
+        if (FUI::Census::Take("menu-open")) {
+            FUI::Grid::RequestRebuild();
+        }
         // ★B2 flushes on OPEN, not on close. Closing the menu right after a
         // request reported it outstanding at ONE frame old -- the confirmation
         // was simply still in flight. Waiting until the next open gives every
@@ -187,7 +194,11 @@ namespace FUI
         // ...and this one covers the session itself: our own actions, which we
         // are supposed to know about exactly.
         FUI::DeltaWatch::Reconcile("menu-close");
-        FUI::Census::Take("menu-close");
+        // The close take RE-BASELINES only -- its diff describes the session
+        // the board just handled live, so its verdict is deliberately ignored
+        // (acting on it would make every reopen after an active session
+        // rebuild for nothing, undoing B4-1).
+        (void)FUI::Census::Take("menu-close");
         ItemPreview::GetSingleton()->End();
         UIRoot::OnClose();
     }

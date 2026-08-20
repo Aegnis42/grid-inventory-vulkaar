@@ -41,7 +41,13 @@ namespace FUI::Census
     void               SetEnabled(bool a_on);
 
     // Main thread only (walks the player's inventory).
-    void Take(const char* a_when);
+    // ★Returns whether anything MOVED between kinds since the last take
+    // (B4-1): the menu-open rebuild is conditional now, and a value that
+    // changed without a count changing -- a grindstone, above all -- fires no
+    // engine event and so raises no rebuild flag. The census is the only
+    // witness, and its yes is the integrity gate that requests the rebuild.
+    // A baseline take (or an empty snapshot) returns false.
+    bool Take(const char* a_when);
 
     // A load replaces the inventory wholesale -- the previous census describes
     // someone else. Same rule B0 had to learn the hard way.

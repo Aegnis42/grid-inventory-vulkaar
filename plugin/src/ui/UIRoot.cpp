@@ -3632,7 +3632,11 @@ namespace FUI::UIRoot
         // capture queue key off (building before the reload uses stale defs).
         if (g_onShow) g_onShow();
 
-        Grid::Rebuild();
+        // ★B4-1: conditional since the demolition began. A closed-menu count
+        // delta raised the flag through its event; the census gate in
+        // GridMenu::OnShow covers event-less value drifts (the grindstone).
+        // A quiet open keeps the board untouched and every ladder idle.
+        Grid::RebuildIfNeeded();
 
         // B: prefetch EVERYTHING the player carries the moment the menu
         // opens — one up-front caching burst instead of per-scroll/per-bag
