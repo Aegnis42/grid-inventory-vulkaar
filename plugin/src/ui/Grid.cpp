@@ -8161,7 +8161,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 ui && ui->IsMenuOpen("GridInventoryMenu")) {
                 return;   // menu open: FinishFrame owns the flag
             }
-            if (g_needRebuild.exchange(false, std::memory_order_acq_rel)) {
+            // ★B5: OR the board was never built this session. The gates ran
+            // fine on a stale flag alone while the sims re-derived everything
+            // from the engine anyway -- but the board READER'S precondition
+            // is a fresh board, and the first [CAP] observation round showed
+            // exactly this: every pre-first-open capacity query compared the
+            // engine against an empty g_items (104 -> 10 -> 1 divergences,
+            // all engine-only, all before the first menu open).
+            if (g_needRebuild.exchange(false, std::memory_order_acq_rel) ||
+                g_items.empty()) {
                 Rebuild();
             }
         }
