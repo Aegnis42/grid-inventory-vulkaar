@@ -242,6 +242,18 @@ namespace
                         // the worn-clock flips here now, not when our call
                         // returned.
                         FUI::Grid::NoteEquipLanded(fid);
+                        // ★Ring session: a same-form SELF-SWAP fires OFF
+                        // before ON, and the OFF-side reconcile ran while this
+                        // request was still un-landed -- the displaced spare
+                        // cancelled against the in-flight record ("nothing
+                        // fresh") and stayed hidden until a sweep (user
+                        // report: the doffed half appears late). Landed, the
+                        // worn unit belongs to skipWorn, so the same one-form
+                        // reconcile now sees the spare and draws it. Declines
+                        // are IGNORED on this side -- the equip direction
+                        // never needed a rebuild (B3, measured), and e.g. a
+                        // torch's "still worn" decline must not start one.
+                        (void)FUI::Grid::OnFormDelta(fid);
                         auto* ui = RE::UI::GetSingleton();
                         if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return;
                         auto* player = RE::PlayerCharacter::GetSingleton();
