@@ -218,15 +218,6 @@ namespace FUI::Grid
             // form, same signature, same hand), so the pending equip's lifetime is
             // what draws the line: while it exists the swap is still in flight.
             bool                swappedOut = false;
-            // ★★...and whether the thing that displaced it is THE SAME FORM.
-            // Only a same-form replacement can leave behind a worn list we would
-            // mistake for our own, and that distinction is the entire reason the
-            // clock below exists. Swapping a dagger for a SWORD leaves no
-            // same-form equip record at all, and reading that absence as "the
-            // swap already completed" made the carry unable to claim its own
-            // worn list -- so it fell to the bottom of the exclusion ladder and
-            // took an innocent sibling out of the pack instead.
-            bool                swapSameForm = false;
             // GI36: this carry left the board wearing a star. The exit sinks
             // cannot recompute it -- once the unit is mid-flight there is no
             // tile left to ask -- so it travels WITH the carry.
@@ -1751,28 +1742,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_favSync.push_back({ a_obj, a_uid, a_xlIdx });
         }
 
-        // GI28: the cell an action was AIMED at, flashed as it empties.
-        //
-        // Every "the wrong cell went blank" bug this project has had was invisible
-        // until someone stared at two frames of log. Marking the cell we intended
-        // to vacate turns the whole class into something you SEE: the flash and
-        // the gap are the same cell when it works, and different cells when it
-        // does not. It is also just good feedback -- an action should say where
-        // it landed.
-        struct Vacated
-        {
-            int         col = 0, row = 0, w = 1, h = 1;
-            std::string bag;
-            float       born = 0.0f;
-        };
-        std::vector<Vacated>  g_vacated;
-
-        // GI55: RETIRED for release (P1/P2 sign-off done) -- the flash was a
-        // verification aid. Flip to true to see "which cell did this action
-        // aim at" again when hunting a wrong-cell-vanished bug; the call
-        // sites stay wired (same policy as g_poolTrace).
-        constexpr bool        g_vacatedFlash = false;
-        constexpr float       kVacatedFade = 0.40f;   // seconds
 
         // Writes a tile's PLACEMENT and nothing else.
         //
@@ -2121,17 +2090,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
 
 
-        // Reads the layout BEFORE the caller changes it, so it must run first.
-        void NoteVacated(const std::string& a_key, RE::TESBoundObject* a_obj)
-        {
-            if (!g_vacatedFlash) return;   // GI55: diagnostic off in release
-            const auto li = g_layout.find(a_key);
-            if (li == g_layout.end() || li->second.col < 0) return;
-            if (li->second.bag == kTrashKey) return;   // not a board cell
-            const Mask m = MaskOf(a_obj && g_resolver ? g_resolver(a_obj) : GridDef{});
-            g_vacated.push_back({ li->second.col, li->second.row, m.w, m.h,
-                                  li->second.bag, static_cast<float>(ImGui::GetTime()) });
-        }
 
 
         int PlaceItems(std::vector<Item*>& a_list, int a_cols, int a_minRows, int a_maxRows)
@@ -2263,17 +2221,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // GI28: the cell the last action aimed to empty, fading out. If the
             // flash and the gap are not the same cell, the bug is on screen.
             const float now = static_cast<float>(ImGui::GetTime());
-            std::erase_if(g_vacated,
-                [now](const Vacated& v) { return now - v.born > kVacatedFade; });
-            for (const auto& v : g_vacated) {
-                if (v.bag != a_view.bagKey) continue;
-                if (v.col < 0 || v.row < 0) continue;
-                const float k = 1.0f - (now - v.born) / kVacatedFade;   // 1 -> 0
-                const ImVec2 q0(base.x + v.col * CellPx(), base.y + v.row * CellPx());
-                const ImVec2 q1(q0.x + v.w * CellPx(), q0.y + v.h * CellPx());
-                dl->AddRectFilled(q0, q1, Theme::Acc(0.22f * k), 2.0f);
-                dl->AddRect(q0, q1, Theme::Acc(0.85f * k), 2.0f, 0, 2.0f);
-            }
 
             // design pass F: overflow-zone marking — rows past the hard board
             // are TEMPORARY (they collapse the moment space frees up). A
@@ -3764,7 +3711,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid, std::uint16_t a_sig,
-                    int a_hand, bool a_swappedOut, int a_count, bool a_swapSameForm,
+                    int a_hand, bool a_swappedOut, int a_count,
                     bool a_fromCarrier)
     {
         if (!a_obj || g_held) return;
@@ -3833,7 +3780,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_held->xlIdx = -1;
         }
         g_held->swappedOut = a_swappedOut;
-        g_held->swapSameForm = a_swapSameForm;
+        // (B4-4: swapSameForm retired -- the doffing clock replaced its one
+        // reader, the pendingEquip same-form-swap scan)
         g_held->fromCarrier = a_fromCarrier;
         // B4-2c: a doll lift IS an unequip request -- tell the worn ledger at
         // the same moment the carry begins, so Doffing() can answer the
@@ -7456,7 +7404,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // vanished was whichever sorted last -- not the one the player clicked.
         // It came back one frame later, when the applied equip finally forgot
         // the real cell. That round trip is the "spare dagger blinks" report.
-        NoteVacated(a_srcKey, a_obj);   // GI28
         // ★★★FIELD-WISE, NEVER BRACED. This record used to be built with a
         // nine-value aggregate initialiser while OffBoardUnit had ELEVEN fields
         // -- `xlIdx` was appended before `units`, and nobody re-counted. So the
@@ -7895,7 +7842,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                            int a_count, int a_xlIdx)
     {
         if (!a_obj || a_count <= 0) return;
-        NoteVacated(a_key, a_obj);   // GI28: flash the cell we aimed at
         const RE::FormID fid = a_obj->GetFormID();
         if (GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid)) return;   // coins: own system
         // ★(1.3.0-C) every UI exit path (store / sell / pick-store / trash)
@@ -11386,10 +11332,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the displaced ring onto the FIRST slot instead of the pack --
             // nothing leaves the body, and a cursor copy really would be a
             // duplicate.
-            // ★Captured BEFORE the reset above: `a_held` is the INCOMING item
-            // and `worn` is the one being displaced. Same object pointer means
-            // same form, which is the only case the worn-clock has to guard.
-            const bool swapSameForm = (worn == swapInObj);
             const bool ringL = g_slotTarget == "ringL";
             const bool ringLToFirst = ringL &&
                                       Equip::WornObjectAt("ringR") == nullptr;
@@ -11406,7 +11348,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 BeginCarry(worn, wuid, wsig, wornHand, /*swappedOut=*/true,
                            Equip::EquipCountFor(worn,
                                Equip::WornCountAt(g_slotTarget)),
-                           swapSameForm, /*fromCarrier=*/ringL);
+                           /*fromCarrier=*/ringL);
             }
             // ★No tail rebuild for ACCEPTED drops. The !rbdrop interrogation
             // measured every accepted shape without it: plain equips, swaps,
@@ -12633,7 +12575,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_layout.clear();
         g_openBags.clear();
         g_pendingEquip.clear();   // cross-frame set: must never outlive a load
-        g_vacated.clear();        // GI28: a flash is about the frame it happened in
         g_layoutLoaded = false;
         g_prevKeys.clear();
         // GI65: prevKeys is empty after a load, so the very next rebuild would

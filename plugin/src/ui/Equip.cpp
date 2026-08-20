@@ -756,7 +756,6 @@ namespace FUI::Equip
                     Grid::BeginCarry(eq->obj, eq->uid, eq->sig, eq->hand,
                                      /*swappedOut=*/false,
                                      EquipCountFor(eq->obj, eq->count),
-                                     /*swapSameForm=*/false,
                                      /*fromCarrier=*/secondRing);
                 }
             } else if (ImGui::IsItemHovered()) {
