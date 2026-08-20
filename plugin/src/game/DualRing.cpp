@@ -48,6 +48,25 @@ namespace FUI::DualRing
                 if (auto* dh = RE::TESDataHandler::GetSingleton()) {
                     cached = dh->LookupForm<RE::TESObjectARMO>(kCarrierId, kPlugin);
                 }
+                // ★★★THE CARRIER MUST BE NAKED. It is a byte-for-byte clone of
+                // the costume anchors, and the TEMPLATE carries a circlet's
+                // whole wardrobe: BOD2 on the HAIR and circlet slots, a
+                // circlet ARMA on its armature. The ordinary anchors never
+                // show it -- the costume overwrites their armorAddons with
+                // donor lists -- but the carrier is anchor 32 precisely so
+                // the costume leaves it alone, which also left the authored
+                // circlet addon LIVE. Wearing it therefore claimed the hair
+                // slot and fought the helmet's addon: helmet invisible over a
+                // bald head, on WHATEVER biped slot we parked the ARMO
+                // (measured: 60 and 59 alike -- the ARMO slot was never the
+                // actor, its armature was). Strip the armature once, here,
+                // where the form is first resolved; the slot mask is
+                // rewritten per wear by Lend already.
+                if (cached && !cached->armorAddons.empty()) {
+                    cached->armorAddons.clear();
+                    SKSE::log::info("[DUALRING] carrier armature stripped "
+                                    "(authored circlet addon)");
+                }
             }
             return cached;
         }
