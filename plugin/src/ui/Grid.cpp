@@ -7193,6 +7193,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 while (delta > 0) {
                     const int n = (std::min)(cap, delta);
                     Mint mp;
+                    // ★★-1 MEANS UNPLACED. LayoutEntry defaults to col 0 row 0
+                    // -- a real cell -- so the OccPlace guard below ("col < 0")
+                    // never fired for a hint-less mint and every one of them
+                    // sat down at [0,0], on top of whatever lived there (user
+                    // report: a torch unequipped onto an occupied first cell).
+                    // The reconciler's mint sets -1 for the same reason.
+                    mp.le.col = -1;
+                    mp.le.row = -1;
                     mp.le.uid = UidOf(pool);
                     mp.le.sig = SigOf(pool);
                     // partner-drop hint, same rules as the gear branch above
@@ -11331,11 +11339,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (accepted) {
                 // GI54: the INCOMING item's engine hand, not the occupant's --
                 // a shield replacing a left-hand sword is still hand 0.
+                const int equipUnits = Equip::EquipCountFor(a_held.obj, a_held.count);
                 NotePendingEquip(a_held.obj, a_held.uid, a_held.sig,
                                  engineHand(a_held.obj), a_held.key,
-                                 Equip::EquipCountFor(a_held.obj, a_held.count),
-                                 a_held.xlIdx);
+                                 equipUnits, a_held.xlIdx);
                 g_drainHint = { FormKey(a_held.obj), a_held.key };
+                // ★A carry BIGGER than what one equip takes -- a torch stack
+                // dropped on the hand; ammo is exempt because EquipCountFor
+                // takes its whole tile. The engine wears one; the surplus is
+                // back in the pack, but equipping moves no containers, so no
+                // event will ever redraw it -- the stack just vanished from
+                // the board (user report). The "no tail rebuild for accepted
+                // drops" verdict was measured on shapes where the carry and
+                // the equip agree; this shape breaks that premise, and the
+                // rebuild it pays for is exactly one. The drain hint above
+                // bills the in-flight unit to the lifted tile, so the
+                // remainder re-emits in its own cell.
+                if (a_held.count > equipUnits) {
+                    RequestRebuild();
+                }
             }
             g_held.reset();
             // Only an ACCEPTED equip that actually displaces something starts the
