@@ -207,6 +207,33 @@ namespace
                             FUI::Grid::RequestRebuild();
                         }
                     });
+                } else {
+                    // ★The helmet that never showed (user report): while OUR
+                    // menu holds the game paused, the engine's actor update --
+                    // the pass that applies a finished equip to the biped 3D --
+                    // does not run. ProcessPending forces one refresh two UI
+                    // ticks after the request, but that is a GUESS about when
+                    // the equip data has settled; when the engine applied
+                    // late, the refresh redrew the old biped and the worn
+                    // helmet stayed invisible until something else forced one
+                    // (cycling loadout presets was the reported healer --
+                    // Loadout.cpp forces the same refresh). THIS event is the
+                    // engine saying the equip IS applied, the exact moment the
+                    // frame count tried to approximate, so the refresh anchors
+                    // here. Marshalled: equip events arrive on arbitrary
+                    // threads (rule 4), and the menu/3D checks belong on the
+                    // main thread anyway. Outside our menu the game is
+                    // unpaused and refreshes itself -- skip.
+                    SKSE::GetTaskInterface()->AddTask([]() {
+                        auto* ui = RE::UI::GetSingleton();
+                        if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return;
+                        auto* player = RE::PlayerCharacter::GetSingleton();
+                        if (!player || !player->Is3DLoaded()) return;
+                        if (auto* proc =
+                                player->GetActorRuntimeData().currentProcess) {
+                            proc->Update3DModel(player);
+                        }
+                    });
                 }
                 FUI::Grid::MarkCapacityDirty();
                 // The active preset IS what the player is wearing, so anything
