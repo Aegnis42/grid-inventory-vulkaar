@@ -28,10 +28,13 @@
 // first, normalised distance as the tiebreak (the B1-measured rule, PLAN
 // §8-4) -- and the rebuild's relabel block consumes the assignment through
 // TakePair. Before this, N vacated pools met M arriving pools in HASH ORDER,
-// which is no order at all: two enchanted swords draining differently in
-// combat could swap board cells at the next menu open, the very §1(b)
-// violation the census was built to measure. "!census = 0" remains as an
-// emergency cutoff (the ledger's promotion pattern).
+// which is no order at all: two same-form blades re-tempered in one
+// grindstone session (values move, counts do not, no event fires) could come
+// back seated in each other's cells at the next menu open, the very §1(b)
+// violation the census was built to measure. The assignment only concerns
+// UNWORN units -- a worn item is off the board, so combat charge drain has
+// nothing to relabel. "!census = 0" remains as an emergency cutoff (the
+// ledger's promotion pattern).
 namespace FUI::Census
 {
     [[nodiscard]] bool Enabled();

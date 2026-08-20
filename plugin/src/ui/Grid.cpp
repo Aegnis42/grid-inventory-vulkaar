@@ -5833,13 +5833,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // §8-4): fewest changed axes first, normalised distance
                     // as the tiebreak. What decided this before was map order
                     // over sig-keyed pool strings -- hash order, no order at
-                    // all -- so two enchanted swords draining differently in
-                    // combat could swap cells at the next menu open, the very
-                    // §1(b) violation B1 was built to measure. Uid-keyed
-                    // pools ('@') stay out of it twice over: their key
-                    // survives a value change so they never relabel, and
-                    // SigOf reads 0 on them, which would collide with the
-                    // plain pool's legitimate sig 0.
+                    // all. The habitat is an UNWORN item whose values change
+                    // while the menu is shut -- the grindstone above all:
+                    // tempering moves no counts, so no event fires, and two
+                    // same-form blades re-tempered in one session meet the
+                    // next open as an N x M cross that hash order could seat
+                    // in each other's cells (§1(b)). NOT the combat-drain
+                    // case: charge drains on WIELDED units, which are off the
+                    // board -- nothing to relabel (user caught this comment
+                    // claiming otherwise). Uid-keyed pools ('@') stay out of
+                    // it twice over: their key survives a value change so
+                    // they never relabel, and SigOf reads 0 on them, which
+                    // would collide with the plain pool's legitimate sig 0.
                     std::vector<std::string> vacLeft;
                     for (const auto& from : vacated) {
                         std::optional<std::uint16_t> want;
