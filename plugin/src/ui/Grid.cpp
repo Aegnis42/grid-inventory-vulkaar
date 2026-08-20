@@ -6814,15 +6814,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             !fl.empty() && g_typedBagsHeld.contains(fl)) {
             return decline("typed bag would claim it");
         }
-        auto* entry = LiveEntryOf(player, obj);
-        if (!entry) return decline("no live entry");
-        int count = 0;
-        {
-            auto inv = player->GetInventory(
-                [&](RE::TESBoundObject& o) { return &o == obj; });
-            for (auto& [o2, d2] : inv) count = d2.first;
+        // ★The entry comes from GetInventory -- the same source the rebuild
+        // walks. LiveEntryOf answers from the CHANGES list, and a PLAIN item
+        // that has just been unequipped often has no changes entry left (its
+        // last extra list, ExtraWorn, went with the unequip) -- so the most
+        // common case of all, a plain weapon displaced by a slot conflict,
+        // always declined. The map OWNS the entry: it lives to the end of
+        // this function, and nothing here outlives the call (원칙 2).
+        auto inv = player->GetInventory(
+            [&](RE::TESBoundObject& o) { return &o == obj; });
+        int                     count = 0;
+        RE::InventoryEntryData* entry = nullptr;
+        for (auto& [o2, d2] : inv) {
+            count = d2.first;
+            entry = d2.second.get();
         }
         if (count <= 0) return decline("count 0");
+        if (!entry) return decline("no entry");
 
         // The same walk the rebuild runs, scoped to this form: identity,
         // slot assignment, every off-board exclusion (held / trash / pending)
