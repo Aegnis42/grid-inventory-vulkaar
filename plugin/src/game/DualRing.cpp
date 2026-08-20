@@ -247,6 +247,11 @@ namespace FUI::DualRing
         em->EquipObject(p, c, nullptr, 1, nullptr, false, false, false, true);
 
         g_ringId = a_ring->GetFormID();
+        // ★The carrier bypasses the engine's equip of the RING itself, which
+        // is where the vanilla equip sound lives -- so the second slot wore
+        // rings in total silence (user report). The pickup clink is the same
+        // substitute every board action already uses.
+        p->PlayPickUpSound(a_ring, true, false);
         SKSE::log::info("[DUALRING] second ring '{}' on slot {} (0x{:08X}), ench '{}'",
             NameOf(a_ring), slot + 30, mask,
             a_ring->formEnchanting ? NameOf(a_ring->formEnchanting) : "none");
@@ -268,6 +273,16 @@ namespace FUI::DualRing
             p->RemoveItem(c, 99, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
         }
         Reclaim();
+        // ★Both INSIDE the gate (규칙 6): every caller of TakeOff needs them.
+        // The sound for the same reason as Wear's; the rebuild because the
+        // carrier's stand-down is a board return with NO engine unequip event
+        // -- equipping the same form normally makes the carrier let go
+        // (Equip::ProcessPending), and the only thing that ever drew that
+        // return was the doll-drop tail rebuild. The !rbdrop interrogation of
+        // Grid.cpp:11162 found it: the ring vanished until the next unrelated
+        // rebuild. The place that knows the carrier let go asks for the draw.
+        if (p && ring) p->PlayPickUpSound(ring, false, false);
+        Grid::RequestRebuild();
         SKSE::log::info("[DUALRING] second ring '{}' removed", NameOf(ring));
         g_ringId = 0;
     }
@@ -278,8 +293,7 @@ namespace FUI::DualRing
     {
         if (g_wantOff) {
             g_wantOff = false;
-            TakeOff();
-            Grid::RequestRebuild();
+            TakeOff();   // rebuild + sound live inside the gate now
         }
         if (!g_ringId) return;
         auto* p = RE::PlayerCharacter::GetSingleton();
