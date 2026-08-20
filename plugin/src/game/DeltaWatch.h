@@ -19,8 +19,9 @@ namespace RE
 //
 //   1. ECHO. Our own systems call RemoveItem, and that raises another
 //      ContainerChanged. An applier that cannot tell its own echo from an
-//      outside delta cannot roll anything back. We measure how often the
-//      (form, direction, count) triple is ambiguous.
+//      outside delta cannot roll anything back. ★The ambiguity measurement
+//      (2+ open requests sharing form+direction) lives in the LEDGER, which
+//      does the matching -- this module only counts matched/unmatched.
 //   2. THREADING. These events arrive on arbitrary threads. Arrival order and
 //      apply order are not the same thing, and board deltas are order
 //      sensitive, so both are stamped.

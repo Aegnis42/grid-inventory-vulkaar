@@ -50,6 +50,7 @@ namespace FUI::Ledger
         std::uint32_t g_confirmed = 0;
         std::uint32_t g_expired = 0;
         std::uint32_t g_surplus = 0;   // events that matched no open request
+        std::uint32_t g_ambiguous = 0; // events with 2+ (form, direction) candidates
     }
 
     bool Enabled() { return g_on; }
@@ -87,6 +88,23 @@ namespace FUI::Ledger
     {
         if (!g_on) return nullptr;
         std::lock_guard lk(g_mtx);
+        // ★B-1: HOW OFTEN is the pick a guess? When two or more open requests
+        // share (form, direction), FIFO chooses the oldest and cannot know it
+        // chose right. §8-2 reported this as "ambiguous 0" from a counter that
+        // was never incremented -- the number below is the measured one, and
+        // the ledger measures it because the ledger does the matching. It runs
+        // in every session now (the ledger is permanent wiring), so the tail
+        // case B0 never produced naturally gets counted whenever it happens.
+        int candidates = 0;
+        for (const auto& e : g_open) {
+            if (e.form == a_form && (e.delta < 0) == (a_delta < 0)) ++candidates;
+        }
+        if (candidates >= 2) {
+            ++g_ambiguous;
+            logger::warn("[LEDGER] ★ambiguous confirm: {:08X} {:+d} matches {} open "
+                         "request(s) -- FIFO takes the oldest",
+                a_form, a_delta, candidates);
+        }
         // ★OLDEST match wins, and the count is deliberately not compared: the
         // engine splits and merges stacks on its own, so requiring the numbers
         // to agree would reject confirmations that are perfectly real.
@@ -149,9 +167,10 @@ namespace FUI::Ledger
             orphaned.assign(g_open.begin(), g_open.end());
             g_open.clear();
             logger::info("[LEDGER] @{}: submitted {} / confirmed {} / expired {} / "
-                         "outstanding {} -- surplus events {}",
-                a_why, g_submitted, g_confirmed, g_expired, orphaned.size(), g_surplus);
-            g_submitted = g_confirmed = g_expired = g_surplus = 0;
+                         "outstanding {} -- surplus {} / ambiguous {}",
+                a_why, g_submitted, g_confirmed, g_expired, orphaned.size(),
+                g_surplus, g_ambiguous);
+            g_submitted = g_confirmed = g_expired = g_surplus = g_ambiguous = 0;
         }
         // ★Outside the lock, same reasoning as Tick. Confirmations that landed
         // while no menu was ticking are DELIVERED, not dropped -- the engine
@@ -207,7 +226,7 @@ namespace FUI::Ledger
         std::lock_guard lk(g_mtx);
         g_open.clear();
         g_landed.clear();
-        g_submitted = g_confirmed = g_expired = g_surplus = 0;
+        g_submitted = g_confirmed = g_expired = g_surplus = g_ambiguous = 0;
         logger::info("[LEDGER] reset ({})", a_why);
     }
 }

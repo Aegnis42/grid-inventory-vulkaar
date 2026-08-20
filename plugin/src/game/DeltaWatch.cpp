@@ -29,9 +29,12 @@ namespace FUI::DeltaWatch
         std::uint64_t g_events = 0;   // since the last reconcile
 
         // ---- echo bookkeeping (the requests themselves live in Ledger) --------
+        // ★No ambiguity counter here any more: it was declared, reset and
+        // PRINTED but never incremented, so "ambiguous 0" read as a measured
+        // zero when it was an unimplemented one (REVIEW B-1). The real count
+        // lives in the Ledger, which does the matching -- see its Flush line.
         std::uint32_t g_matched = 0;
         std::uint32_t g_unmatched = 0;
-        std::uint32_t g_ambiguous = 0;
 
         // Thread ids are long and meaningless; a small dense index is what we
         // actually read ("did #142 and #143 arrive on different threads").
@@ -131,7 +134,7 @@ namespace FUI::DeltaWatch
         g_baseline.clear();
         g_shadow.clear();
         g_events = 0;
-        g_matched = g_unmatched = g_ambiguous = 0;
+        g_matched = g_unmatched = 0;
         logger::info("[DELTA] reset ({}) -- next reconcile re-baselines", a_why);
     }
 
@@ -162,7 +165,7 @@ namespace FUI::DeltaWatch
                          "discarded)", a_when, g_baseline.size(), g_events);
             g_shadow.clear();
             g_events = 0;
-            g_matched = g_unmatched = g_ambiguous = 0;
+            g_matched = g_unmatched = 0;
             return;
         }
 
@@ -198,13 +201,13 @@ namespace FUI::DeltaWatch
         }
 
         logger::info("[DELTA] reconcile @{}: {} events, {} forms, echo matched {} / "
-                     "unmatched {} / ambiguous {} -- {}",
-            a_when, g_events, forms.size(), g_matched, g_unmatched, g_ambiguous,
+                     "unmatched {} -- {}  (ambiguity lives in [LEDGER])",
+            a_when, g_events, forms.size(), g_matched, g_unmatched,
             bad == 0 ? "CLEAN" : "SEE MISMATCH ABOVE");
 
         g_baseline = std::move(actual);
         g_shadow.clear();
         g_events = 0;
-        g_matched = g_unmatched = g_ambiguous = 0;
+        g_matched = g_unmatched = 0;
     }
 }

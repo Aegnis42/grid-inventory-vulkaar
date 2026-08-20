@@ -4901,6 +4901,121 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // ---- Phase 3: Rebuild stages (bodies moved verbatim) ----
     namespace
     {
+        // ★B3 prep: promoted from a [&] lambda inside CollectDisplayTiles. The
+        // partial-update path (AddUnitToBoard) has to mint a tile OUTSIDE a
+        // rebuild, and a capture-everything lambda cannot be called from
+        // there. Everything the tile needs arrives as a parameter now; the
+        // body is the lambda's, verbatim. a_entry may carry stale pointers
+        // after an engine change -- callers pass the LIVE entry.
+        void MakeDisplayTile(RE::TESBoundObject* a_obj, RE::InventoryEntryData* a_entry,
+                             const GridDef& a_gdef, std::uint8_t a_glow,
+                             const std::string& a_key, int a_cnt,
+                             const LayoutEntry& a_le, int a_xlIdx = -1)
+        {
+            const int col = a_le.col, row = a_le.row, rot = a_le.rot;
+            const std::string& bag = a_le.bag;
+            Item it;
+            it.key = a_key;
+            it.obj = a_obj;
+            it.glow = a_glow;
+            it.count = a_cnt;
+            it.def = a_gdef;
+            // GI62: the footprint the player left this tile at. Everything
+            // downstream -- placement, collision, hit test, ghost, shading
+            // -- reads `mask` and needs no further knowledge of rotation.
+            it.rot = CanRotate(it.def) ? (rot & 3) : 0;
+            it.mask = MaskOf(it.def, it.rot);
+            it.col = col;
+            it.row = row;
+            it.inBag = bag;
+            it.uid = a_le.uid;   // ★from the slot's hint, not from its name
+            it.sig = a_le.sig;
+            it.xlIdx = a_xlIdx;
+            // ★★A TILE DRAWN FROM ITS LAYOUT ENTRY ALONE HAS NO LIVE
+            // POSITION. Trash-parked tiles are emitted straight out of
+            // g_layout with no unit walk behind them, so xlIdx is -1 --
+            // and with it every per-unit answer went blank: no enchant
+            // halo, no poison drop, and a tooltip that resolved no list
+            // at all, so a TEMPERED dagger sitting in the bin drew as a
+            // plain one. Taking it back out "fixed" it, because then the
+            // walk had a position for it again.
+            //
+            // The slot still knows WHICH unit it holds. Resolve the list
+            // from that instead: identity outlives position, which is the
+            // entire reason it lives on the slot.
+            if (it.xlIdx < 0 && (it.uid != 0 || it.sig != 0) &&
+                a_entry && a_entry->extraLists) {
+                int xi = 0;
+                for (auto* xl : *a_entry->extraLists) {
+                    const int here = xi++;
+                    if (!xl) continue;
+                    // a worn list belongs to the copy on the body
+                    if (xl->HasType<RE::ExtraWorn>() ||
+                        xl->HasType<RE::ExtraWornLeft>()) {
+                        continue;
+                    }
+                    const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
+                    if (it.uid != 0) {
+                        if (xu && xu->uniqueID == it.uid) { it.xlIdx = here; break; }
+                        continue;
+                    }
+                    // a uid unit is the sole member of its own pool, so it
+                    // can never answer a signature-pool request
+                    if (xu && xu->uniqueID != 0) continue;
+                    if (InstanceSig(xl) == it.sig) { it.xlIdx = here; break; }
+                }
+            }
+            // D2: the crafted-enchant glow belongs to THIS unit
+            if (const auto* xl = ExtraForTile(a_entry, it.uid, it.xlIdx)) {
+                if (const auto* xe = xl->GetByType<RE::ExtraEnchantment>();
+                    xe && xe->enchantment) {
+                    it.glow |= 1;
+                }
+                // GI66: poison only. The temper bit was computed here
+                // too and nothing reads it any more -- temper lives in
+                // the name, the damage number and the price, and marking
+                // it as well meant marking almost every weapon past
+                // mid-game.
+                if (const auto* xp = xl->GetByType<RE::ExtraPoison>();
+                    xp && xp->poison) {
+                    it.glow |= 4;
+                }
+            }
+            // GI40: the star belongs to the POOL, not to one list.
+            //
+            // Asking a single ExtraDataList was wrong in both directions.
+            // Entry-level (vanilla's test) starred every copy of the form,
+            // tempered ones included. List-level lost the star the moment
+            // anything split the pool -- equipping one dagger moves the
+            // ExtraHotkey onto the worn list, and all the spares standing
+            // in the bag went dark even though nothing was unfavourited.
+            //
+            // The pool is the right unit: it is exactly "the identical
+            // things", which is what the engine can mark and what rule 53
+            // promises. Tempered and plain stay separate (rule 54) because
+            // they are separate pools.
+            it.fav = PoolHasStar(a_entry, it.uid, it.sig);
+            // ★Same question, same shape: asked of the LIVE list rather
+            // than of a cache keyed by the tile's name.
+            it.stolen = PoolIsStolen(a_entry, it.uid, it.sig);
+            it.quest  = PoolIsQuest(a_entry, it.uid, it.sig);
+            // overflow-zone spots (rows past the hard board) are TEMPORARY
+            // — never honour them, so the item first-fits back INTO the
+            // board the moment space frees up and the extra rows collapse.
+            if (it.inBag.empty() && it.row >= kMinRows) { it.col = -1; it.row = -1; }
+            // E3: bags live in main — except a parked (empty) bag in
+            // the trash (F2 allows trashing an empty bag), and (E4b) a
+            // bag stowed by hand inside a GENERAL bag. Anything else a
+            // bag ref points at (typed bag, stale key) reflows to main.
+            if (it.def.bag != 0 && it.inBag != kTrashKey && !it.inBag.empty()) {
+                const auto ba = g_bagAcceptByForm.find(BaseKey(it.inBag));
+                if (ba == g_bagAcceptByForm.end() || !ba->second.empty()) {
+                    it.inBag.clear();
+                }
+            }
+            g_items.push_back(std::move(it));
+        }
+
         // stage 1+2: walk the live inventory into display tiles — coin
         // mirror partition + G4 per-tile reconcile. Fills g_items and the
         // per-form caches (g_gold / g_values).
@@ -5253,110 +5368,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // signature took col/row/bag/rot loose and dug uid/sig out of the
                 // key; passing the LayoutEntry says plainly where a tile's
                 // properties live, and there is no longer anywhere else to look.
+                // ★B3 prep: the body is MakeDisplayTile now -- promoted so the
+                // partial-update path can mint tiles outside a rebuild. This
+                // wrapper only pins the loop-local context.
                 auto makeTile = [&](const std::string& key, int cnt,
                                     const LayoutEntry& le, int xlIdx = -1) {
-                    const int col = le.col, row = le.row, rot = le.rot;
-                    const std::string& bag = le.bag;
-                    Item it;
-                    it.key = key;
-                    it.obj = obj;
-                    it.glow = glow;
-                    it.count = cnt;
-                    it.def = gdef;
-                    // GI62: the footprint the player left this tile at. Everything
-                    // downstream -- placement, collision, hit test, ghost, shading
-                    // -- reads `mask` and needs no further knowledge of rotation.
-                    it.rot = CanRotate(it.def) ? (rot & 3) : 0;
-                    it.mask = MaskOf(it.def, it.rot);
-                    it.col = col;
-                    it.row = row;
-                    it.inBag = bag;
-                    it.uid = le.uid;   // ★from the slot's hint, not from its name
-                    it.sig = le.sig;
-                    it.xlIdx = xlIdx;
-                    // ★★A TILE DRAWN FROM ITS LAYOUT ENTRY ALONE HAS NO LIVE
-                    // POSITION. Trash-parked tiles are emitted straight out of
-                    // g_layout with no unit walk behind them, so xlIdx is -1 --
-                    // and with it every per-unit answer went blank: no enchant
-                    // halo, no poison drop, and a tooltip that resolved no list
-                    // at all, so a TEMPERED dagger sitting in the bin drew as a
-                    // plain one. Taking it back out "fixed" it, because then the
-                    // walk had a position for it again.
-                    //
-                    // The slot still knows WHICH unit it holds. Resolve the list
-                    // from that instead: identity outlives position, which is the
-                    // entire reason it lives on the slot.
-                    if (it.xlIdx < 0 && (it.uid != 0 || it.sig != 0) &&
-                        entry && entry->extraLists) {
-                        int xi = 0;
-                        for (auto* xl : *entry->extraLists) {
-                            const int here = xi++;
-                            if (!xl) continue;
-                            // a worn list belongs to the copy on the body
-                            if (xl->HasType<RE::ExtraWorn>() ||
-                                xl->HasType<RE::ExtraWornLeft>()) {
-                                continue;
-                            }
-                            const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
-                            if (it.uid != 0) {
-                                if (xu && xu->uniqueID == it.uid) { it.xlIdx = here; break; }
-                                continue;
-                            }
-                            // a uid unit is the sole member of its own pool, so it
-                            // can never answer a signature-pool request
-                            if (xu && xu->uniqueID != 0) continue;
-                            if (InstanceSig(xl) == it.sig) { it.xlIdx = here; break; }
-                        }
-                    }
-                    // D2: the crafted-enchant glow belongs to THIS unit
-                    if (const auto* xl = ExtraForTile(entry, it.uid, it.xlIdx)) {
-                        if (const auto* xe = xl->GetByType<RE::ExtraEnchantment>();
-                            xe && xe->enchantment) {
-                            it.glow |= 1;
-                        }
-                        // GI66: poison only. The temper bit was computed here
-                        // too and nothing reads it any more -- temper lives in
-                        // the name, the damage number and the price, and marking
-                        // it as well meant marking almost every weapon past
-                        // mid-game.
-                        if (const auto* xp = xl->GetByType<RE::ExtraPoison>();
-                            xp && xp->poison) {
-                            it.glow |= 4;
-                        }
-                    }
-                    // GI40: the star belongs to the POOL, not to one list.
-                    //
-                    // Asking a single ExtraDataList was wrong in both directions.
-                    // Entry-level (vanilla's test) starred every copy of the form,
-                    // tempered ones included. List-level lost the star the moment
-                    // anything split the pool -- equipping one dagger moves the
-                    // ExtraHotkey onto the worn list, and all the spares standing
-                    // in the bag went dark even though nothing was unfavourited.
-                    //
-                    // The pool is the right unit: it is exactly "the identical
-                    // things", which is what the engine can mark and what rule 53
-                    // promises. Tempered and plain stay separate (rule 54) because
-                    // they are separate pools.
-                    it.fav = PoolHasStar(entry, it.uid, it.sig);
-                    // ★Same question, same shape: asked of the LIVE list rather
-                    // than of a cache keyed by the tile's name.
-                    it.stolen = PoolIsStolen(entry, it.uid, it.sig);
-                    it.quest  = PoolIsQuest(entry, it.uid, it.sig);
-                    // overflow-zone spots (rows past the hard board) are TEMPORARY
-                    // — never honour them, so the item first-fits back INTO the
-                    // board the moment space frees up and the extra rows collapse.
-                    if (it.inBag.empty() && it.row >= kMinRows) { it.col = -1; it.row = -1; }
-                    // E3: bags live in main — except a parked (empty) bag in
-                    // the trash (F2 allows trashing an empty bag), and (E4b) a
-                    // bag stowed by hand inside a GENERAL bag. Anything else a
-                    // bag ref points at (typed bag, stale key) reflows to main.
-                    if (it.def.bag != 0 && it.inBag != kTrashKey && !it.inBag.empty()) {
-                        const auto ba = g_bagAcceptByForm.find(BaseKey(it.inBag));
-                        if (ba == g_bagAcceptByForm.end() || !ba->second.empty()) {
-                            it.inBag.clear();
-                        }
-                    }
-                    g_items.push_back(std::move(it));
+                    MakeDisplayTile(obj, entry, gdef, glow, key, cnt, le, xlIdx);
                 };
 
                 if (cap <= 1) {
