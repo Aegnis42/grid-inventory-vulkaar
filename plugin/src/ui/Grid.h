@@ -284,6 +284,11 @@ namespace FUI::Grid
     void RebuildIfNeeded(const std::source_location& a_where =
                              std::source_location::current());
 
+    // ★B4-2c: the engine confirmed an equip of this form (TESEquipEvent,
+    // equipped == true) -- lands the oldest arriving pending-equip entry.
+    // This is the worn-clock's authority now; called from the sink's task.
+    void NoteEquipLanded(RE::FormID a_form);
+
     // Capacity system: true when a_obj could be added right now — it stacks
     // onto an existing tile, or its footprint first-fits into the HARD
     // 10 x 14 main board after every current occupant placed (bag-assigned

@@ -234,6 +234,10 @@ namespace
                         // B4-2 observation: BEFORE the menu gate below -- the
                         // ledger listens whether our menu is open or not.
                         FUI::WornLedger::OnEquip(fid);
+                        // B4-2c: same confirm, delivered to the equip queue --
+                        // the worn-clock flips here now, not when our call
+                        // returned.
+                        FUI::Grid::NoteEquipLanded(fid);
                         auto* ui = RE::UI::GetSingleton();
                         if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return;
                         auto* player = RE::PlayerCharacter::GetSingleton();

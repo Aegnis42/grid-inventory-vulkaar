@@ -453,6 +453,15 @@ namespace FUI::Grid
             // caught up. Only the stackable branch reads this; the per-unit
             // walker never sees an entry worth more than one.
             int           units = 1;
+            // ★B4-2c: the ENGINE confirmed this equip -- TESEquipEvent with
+            // equipped == true, delivered through NoteEquipLanded. This is
+            // what `applied` above always wanted to mean: `applied` flips
+            // when OUR CALL RETURNS (ProcessPending marks the whole queue),
+            // which says nothing about whether the engine actually wore the
+            // unit. The worn-clock reads THIS field now; `applied` stays for
+            // the release bookkeeping that genuinely is about the call.
+            // (Appended last, same aggregate rule as `arriving`.)
+            bool          landed = false;
         };
         std::vector<OffBoardUnit>             g_pendingEquip;
         std::chrono::steady_clock::time_point g_pendingEquipWhen{};
@@ -4487,11 +4496,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // the board for a frame and the outgoing one is hidden twice
                     // -- a tile blinking out and back during a swap.
                     //
-                    // The queue knows when it landed (`applied`); identity cannot
-                    // answer this, because with two identical weapons the two
-                    // lists are indistinguishable. Same rule the conservation
-                    // check already uses.
-                    const bool worn = u.mayBeWorn && !(u.arriving && !u.applied);
+                    // ★B4-2c: `landed`, not `applied`. The old clock flipped
+                    // when OUR CALL returned, a frame or more before the
+                    // engine actually wore anything; this one flips on the
+                    // engine's own TESEquipEvent (NoteEquipLanded) -- the
+                    // event IS the moment the old clock was guessing at.
+                    // Identity still cannot answer it: with two identical
+                    // weapons the two lists are indistinguishable.
+                    const bool worn = u.mayBeWorn && !(u.arriving && !u.landed);
                     takeOne(u.uid, u.sig, worn, u.why, u.hand, u.xlIdx);
                 }
             }
@@ -5619,8 +5631,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         for (const auto& o : offv) {
                             why += std::string(o.why) + " ";
                             // an ARRIVING unit only counts as worn once its equip
-                            // has actually run -- the queue says so, identity cannot
-                            if (o.mayBeWorn && !(o.arriving && !o.applied) &&
+                            // has actually run -- the engine's event says so
+                            // (B4-2c: same clock as the walk, or the check
+                            // would flag the very windows the flip closed)
+                            if (o.mayBeWorn && !(o.arriving && !o.landed) &&
                                 wornTaken < wornN && wornBacked(o)) {
                                 ++wornTaken;
                                 continue;
@@ -7523,6 +7537,24 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     void MarkEquipsApplied()
     {
         for (auto& u : g_pendingEquip) u.applied = true;
+    }
+
+    void NoteEquipLanded(RE::FormID a_form)
+    {
+        // B4-2c: the engine's own confirm, one event landing one entry --
+        // oldest first, the order the engine ran them (the same discipline
+        // rule 1 demands of the container ledger). Form-wide match: the event
+        // names no unit (rule 2), and the queue holds our requests in order.
+        auto* form = RE::TESForm::LookupByID(a_form);
+        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+        if (!obj) return;
+        const std::string base = FormKey(obj);
+        for (auto& u : g_pendingEquip) {
+            if (u.base == base && u.arriving && !u.landed) {
+                u.landed = true;
+                return;
+            }
+        }
     }
 
 
