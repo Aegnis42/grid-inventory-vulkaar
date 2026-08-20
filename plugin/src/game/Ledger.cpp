@@ -1,5 +1,6 @@
 #include "game/Ledger.h"
 
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <vector>
@@ -122,6 +123,20 @@ namespace FUI::Ledger
         // those two apart is B3's problem; counting them is B2's.
         ++g_surplus;
         return nullptr;
+    }
+
+    std::map<std::uint32_t, int> OpenOutgoing()
+    {
+        std::map<std::uint32_t, int> out;
+        if (!g_on) return out;
+        std::lock_guard lk(g_mtx);
+        for (const auto& e : g_open) {
+            // "use" is the equip queue's jurisdiction -- see the header
+            if (e.delta < 0 && (!e.who || std::strcmp(e.who, "use") != 0)) {
+                out[e.form] += -e.delta;
+            }
+        }
+        return out;
     }
 
     void Tick()

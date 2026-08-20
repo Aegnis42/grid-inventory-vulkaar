@@ -183,6 +183,9 @@ namespace FUI
         // request its full chance, and what is left by then really was never
         // answered.
         FUI::Ledger::Flush("since-last-open");
+        // B4-3a observation: after the flush, nothing should be in flight --
+        // the removal counters and the ledger must tell the same story.
+        FUI::Grid::AuditRemovals("menu-open");
         FlushInputState();
         UIRoot::OnShow();   // whoosh plays deferred (UIRoot) — at kShow time
                             // the audio path swallowed it
@@ -205,6 +208,7 @@ namespace FUI
         (void)FUI::Census::Take("menu-close");
         // ...and across the in-menu session (our own equip UI's requests)
         FUI::WornLedger::Audit("menu-close");
+        FUI::Grid::AuditRemovals("menu-close");
         ItemPreview::GetSingleton()->End();
         UIRoot::OnClose();
     }

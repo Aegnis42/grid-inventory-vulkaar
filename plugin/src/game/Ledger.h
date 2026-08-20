@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 
 // 1.4 / B2 — the request ledger. ★PERMANENT WIRING since the A-section
@@ -84,6 +85,16 @@ namespace FUI::Ledger
     // the board. Queueing them here also keeps them in arrival order.
     using ConfirmFn = void (*)(const Expired&);
     void SetOnConfirm(ConfirmFn a_fn);
+
+    // ★B4-3a: the OPEN outgoing total per form -- how many units the ledger
+    // currently believes are LEAVING the player. The board keeps a parallel
+    // set of books for the same requests (g_pendingRemoveForm and friends,
+    // rule 5's "traces in many places"); before those can be absorbed into
+    // this ledger, the two must be measured to agree whenever the water is
+    // still. "use" entries are excluded: consumption is tracked by the equip
+    // queue, never by the removal counters, so counting it here would report
+    // a divergence that is really a difference in jurisdiction.
+    [[nodiscard]] std::map<std::uint32_t, int> OpenOutgoing();
 
     // One frame passed. Ages the outstanding requests and expires the stale.
     void Tick();

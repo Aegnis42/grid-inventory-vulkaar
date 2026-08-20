@@ -8052,6 +8052,45 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
     }
 
+    void AuditRemovals(const char* a_when)
+    {
+        // ★B4-3a, observation only: the removal counters and the request
+        // ledger are two sets of books for the SAME requests -- the counters
+        // written at click time and drained when the engine call returns, the
+        // ledger entries submitted before the call and retired by its event.
+        // Mid-flight the two phases differ by design; at a menu boundary the
+        // water is still and the books must agree, or the absorption B4-3
+        // plans (counters -> ledger) would change behaviour where they
+        // diverge. Same contract as the worn ledger's audit: measure to a
+        // standstill first.
+        const auto open = Ledger::OpenOutgoing();
+        int bad = 0;
+        for (const auto& [fid, n] : g_pendingRemoveForm) {
+            const auto it = open.find(fid);
+            const int  lg = it == open.end() ? 0 : it->second;
+            if (lg != n) {
+                ++bad;
+                const auto* f = RE::TESForm::LookupByID(fid);
+                SKSE::log::warn("[RMV] @{} MISMATCH {:08X} '{}': counter {} vs "
+                                "ledger {}", a_when, fid,
+                    f && f->GetName() ? f->GetName() : "?", n, lg);
+            }
+        }
+        for (const auto& [fid, n] : open) {
+            if (!g_pendingRemoveForm.contains(fid)) {
+                ++bad;
+                const auto* f = RE::TESForm::LookupByID(fid);
+                SKSE::log::warn("[RMV] @{} MISMATCH {:08X} '{}': counter 0 vs "
+                                "ledger {}", a_when, fid,
+                    f && f->GetName() ? f->GetName() : "?", n);
+            }
+        }
+        if (bad == 0) {
+            SKSE::log::info("[RMV] @{} ok -- {} form(s) in flight", a_when,
+                            g_pendingRemoveForm.size());
+        }
+    }
+
     void ClearAllPendingRemoves()
     {
         g_pendingRemoveForm.clear();
