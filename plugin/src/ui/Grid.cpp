@@ -1670,14 +1670,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // when the suppression releases: a seamless handoff, one
             // exclusion at every moment.
             // ★...and not while the carrier's own unit RIDES THE CURSOR: a
-            // fromCarrier carry IS that unit, already excluded as "held". In
-            // the drop-swap window (BeginCarry's rebuild runs before Wear's
-            // TakeOff clears the carrier next tick) both entries stood for
-            // the one unit and the second exclusion took a SPARE down with it
-            // -- the identical rings in the pack flickered (user report).
+            // fromCarrier carry IS that unit, already excluded as "held".
+            // ★★That is ONLY the LIFT window, and the take-off flag is what
+            // names it. The old test was object identity -- but units of one
+            // form share one TESBoundObject, so "held == second" was also
+            // true for a DISPLACED former second ring while its same-form
+            // successor stood on the carrier, and this exclusion went dark:
+            // the successor, still in the pack, drew on the board as a third
+            // copy next to the cursor and the doll (user report). The
+            // drop-swap window this guard once also covered is the
+            // pending-equip guard's below -- the accepted drop always files
+            // an entry (NotePendingEquip), and that suppression spans the
+            // window until Wear has run.
             if (auto* second = DualRing::Second();
                 second && FormKey(second) == a_base &&
-                !(g_held && g_held->fromCarrier && g_held->obj == second) &&
+                !(g_held && g_held->fromCarrier && g_held->obj == second &&
+                  DualRing::TakeOffPending()) &&
                 std::none_of(g_pendingEquip.begin(), g_pendingEquip.end(),
                              [&](const OffBoardUnit& u) { return u.base == a_base; })) {
                 OffBoardUnit r;

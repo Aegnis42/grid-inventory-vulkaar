@@ -392,6 +392,8 @@ namespace FUI::DualRing
 
     void RequestTakeOff() { g_wantOff = true; }
 
+    bool TakeOffPending() { return g_wantOff; }
+
     void Tick()
     {
         if (g_wantOff) {

@@ -100,6 +100,16 @@ namespace FUI::DualRing
     // Queued form of TakeOff, for callers inside the render pass.
     void RequestTakeOff();
 
+    // A take-off has been asked for and not yet run (the render pass defers
+    // it to Tick). THE ring2-lift window: the cursor is holding the very unit
+    // the carrier still stands for, and the board's ring2 exclusion must
+    // yield to the carry's -- see OffBoardUnitsFor. Object identity cannot
+    // ask this: units of one form share one TESBoundObject, so "held == the
+    // second ring" was also true for a DISPLACED former second ring while its
+    // same-form successor stood on the carrier, and the exclusion went dark
+    // (user report: three copies of one ring on screen).
+    [[nodiscard]] bool TakeOffPending();
+
     // ---- lifecycle --------------------------------------------------------
     // Per game-update tick. ★Drops the whole thing if the ring left the
     // inventory -- sold, dropped, taken by a script. Observing beats
