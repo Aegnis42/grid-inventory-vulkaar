@@ -63,6 +63,12 @@ namespace FUI::DualRing
         kNoFreeSlot,
     };
     [[nodiscard]] Verdict CanWear(RE::TESObjectARMO* a_ring);
+    // ★Would wearing a_ring next to the CARRIED ring stack the same base
+    // effect? The duplication rule in one place: same enchantment family =
+    // true; an unenchanted ring stacks with anything = false. This is the
+    // test callers must use instead of comparing FORMS -- a plain pair of one
+    // form is two legal rings (user spec), form identity is not the rule.
+    [[nodiscard]] bool WouldDuplicate(RE::TESObjectARMO* a_ring);
     // English, for the log. A player-facing string would mean a new Lang key
     // and four translations; nothing shows these to the player yet.
     [[nodiscard]] const char* VerdictText(Verdict a_v);

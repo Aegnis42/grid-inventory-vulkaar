@@ -151,6 +151,12 @@ namespace FUI::DualRing
 
     RE::TESObjectARMO* Second() { return RingById(g_ringId); }
 
+    bool WouldDuplicate(RE::TESObjectARMO* a_ring)
+    {
+        auto* second = RingById(g_ringId);
+        return second && ShareAnEffect(second, a_ring);
+    }
+
     bool IsCarrier(const RE::TESForm* a_form)
     {
         auto* c = Carrier();
@@ -172,7 +178,21 @@ namespace FUI::DualRing
         // only because that check happened to pass.
         auto* other = FirstRing(p);
         if (!other) other = RingById(g_ringId);
-        if (other == a_ring) return Verdict::kAlreadyWorn;
+        if (other == a_ring) {
+            // ★FORM identity, not unit identity. A SPARE unit of the same form
+            // is a second ring, and a plain pair of one form is legal (the
+            // rule is the EFFECT, one test below) -- so refuse only when the
+            // player owns a single unit, where "wear it beside itself" is the
+            // only thing this drop could mean. The old form-level refusal
+            // blocked plain pairs outright (user spec correction).
+            int owned = 0;
+            for (const auto& [obj2, data] : p->GetInventory(
+                     [&](RE::TESBoundObject& o) { return &o == a_ring; })) {
+                owned = data.first;
+                (void)obj2;
+            }
+            if (owned <= 1) return Verdict::kAlreadyWorn;
+        }
         if (ShareAnEffect(other, a_ring)) return Verdict::kSameEffect;
         if (FreeSlot(p) < 0) return Verdict::kNoFreeSlot;
         // ★An empty first slot is no longer a refusal. Where the ring lands is

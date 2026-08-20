@@ -1087,15 +1087,39 @@ namespace FUI::Equip
                     continue;
                 }
             }
-            // ★★...and the reverse. Equipping the second ring NORMALLY -- onto
-            // the first slot, after taking the first ring off -- leaves the
-            // carrier still standing in for it, so the same ring reads as worn
-            // twice and the doll shows it in the slot it just left. The carrier
-            // lets go first; from here the engine owns the ring.
-            if (DualRing::Second() == obj) {
-                SKSE::log::info("[EQUIP] '{}' is moving to the first ring slot -- "
-                                "the carrier lets go", obj->GetName());
-                DualRing::TakeOff();
+            // ★★...and the reverse. Equipping a ring NORMALLY while the carrier
+            // stands in for one used to make the carrier let go whenever the
+            // FORMS matched -- but form identity is not the rule (user spec):
+            // a plain pair of one form is two legal rings, and two slots exist
+            // to wear them. The carrier lets go only when it must:
+            //   - the player owns a single unit of that form, so this equip is
+            //     the very ring the carrier holds moving to the first slot,
+            //     and leaving the carrier up would show it worn twice; or
+            //   - the incoming ring shares a base effect with the carried one
+            //     (the duplication the whole feature exists to prevent --
+            //     same-form enchanted pairs land here too, since one form is
+            //     one enchantment).
+            if (auto* second = DualRing::Second(); second) {
+                auto* ringIn = obj->As<RE::TESObjectARMO>();
+                bool  letGo = false;
+                if (second == obj) {
+                    int owned = 0;
+                    {
+                        auto inv2 = player->GetInventory(
+                            [&](RE::TESBoundObject& o) { return &o == obj; });
+                        for (auto& [o2, d2] : inv2) owned = d2.first;
+                    }
+                    letGo = owned <= 1 ||
+                            (ringIn && DualRing::WouldDuplicate(ringIn));
+                } else if (ringIn && Grid::IsRing(ringIn) &&
+                           DualRing::WouldDuplicate(ringIn)) {
+                    letGo = true;
+                }
+                if (letGo) {
+                    SKSE::log::info("[EQUIP] '{}' takes the first ring slot -- "
+                                    "the carrier lets go", obj->GetName());
+                    DualRing::TakeOff();
+                }
             }
             em->EquipObject(player, obj, srcList, act.count, slot,
                             false, false, true, true);
