@@ -11159,7 +11159,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                Equip::WornCountAt(g_slotTarget)),
                            swapSameForm);
             }
-            RequestRebuild();
+            // ★No tail rebuild any more. The !rbdrop interrogation measured
+            // every doll-drop shape without it: plain equips, swaps, same-form
+            // swaps, stackables, potions and tomes were all fine -- the carry
+            // had already left the board at lift, so there was nothing for a
+            // full rebuild to draw. The one real job it had (drawing the
+            // DualRing carrier's stand-down, which has no engine unequip
+            // event) moved into DualRing::TakeOff itself, where every caller
+            // gets it (rule 6).
             return true;
         }
 
