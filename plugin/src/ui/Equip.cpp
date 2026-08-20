@@ -741,9 +741,19 @@ namespace FUI::Equip
                     // takes off. Queuing the whole quiver but lifting ONE arrow
                     // sent the other ninety-nine straight to the pack the
                     // instant the click landed.
-                    Grid::BeginCarry(eq->obj, eq->uid, eq->sig, eq->hand,
-                                     /*swappedOut=*/false,
-                                     EquipCountFor(eq->obj, eq->count));
+                    // ★★...and the SECOND RING gets no carry at all -- exactly
+                    // what the comment above this block has said all along, and
+                    // what the code below it never enforced. Its unit was never
+                    // engine-worn, so a fromDoll carry's worn-backed accounting
+                    // consumed the FIRST ring's worn list instead (same plain
+                    // form) and that unit leaked onto the board: lifted ring on
+                    // the cursor AND in the pack (user report). TakeOff settles
+                    // it to the pack by itself; the stand-down IS the lift.
+                    if (!secondRing) {
+                        Grid::BeginCarry(eq->obj, eq->uid, eq->sig, eq->hand,
+                                         /*swappedOut=*/false,
+                                         EquipCountFor(eq->obj, eq->count));
+                    }
                 }
             } else if (ImGui::IsItemHovered()) {
                 // C6: carried item over a slot — highlight; click = equip try

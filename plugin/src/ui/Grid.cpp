@@ -11150,22 +11150,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // Only an ACCEPTED equip that actually displaces something starts the
             // return carry. A potion or spell tome dropped on a slot is drunk or
             // read -- nothing comes off, and there is nothing to hand back.
-            // ★★The SECOND RING'S displaced occupant rides the cursor too now
-            // -- Wear's one-at-a-time TakeOff sends it to the PACK, and the
-            // held bookkeeping keeps it off the board exactly like every
-            // other doll lift. (The blanket ringL exclusion guarded a
-            // duplicate that came from the accounting gap the "ring2"
-            // off-board entry has since closed.) The ONE case that keeps the
-            // exclusion: first slot empty, where Wear moves the displaced
-            // ring onto the FIRST slot instead of the pack -- nothing leaves
-            // the body, so a cursor copy there really is a duplicate.
+            // ★★The SECOND RING slot settles its own displacement, so the
+            // cursor stays empty here -- BY DECISION, twice over. Its occupant
+            // was never engine-worn, so a fromDoll carry's worn-backed
+            // accounting consumes the FIRST ring's worn list instead (same
+            // plain form) and that unit leaks onto the board: the displaced
+            // ring showed on the cursor AND in the pack, and the cursor copy
+            // had no engine identity to land anywhere. Wear's own TakeOff
+            // returns it to the pack immediately -- the user chose that over a
+            // cursor carry the accounting cannot honestly back.
             // ★Captured BEFORE the reset above: `a_held` is the INCOMING item
             // and `worn` is the one being displaced. Same object pointer means
             // same form, which is the only case the worn-clock has to guard.
             const bool swapSameForm = (worn == swapInObj);
-            const bool ringLToFirst = g_slotTarget == "ringL" &&
-                                      Equip::WornObjectAt("ringR") == nullptr;
-            if (accepted && swapping && !ringLToFirst) {
+            if (accepted && swapping && g_slotTarget != "ringL") {
                 // The engine has not unequipped it yet, so this is exactly a doll
                 // pickup -- and it must name the HAND, or the worn-unit match can
                 // consume the copy we just put IN and leave the displaced one
