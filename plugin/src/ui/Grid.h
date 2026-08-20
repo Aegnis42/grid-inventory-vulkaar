@@ -192,11 +192,15 @@ namespace FUI::Grid
     // ★B3-a: an engine request that was never confirmed. Registered with the
     // Ledger at startup; see Ledger::SetOnExpire.
     void OnRequestExpired(std::uint32_t a_form, std::int32_t a_delta,
-                          const char* a_who);
+                          const char* a_who, const std::string& a_slot);
     // ★B3-b: a gear slot is no longer dropped when the request goes out -- it
     // is dropped when the engine CONFIRMS, and kept when it does not.
-    void CommitSlotDrop(std::uint32_t a_form, int a_count);
-    void CancelSlotDrop(std::uint32_t a_form, int a_count);
+    // ★Both act on the CONFIRMED REQUEST'S OWN key, never "the front of the
+    // form's queue": count-based popping let a world drop's confirmation eat
+    // a pending store's key whenever two paths moved the same form. An empty
+    // or unknown key is a no-op -- stackables never queue one.
+    void CommitSlotDrop(std::uint32_t a_form, const std::string& a_slot);
+    void CancelSlotDrop(std::uint32_t a_form, const std::string& a_slot);
 
     // Light path for rotation/scale edits: re-resolve defs + queue captures
     // WITHOUT re-placing the grid (footprints unchanged — no reflow, no IO).

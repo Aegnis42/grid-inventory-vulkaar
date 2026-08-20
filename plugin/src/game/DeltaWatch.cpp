@@ -1,7 +1,5 @@
 #include "game/DeltaWatch.h"
 
-#include "game/Ledger.h"
-
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -66,16 +64,6 @@ namespace FUI::DeltaWatch
             return "none";
         }
 
-        // ★B2: the echo test moved to the LEDGER and this is now a reader of
-        // it. Keeping a second copy here would mean two answers to "was this
-        // ours", and the one the board acts on has to be the only one.
-        const char* ClaimRequest(RE::FormID a_form, std::int32_t a_delta)
-        {
-            const char* who = Ledger::Confirm(a_form, a_delta);
-            if (who) { ++g_matched; return who; }
-            ++g_unmatched;
-            return "?";
-        }
     }
 
     bool Enabled() { return g_on; }
@@ -86,7 +74,7 @@ namespace FUI::DeltaWatch
         if (a_on) logger::info("[DELTA] observation ON (B0)");
     }
 
-    void OnContainer(const RE::TESContainerChangedEvent* a_event)
+    void OnContainer(const RE::TESContainerChangedEvent* a_event, const char* a_req)
     {
         if (!g_on || !a_event) return;
         // Only what crosses the player's own boundary changes our board.
@@ -102,7 +90,10 @@ namespace FUI::DeltaWatch
         const std::uint64_t n = ++g_seq;
         ++g_events;
         g_shadow[a_event->baseObj] += signed_;
-        const char* who = ClaimRequest(a_event->baseObj, signed_);
+        // ★B2 echo bookkeeping, from the verdict the SINK obtained. The ledger
+        // is the one answer to "was this ours"; we only count it.
+        const char* who = a_req ? a_req : "?";
+        if (a_req) ++g_matched; else ++g_unmatched;
 
         // ★FormID only -- no LookupByID on an unknown thread. Reconcile puts
         // names on the ones that turn out to matter.

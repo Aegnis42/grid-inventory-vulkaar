@@ -770,11 +770,11 @@ namespace FUI::LootBarter
 
     void RequestStore(RE::TESBoundObject* a_obj, int a_count,
                       std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav,
-                      int a_xlIdx)
+                      int a_xlIdx, const std::string& a_srcKey)
     {
         if (a_obj && a_count > 0)
-            g_xfer.push_back({ XferReq::kStore, a_obj, a_count, 0, 0, {}, a_uid, a_sig,
-                               false, a_fav, a_xlIdx });
+            g_xfer.push_back({ XferReq::kStore, a_obj, a_count, 0, 0, a_srcKey,
+                               a_uid, a_sig, false, a_fav, a_xlIdx });
     }
 
     void RequestBuy(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
@@ -796,11 +796,11 @@ namespace FUI::LootBarter
 
     void RequestSell(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
                      std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav,
-                     int a_xlIdx)
+                     int a_xlIdx, const std::string& a_srcKey)
     {
         if (a_obj && a_count > 0)
             g_xfer.push_back({ XferReq::kSell, a_obj, a_count, a_price, a_baseTotal,
-                               {}, a_uid, a_sig, false, a_fav, a_xlIdx });
+                               a_srcKey, a_uid, a_sig, false, a_fav, a_xlIdx });
     }
 
     void RequestPickTake(RE::TESBoundObject* a_obj, int a_count,
@@ -932,8 +932,11 @@ namespace FUI::LootBarter
                     r.dir == XferReq::kPickTake  ? "steal" : "plant";
                 // ★uid+sig ride along: B0 proved the engine's events never
                 // name the unit (§8-2), so this is the only record that does.
+                // ★And the SLOT rides along for the outgoing directions (B3-b):
+                // the confirmation retires the request's own cell, no other.
                 Ledger::Submit(r.obj->GetFormID(), incoming ? r.count : -r.count,
-                               who, r.uid, r.sig);
+                               who, r.uid, r.sig,
+                               incoming ? std::string{} : r.srcKey);
             }
             switch (r.dir) {
             case XferReq::kTake: {
@@ -1437,7 +1440,7 @@ namespace FUI::LootBarter
                     break;
                 }
                 RequestStore(g_slider.obj, g_slider.value, g_slider.uid, g_slider.sig,
-                             g_slider.fav, g_slider.xlIdx);
+                             g_slider.fav, g_slider.xlIdx, g_slider.srcKey);
                 // outgoing units leave their tile IN PLACE (engine removal is
                 // still queued on the Tick — without this the interim rebuild
                 // re-seats them at the front)
@@ -1474,7 +1477,8 @@ namespace FUI::LootBarter
                 } else {
                     RequestSell(g_slider.obj, g_slider.value, total,
                         g_slider.unitValue * g_slider.value,
-                        g_slider.uid, g_slider.sig, g_slider.fav, g_slider.xlIdx);
+                        g_slider.uid, g_slider.sig, g_slider.fav, g_slider.xlIdx,
+                        g_slider.srcKey);
                     Grid::NotePendingRemove(g_slider.obj, g_slider.srcKey, g_slider.value,
                                             g_slider.xlIdx);
                 }
@@ -1561,7 +1565,8 @@ namespace FUI::LootBarter
                             ImGui::IsKeyPressed(ImGuiKey_Escape, false);
         if (ok) {
             RequestSell(g_confirm.obj, g_confirm.count, g_confirm.price, g_confirm.base,
-                        g_confirm.uid, g_confirm.sig, g_confirm.fav, g_confirm.xlIdx);
+                        g_confirm.uid, g_confirm.sig, g_confirm.fav, g_confirm.xlIdx,
+                        g_confirm.srcKey);
             Grid::NotePendingRemove(g_confirm.obj, g_confirm.srcKey, g_confirm.count,
                                     g_confirm.xlIdx);
             g_confirm.active = false;

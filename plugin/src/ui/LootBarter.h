@@ -72,9 +72,12 @@ namespace FUI::LootBarter
                      bool a_fromWorn = false, bool a_useAfter = false);
     // a_xlIdx: where the outgoing unit sits, so the sink removes THAT one
     // (see XferReq::xlIdx). -1 = unknown, historical behaviour.
+    // a_srcKey: the tile the units leave (B3-b) -- rides the ledger request so
+    // the engine's confirmation retires THAT cell and no other. "" = fragment.
     void RequestStore(RE::TESBoundObject* a_obj, int a_count,
                       std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                      bool a_fav = false, int a_xlIdx = -1);   // player -> partner (GI36: a_fav)
+                      bool a_fav = false, int a_xlIdx = -1,
+                      const std::string& a_srcKey = {});   // player -> partner (GI36: a_fav)
     // barter (Phase 5): item move + gold settlement + speech xp, all on Tick.
     // a_baseTotal = total BASE value of the goods — vanilla speech XP points
     // (the haggled price doesn't matter for XP).
@@ -82,7 +85,8 @@ namespace FUI::LootBarter
                     std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);   // merchant -> player
     void RequestSell(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal = 0,
                      std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                     bool a_fav = false, int a_xlIdx = -1);  // player -> merchant (GI36: a_fav)
+                     bool a_fav = false, int a_xlIdx = -1,
+                     const std::string& a_srcKey = {});  // player -> merchant (GI36: a_fav)
     // F6b: pickpocket moves — each rolls PlayerCharacter::AttemptPickpocket
     // on the Tick (crime / XP / detection handled by the engine); a failed
     // roll force-closes the menu, already-succeeded moves stay.

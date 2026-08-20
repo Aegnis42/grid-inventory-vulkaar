@@ -41,11 +41,15 @@ namespace FUI::DeltaWatch
     // A separate sink would be delivered in an order we do not control, and
     // "where does the applier sit among the existing consumers" is exactly
     // what B0 is here to see.
-    void OnContainer(const RE::TESContainerChangedEvent* a_event);
+    //
+    // ★a_req is the ledger's verdict for this event -- the label of the
+    // request it confirmed, or nullptr for a surplus/outside delta. The SINK
+    // asks the ledger and passes the answer down, because the ledger is
+    // WIRING and this module is observation: when Confirm lived behind our
+    // own enable switch, turning "!delta" off silently starved the ledger of
+    // every confirmation and 100% of requests expired.
+    void OnContainer(const RE::TESContainerChangedEvent* a_event, const char* a_req);
     void OnEquip(const RE::TESEquipEvent* a_event);
-
-    // (Requests moved to Ledger in B2 -- see Ledger.h. This module reads the
-    // ledger to label an arriving event; it no longer keeps its own copy.)
 
     // Main thread only. Compares baseline + accumulated deltas against a fresh
     // count of the player's inventory, reports every disagreement by form, and

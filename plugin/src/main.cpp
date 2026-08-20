@@ -296,12 +296,25 @@ namespace
             if (!a_event) {
                 return RE::BSEventNotifyControl::kContinue;
             }
-            // ★1.4/B0 FIRST, before any consumer below reacts -- the whole point
+            // ★1.4/B2+B3: the LEDGER consumes the event first -- one request,
+            // one event (rule 1). This lives in the SINK, not in DeltaWatch:
+            // the ledger is wiring and the watch is observation, and when
+            // Confirm sat behind "!delta" the default configuration starved
+            // the ledger of every confirmation -- 100% of requests expired.
+            // Thread-safe (the ledger locks); no-op unless "!ledger = 1".
+            const char* req = nullptr;
+            if (a_event->newContainer == 0x14 || a_event->oldContainer == 0x14) {
+                const std::int32_t signedCount = a_event->newContainer == 0x14
+                                                     ? a_event->itemCount
+                                                     : -a_event->itemCount;
+                req = FUI::Ledger::Confirm(a_event->baseObj, signedCount);
+            }
+            // ★1.4/B0 next, before any consumer below reacts -- the whole point
             // is to see the delta as it ARRIVES, in the order it arrived, and
             // to know where the existing consumers sit relative to it. A sink
             // of our own would be delivered in an order we do not control.
             // Observation only; returns immediately unless "!delta = 1".
-            FUI::DeltaWatch::OnContainer(a_event);
+            FUI::DeltaWatch::OnContainer(a_event, req);
             // W2: any change touching the player's inventory can flip the
             // capacity state (shop buys, scripted AddItem, drops, sells)
             if (a_event->newContainer == 0x14 || a_event->oldContainer == 0x14) {
@@ -1565,6 +1578,11 @@ namespace
                 // 1.4/B0: the first round showed drops arriving as req=? simply
                 // because nothing had registered them -- which inflates the
                 // "external delta" share and makes the echo figure unreadable.
+                // ★Slotless by design: this callback never learns the tile key.
+                // A slotless confirmation consumes nobody's queued cell
+                // (CommitSlotDrop is keyed), and the queue entry the drop DID
+                // create expires into the rebuild sweep once its layout entry
+                // is pruned.
                 FUI::Ledger::Submit(a_obj->GetFormID(), -count, "drop");
                 player->RemoveItem(a_obj, count, RE::ITEM_REMOVE_REASON::kDropping,
                     a_xl, nullptr);   // GI25: the named sub-stack
@@ -1806,11 +1824,15 @@ namespace
             FUI::GoldCoins::InitForms();   // G1: resolve Grid Inventory.esp
             // ★B3-a: close the loop the ledger opened. Registered once, here,
             // where the forms are already resolved.
+            // ★A confirmation commits ITS OWN cell and no other: the slot key
+            // rides the request (Ledger.h), so a slotless drop or use can
+            // never pop a pending store's key -- the count-based version did
+            // exactly that whenever two paths moved the same form.
             FUI::Ledger::SetOnExpire([](const FUI::Ledger::Expired& a_e) {
-                FUI::Grid::OnRequestExpired(a_e.form, a_e.delta, a_e.who);
+                FUI::Grid::OnRequestExpired(a_e.form, a_e.delta, a_e.who, a_e.slot);
             });
             FUI::Ledger::SetOnConfirm([](const FUI::Ledger::Expired& a_e) {
-                if (a_e.delta < 0) FUI::Grid::CommitSlotDrop(a_e.form, -a_e.delta);
+                if (a_e.delta < 0) FUI::Grid::CommitSlotDrop(a_e.form, a_e.slot);
             });
             break;
         case SKSE::MessagingInterface::kNewGame:

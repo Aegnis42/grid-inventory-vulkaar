@@ -22,6 +22,9 @@ namespace FUI::Ledger
             std::uint16_t uid = 0;
             std::uint16_t sig = 0;
             int           frames = 0;
+            // ★Appended LAST: the cell this request empties ("" = none). See
+            // Submit's a_slot note in the header.
+            std::string   slot;
         };
         std::deque<Entry> g_open;
 
@@ -54,11 +57,19 @@ namespace FUI::Ledger
     void SetOnConfirm(ConfirmFn a_fn) { g_onConfirm = a_fn; }
 
     void Submit(std::uint32_t a_form, std::int32_t a_delta, const char* a_who,
-                std::uint16_t a_uid, std::uint16_t a_sig)
+                std::uint16_t a_uid, std::uint16_t a_sig, const std::string& a_slot)
     {
         if (!g_on || a_delta == 0) return;
         std::lock_guard lk(g_mtx);
-        g_open.push_back({ a_form, a_delta, a_who ? a_who : "?", a_uid, a_sig, 0 });
+        // Field-wise on purpose (§10-6): this struct has grown once already.
+        Entry e;
+        e.form = a_form;
+        e.delta = a_delta;
+        e.who = a_who ? a_who : "?";
+        e.uid = a_uid;
+        e.sig = a_sig;
+        e.slot = a_slot;
+        g_open.push_back(std::move(e));
         ++g_submitted;
     }
 
@@ -106,31 +117,47 @@ namespace FUI::Ledger
         // our mutex across someone else's call is how a deadlock gets built by
         // accident -- especially with Confirm arriving on other threads.
         for (const auto& e : landed) {
-            if (g_onConfirm) g_onConfirm(Expired{ e.form, e.delta, e.who, e.uid, e.sig });
+            if (g_onConfirm) g_onConfirm(Expired{ e.form, e.delta, e.who, e.uid, e.sig, e.slot });
         }
         for (const auto& e : fired) {
             logger::warn("[LEDGER] ★expired: {:08X} {:+d} '{}' uid {:04X} sig {:04X} "
-                         "-- {} frames, never confirmed",
-                e.form, e.delta, e.who, e.uid, e.sig, kMaxFrames);
-            if (g_onExpire) g_onExpire(Expired{ e.form, e.delta, e.who, e.uid, e.sig });
+                         "slot '{}' -- {} frames, never confirmed",
+                e.form, e.delta, e.who, e.uid, e.sig, e.slot, kMaxFrames);
+            if (g_onExpire) g_onExpire(Expired{ e.form, e.delta, e.who, e.uid, e.sig, e.slot });
         }
     }
 
     void Flush(const char* a_why)
     {
         if (!g_on) return;
-        std::lock_guard lk(g_mtx);
-        for (const auto& e : g_open) {
-            logger::warn("[LEDGER] outstanding at {}: {:08X} {:+d} '{}' "
-                         "uid {:04X} sig {:04X} ({} frames)",
-                a_why, e.form, e.delta, e.who, e.uid, e.sig, e.frames);
+        std::vector<Entry> landed;
+        std::vector<Entry> orphaned;
+        {
+            std::lock_guard lk(g_mtx);
+            landed.assign(g_landed.begin(), g_landed.end());
+            g_landed.clear();
+            orphaned.assign(g_open.begin(), g_open.end());
+            g_open.clear();
+            logger::info("[LEDGER] @{}: submitted {} / confirmed {} / expired {} / "
+                         "outstanding {} -- surplus events {}",
+                a_why, g_submitted, g_confirmed, g_expired, orphaned.size(), g_surplus);
+            g_submitted = g_confirmed = g_expired = g_surplus = 0;
         }
-        const std::size_t left = g_open.size();
-        g_open.clear();
-        logger::info("[LEDGER] @{}: submitted {} / confirmed {} / expired {} / "
-                     "outstanding {} -- surplus events {}",
-            a_why, g_submitted, g_confirmed, g_expired, left, g_surplus);
-        g_submitted = g_confirmed = g_expired = g_surplus = 0;
+        // ★Outside the lock, same reasoning as Tick. Confirmations that landed
+        // while no menu was ticking are DELIVERED, not dropped -- the engine
+        // did take those items, so their cells must still be committed. What
+        // was never confirmed EXPIRES through the same hook as a timeout: the
+        // silent clear this used to be left the request's slot key queued
+        // forever, waiting to be consumed by someone else's confirmation.
+        for (const auto& e : landed) {
+            if (g_onConfirm) g_onConfirm(Expired{ e.form, e.delta, e.who, e.uid, e.sig, e.slot });
+        }
+        for (const auto& e : orphaned) {
+            logger::warn("[LEDGER] outstanding at {}: {:08X} {:+d} '{}' "
+                         "uid {:04X} sig {:04X} slot '{}' ({} frames) -- expiring",
+                a_why, e.form, e.delta, e.who, e.uid, e.sig, e.slot, e.frames);
+            if (g_onExpire) g_onExpire(Expired{ e.form, e.delta, e.who, e.uid, e.sig, e.slot });
+        }
     }
 
     bool SimRefuse()

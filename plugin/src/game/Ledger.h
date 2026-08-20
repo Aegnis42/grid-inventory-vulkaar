@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 // 1.4 / B2 — the request ledger.
 //
@@ -32,8 +33,16 @@ namespace FUI::Ledger
     // PLAYER's point of view: +N arriving, -N leaving. uid/sig name the unit
     // when we know it -- B0 proved the engine's events never will (§8-2), so
     // this is the only place that knowledge exists.
+    //
+    // ★a_slot is the CELL the request empties, when the caller knows one --
+    // the answer to §8-5's "an undo needs the slot key on the request". It is
+    // what CommitSlotDrop/CancelSlotDrop act on, so a confirmation can only
+    // ever consume ITS OWN cell: a slotless request (drop, use) confirms
+    // without touching anyone's queue, which is what stops a world drop from
+    // eating a pending store's key.
     void Submit(std::uint32_t a_form, std::int32_t a_delta, const char* a_who,
-                std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);
+                std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
+                const std::string& a_slot = {});
 
     // An event arrived. Strikes off the OLDEST matching request and returns its
     // label, or nullptr when nothing matched (a genuine outside delta, or the
@@ -48,6 +57,9 @@ namespace FUI::Ledger
         const char*   who;
         std::uint16_t uid;
         std::uint16_t sig;
+        // ★Appended LAST (the OffBoardUnit lesson): the cell the request was
+        // emptying, empty when the caller had none.
+        std::string   slot;
     };
 
     // ★B3-a: called when a request is never confirmed. This is the hook §5-2
@@ -72,8 +84,12 @@ namespace FUI::Ledger
     // One frame passed. Ages the outstanding requests and expires the stale.
     void Tick();
 
-    // Report and drop whatever is still outstanding. Menu close is the natural
-    // moment: anything unconfirmed by then never will be.
+    // Report whatever is still outstanding and EXPIRE it -- through the same
+    // OnExpire hook as a timeout, so the cell it was holding comes back.
+    // (The first version cleared silently, which stranded the slot queue: the
+    // request's key stayed queued forever and the NEXT confirmation of the
+    // form consumed it -- a live tile lost its cell to a dead request.)
+    // Landed-but-undelivered confirmations go out through OnConfirm first.
     void Flush(const char* a_why);
 
     // A load replaces the inventory without a single event -- requests from

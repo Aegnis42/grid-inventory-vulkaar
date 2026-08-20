@@ -21,12 +21,14 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstring>   // strcmp: the carry-exclusion fallback names its reason
 #include <deque>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -344,7 +346,13 @@ namespace FUI::Grid
         std::unordered_map<RE::FormID, std::vector<std::string>> g_pendingSlotDrop;
 
         // ---- B3-c: rebuild provenance ---------------------------------------
-        bool                       g_rbTrace = false;
+        // ★RequestRebuild is called from EVENT THREADS (ContainerSink, the
+        // host API), and NoteRebuildRan drains these on the main thread. The
+        // flag is atomic and the containers share one mutex -- without it,
+        // "!rbtrace = 1" plus one container event was a concurrent std::map
+        // write, i.e. the observation tool was itself a CTD (원칙 4).
+        std::atomic<bool>          g_rbTrace{ false };
+        std::mutex                 g_rbMtx;
         std::vector<std::string>   g_rbDrop;    // TEST ONLY, see SetRebuildDrop
         std::map<std::string, int> g_rbAsk;      // askers since the last rebuild
         int                        g_rbRuns = 0; // rebuilds since the last report
@@ -1165,7 +1173,8 @@ namespace FUI::Grid
                 if (it.inBag != a_bagKey || !it.obj) continue;
                 if (it.def.bag != 0) continue;
                 if (it.coinValue >= 0) continue;   // pinned purses stay home
-                LootBarter::RequestStore(it.obj, it.count, it.uid, it.sig, it.fav, it.xlIdx);
+                LootBarter::RequestStore(it.obj, it.count, it.uid, it.sig, it.fav,
+                                         it.xlIdx, it.key);
                 NotePendingRemove(it.obj, it.key, it.count, it.xlIdx);
                 // ★(1.3.2) the tile's marker bits ride along; the favourite
                 // star does NOT -- RequestStore's fav argument strips it as
@@ -1357,7 +1366,9 @@ namespace FUI::Grid
         };
         DropHint                                       g_dropHint;
         std::string                                    g_slotTarget;   // hovered equip slot (C6)
-        bool                                           g_needRebuild = false;
+        // ★atomic: set from event threads (ContainerSink, host API), consumed
+        // once per frame by FinishFrame on the main thread.
+        std::atomic<bool>                              g_needRebuild{ false };
 
         // ---- F2: trash window (parked-for-deletion buffer) ----
         // Parked tiles are ordinary layout entries with bag == kTrashKey; the
@@ -1383,6 +1394,11 @@ namespace FUI::Grid
             // the deletion resolves by pool and takes whichever list comes
             // first: bin the front dagger, lose the back one.
             int           xlIdx = -1;
+            // ★Appended LAST (§10-6): the parked tile's key, so the ledger
+            // request names the CELL and the engine's confirmation retires it
+            // -- trash-parked gear was the one layout entry no prune path
+            // ever reached (GI1 skips kTrashKey by design).
+            std::string   key;
         };
         std::vector<TrashDelete>                g_trashDeleteQ;  // engine removals (Tick)
         struct TrashAsk   // favorite-intake confirm popup
@@ -3158,7 +3174,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     // drop path (WholeStore) bundles contents)
                                     LootBarter::RequestStore(it.obj, it.count,
                                                              it.uid, it.sig, it.fav,
-                                                             it.xlIdx);
+                                                             it.xlIdx, it.key);
                                     NotePendingRemove(it.obj, it.key, it.count, it.xlIdx);
                                 }
                             }
@@ -3210,7 +3226,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     } else {
                                         LootBarter::RequestSell(it.obj, 1, total, val,
                                                                 it.uid, it.sig, it.fav,
-                                                                it.xlIdx);
+                                                                it.xlIdx, it.key);
                                         NotePendingRemove(it.obj, it.key, 1, it.xlIdx);
                                     }
                                 }
@@ -3761,11 +3777,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (g_sound) g_sound(a_obj, true);
     }
 
-    void OnRequestExpired(std::uint32_t a_form, std::int32_t a_delta, const char* a_who)
+    void OnRequestExpired(std::uint32_t a_form, std::int32_t a_delta, const char* a_who,
+                          const std::string& a_slot)
     {
         // ★The cell comes back FIRST -- a rebuild before this would re-mint the
         // slot and first-fit it into the front gap, which is the very bug.
-        if (a_delta < 0) CancelSlotDrop(a_form, -a_delta);
+        if (a_delta < 0) CancelSlotDrop(a_form, a_slot);
         // ★The board is still derived from the engine, so the engine's answer is
         // still the truth and re-deriving IS the recovery. That stops being true
         // in B3-b, and this is where the undo goes when it does.
@@ -3776,16 +3793,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         RequestRebuild();
     }
 
-    bool RebuildTrace() { return g_rbTrace; }
+    bool RebuildTrace() { return g_rbTrace.load(std::memory_order_relaxed); }
 
     void SetRebuildTrace(bool a_on)
     {
-        g_rbTrace = a_on;
+        g_rbTrace.store(a_on, std::memory_order_relaxed);
         if (a_on) SKSE::log::info("[RB] rebuild provenance ON (B3-c)");
     }
 
     void SetRebuildDrop(const char* a_csv)
     {
+        std::lock_guard rb(g_rbMtx);
         g_rbDrop.clear();
         std::string s = a_csv ? a_csv : "";
         std::size_t at = 0;
@@ -3811,31 +3829,40 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // ★A rebuild request is COALESCED -- many asks, one run -- so the
         // interesting number is not "who asked" but "who was asking when it
         // finally ran". Both are recorded; the run drains the list.
-        const bool needSite = g_rbTrace || !g_rbDrop.empty();
-        const std::string site = needSite ? ShortSite(a_where) : std::string{};
-        for (const auto& d : g_rbDrop) {
-            if (site == d) {
-                if (g_rbTrace) SKSE::log::info("[RB] dropped ask from {}", site);
-                return;   // the experiment: pretend nobody asked
+        // ★Runs on event threads too: the site containers live under g_rbMtx
+        // and the flag write below is atomic, so no marshalling is needed.
+        const bool trace = g_rbTrace.load(std::memory_order_relaxed);
+        {
+            std::lock_guard rb(g_rbMtx);
+            const bool needSite = trace || !g_rbDrop.empty();
+            const std::string site = needSite ? ShortSite(a_where) : std::string{};
+            for (const auto& d : g_rbDrop) {
+                if (site == d) {
+                    if (trace) SKSE::log::info("[RB] dropped ask from {}", site);
+                    return;   // the experiment: pretend nobody asked
+                }
             }
+            if (trace) ++g_rbAsk[site];
         }
-        if (g_rbTrace) ++g_rbAsk[site];
-        g_needRebuild = true;
+        g_needRebuild.store(true, std::memory_order_release);
     }
 
     // Called by Rebuild(), which is where an ask actually becomes work.
     void NoteRebuildRan(const std::source_location& a_direct)
     {
-        if (!g_rbTrace) return;
+        if (!g_rbTrace.load(std::memory_order_relaxed)) return;
         ++g_rbRuns;
 
         std::string who;
-        for (const auto& [site, n] : g_rbAsk) {
-            if (!who.empty()) who += ", ";
-            who += site;
-            if (n > 1) who += "x" + std::to_string(n);
+        {
+            std::lock_guard rb(g_rbMtx);
+            for (const auto& [site, n] : g_rbAsk) {
+                if (!who.empty()) who += ", ";
+                who += site;
+                if (n > 1) who += "x" + std::to_string(n);
+            }
+            g_rbAsk.clear();
         }
-        g_rbAsk.clear();
         // ★No pending ask means somebody called Rebuild() outright. That is a
         // legitimate thing to do -- it just has to be visible, because B3 has to
         // account for every path that rebuilds the board.
@@ -6620,6 +6647,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     ++it;
                 }
             }
+            // ★B3-b housekeeping: a queued slot key whose layout entry is gone
+            // is a dead letter -- the cell it named was already erased or
+            // pruned, so neither Commit nor Cancel has anything left to do.
+            // Slotless requests (world drop, use) leave these behind by
+            // design; sweeping here keeps the queue from outliving the board.
+            for (auto qi = g_pendingSlotDrop.begin(); qi != g_pendingSlotDrop.end();) {
+                std::erase_if(qi->second, [](const std::string& k) {
+                    return !g_layout.contains(k);
+                });
+                qi = qi->second.empty() ? g_pendingSlotDrop.erase(qi) : std::next(qi);
+            }
         }
         // Lazy, not unconditional: the cosave is the layout authority now — an
         // every-rebuild ini re-read was the cross-save contamination (and would
@@ -7103,29 +7141,40 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_pendingSlotDrop[fid].push_back(a_key);
     }
 
-    // ★Both halves consume the same FIFO, and which half runs is the whole
+    // ★Both halves consume the same queue, and which half runs is the whole
     // difference between "the engine took it" and "the engine ignored us".
-    void CommitSlotDrop(std::uint32_t a_form, int a_count)
+    // ★★By the request's OWN key, never by count off the front: two paths can
+    // move the same form at once (a store pending while a stack is dropped to
+    // the world), and popping "however many the confirmed delta said" handed
+    // the drop's confirmation the store's key. A key that is not queued is a
+    // no-op -- stackables and slotless requests never queued one.
+    namespace
     {
-        const auto it = g_pendingSlotDrop.find(a_form);
-        if (it == g_pendingSlotDrop.end()) return;
-        for (int i = 0; i < a_count && !it->second.empty(); ++i) {
-            g_layout.erase(it->second.front());
-            it->second.erase(it->second.begin());
+        bool TakeQueuedSlot(std::uint32_t a_form, const std::string& a_slot)
+        {
+            if (a_slot.empty()) return false;
+            const auto it = g_pendingSlotDrop.find(a_form);
+            if (it == g_pendingSlotDrop.end()) return false;
+            auto& v = it->second;
+            const auto at = std::find(v.begin(), v.end(), a_slot);
+            if (at == v.end()) return false;
+            v.erase(at);
+            if (v.empty()) g_pendingSlotDrop.erase(it);
+            return true;
         }
-        if (it->second.empty()) g_pendingSlotDrop.erase(it);
     }
 
-    void CancelSlotDrop(std::uint32_t a_form, int a_count)
+    void CommitSlotDrop(std::uint32_t a_form, const std::string& a_slot)
     {
-        const auto it = g_pendingSlotDrop.find(a_form);
-        if (it == g_pendingSlotDrop.end()) return;
-        for (int i = 0; i < a_count && !it->second.empty(); ++i) {
+        if (TakeQueuedSlot(a_form, a_slot)) g_layout.erase(a_slot);
+    }
+
+    void CancelSlotDrop(std::uint32_t a_form, const std::string& a_slot)
+    {
+        if (TakeQueuedSlot(a_form, a_slot)) {
             SKSE::log::warn("[GRID] slot '{}' KEPT -- its move was never confirmed",
-                            it->second.front());
-            it->second.erase(it->second.begin());   // dropped from the queue, not from g_layout
+                            a_slot);   // dropped from the queue, not from g_layout
         }
-        if (it->second.empty()) g_pendingSlotDrop.erase(it);
     }
 
     void ClearPendingRemove(RE::TESBoundObject* a_obj, int a_count)
@@ -7170,6 +7219,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_pendingRemoveWhen.clear();   // B3
         g_pendingRemovePool.clear();   // GI22
         g_pendingRemoveXl.clear();
+        // ★B3-b: the slot queue is a trace this function forgot (rule 5: a
+        // request leaves marks in MANY places, and a rollback that misses one
+        // shows its symptom somewhere else). Keys that survived a load here
+        // were consumed by the NEXT session's first confirmation of the same
+        // form -- and if that stale key matched a living tile, the tile lost
+        // its cell. The comment at the load-reset call site warns about
+        // exactly this: "these carried PREVIOUS-session state across a load".
+        g_pendingSlotDrop.clear();
     }
 
     void ClearDropHint()
@@ -10336,7 +10393,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             LootBarter::RequestStore(a_held.obj, a_held.count,
                                      HeldUidOf(a_held.key, a_held.uid), a_held.sig,
-                                     a_held.fav);   // (3) store
+                                     a_held.fav, -1, a_held.key);   // (3) store
             // fragment (empty key) = form-level pending only
             NotePendingRemove(a_held.obj, a_held.key, a_held.count, a_held.xlIdx);
             g_held.reset();
@@ -10362,7 +10419,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 } else {
                     LootBarter::RequestSell(a_held.obj, a_held.count,
                         total, val * a_held.count, a_held.uid, a_held.sig, a_held.fav,
-                        a_held.xlIdx);
+                        a_held.xlIdx, a_held.key);
                     // GI25: the split fragment still belongs to a POOL, and the
                     // pending bookkeeping has to say which one -- an empty key
                     // fell back to "deduct from the plain pool", the same
@@ -10685,7 +10742,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 } else {
                     LootBarter::RequestStore(a_held.obj, a_held.count,
                                              HeldUidOf(a_held.key, a_held.uid), a_held.sig,
-                                             a_held.fav, a_held.xlIdx);
+                                             a_held.fav, a_held.xlIdx, a_held.key);
                     NotePendingRemove(a_held.obj, a_held.key, a_held.count, a_held.xlIdx);
                     if (a_held.isBag) {
                         // (1.3.0-D) contents FOLLOW the bag into the chest
@@ -10760,7 +10817,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         Sfx::FailNote(Lang::T(Lang::Str::MerchantNoGold));
                     } else {
                         LootBarter::RequestSell(a_held.obj, 1, total, val, a_held.uid, a_held.sig,
-                                                a_held.fav, a_held.xlIdx);
+                                                a_held.fav, a_held.xlIdx, a_held.key);
                         NotePendingRemove(a_held.obj, a_held.key, 1, a_held.xlIdx);
                         if (a_held.isBag) {   // contents reflow to main on sale (E4)
                             g_openBags.erase(a_held.key);
@@ -10964,8 +11021,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const auto txi = g_trashXl.find(a_key);
                 const int  txl = txi == g_trashXl.end() ? -1 : txi->second;
                 NotePendingRemove(obj, a_key, count, txl);   // drains + erases the entry
-                g_trashDeleteQ.push_back({ obj->GetFormID(), count,
-                                           delUid, delSig, fav, txl });
+                // Field-wise on purpose (§10-6): this struct has grown once.
+                TrashDelete td;
+                td.form = obj->GetFormID();
+                td.count = count;
+                td.uid = delUid;
+                td.sig = delSig;
+                td.fav = fav;
+                td.xlIdx = txl;
+                td.key = a_key;
+                g_trashDeleteQ.push_back(std::move(td));
             } else {
                 g_layout.erase(a_key);   // unresolvable tile: just free the cell
             }
@@ -11206,8 +11271,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_target = {};        // recomputed by next frame's draws
         g_slotTarget.clear();
 
-        if (g_needRebuild) {
-            g_needRebuild = false;
+        if (g_needRebuild.exchange(false, std::memory_order_acq_rel)) {
             Rebuild();
         }
     }
@@ -11381,7 +11445,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(d.form);
             if (!obj) continue;
             const int count = d.count;
-            Ledger::Submit(d.form, -count, "trash", d.uid, d.sig);   // 1.4/B2
+            Ledger::Submit(d.form, -count, "trash", d.uid, d.sig, d.key);   // 1.4/B2+B3-b
             player->RemoveItem(obj, count, RE::ITEM_REMOVE_REASON::kRemove,
                 ResolveExitUnit(obj, d.uid, d.sig, count, d.fav ? count : 0,
                                 d.xlIdx), nullptr);
@@ -11426,7 +11490,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             a_glow = GlowBits(obj, entry, xl);
         }
         LootBarter::RequestStore(obj, g_held->count,
-            HeldUidOf(g_held->key, g_held->uid), g_held->sig, g_held->fav);
+            HeldUidOf(g_held->key, g_held->uid), g_held->sig, g_held->fav,
+            -1, g_held->key);
         NotePendingRemove(obj, g_held->key, g_held->count, g_held->xlIdx);
         if (g_sound) g_sound(obj, false);
         g_held.reset();
