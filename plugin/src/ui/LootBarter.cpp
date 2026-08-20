@@ -1225,7 +1225,14 @@ namespace FUI::LootBarter
             player->PlayPickUpSound(gold, goldIn, false);
         }
         if (goldMoved) GoldCoins::MarkDirty();   // rebuild the coin mirror
-        Grid::RequestRebuild();
+        // ★★1.4/B3: no tail rebuild any more, and the reason is measured
+        // (!rbdrop, §3-9): fourteen asks dropped over a full partner-window
+        // session -- withdraw, store, buy, sell, take-all -- and nothing went
+        // stale. Every unit this batch moved raises a container event, and the
+        // sink's per-form reconcile (or its own rebuild fallback) is the one
+        // that answers it. The pickpocket-failure returns above keep theirs:
+        // they close the menu with suppressions half-armed, which is exactly
+        // the discontinuity a full rebuild is for.
         Grid::MarkCapacityDirty();
     }
 
