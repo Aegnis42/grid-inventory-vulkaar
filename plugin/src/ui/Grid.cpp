@@ -1344,6 +1344,16 @@ namespace FUI::Grid
         struct DrainHint { std::string baseKey; std::string key; };
         DrainHint g_drainHint;
 
+        // ★B3 symmetric half: the use/equip CLICK's board-side work, deferred
+        // to FinishFrame (the click fires mid-draw, and mutating g_items there
+        // breaks the very loop that heard it -- the reason this used to be a
+        // RequestRebuild). The !rbdrop interrogation of the right-click tail
+        // (§3-6) named that rebuild's only use/equip job as "draw the
+        // optimistic exit NOW"; this does exactly that job and nothing else.
+        // FormID, not a pointer (원칙 2) -- resolved when consumed.
+        struct ClickRemove { std::string key; RE::FormID form = 0; };
+        std::optional<ClickRemove> g_clickRemove;
+
         // B2: one-shot placement hint for the next ACQUIRE that creates a new
         // tile of this form (partner-drop lands at the drop cell without a
         // premature layout entry). col<0 = no hint.
@@ -3350,9 +3360,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                                  it.xlIdx);
                                 // stackables: name the tile that gives one up
                                 g_drainHint = { FormKey(it.obj), it.key };
+                                // ★B3 (§3-6 interrogation): this branch's only
+                                // full-rebuild job was drawing the optimistic
+                                // exit -- deferred partial remove does exactly
+                                // that at FinishFrame, mirroring the unequip's
+                                // partial ADD. Everything else the tail rebuild
+                                // maintained (trash restore, bag wiring) keeps
+                                // its rebuild below.
+                                g_clickRemove =
+                                    ClickRemove{ it.key, it.obj->GetFormID() };
                             }
                         }
-                        RequestRebuild();
+                        if (!g_clickRemove) RequestRebuild();
                     }
                 }
             }
@@ -7134,6 +7153,71 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return true;
     }
 
+    // ---- ★B3 symmetric half: the use/equip click's partial REMOVE ----------
+    namespace
+    {
+        // Runs at FinishFrame (never mid-draw). Takes the clicked tile's
+        // departing units off the board the way the full rebuild would have
+        // drawn it: gear and ammo lose the whole tile, a stackable counts
+        // down -- and the drain hint is CONSUMED when this does its job, or
+        // the next real rebuild would spend it a second time. False = the
+        // caller rebuilds (tile gone, shapes changed -- anything unproven).
+        bool TryUseClickPartialRemove(const std::string& a_key,
+                                      RE::TESBoundObject* a_obj)
+        {
+            int idx = -1;
+            for (std::size_t i = 0; i < g_items.size(); ++i) {
+                if (g_items[i].key == a_key && g_items[i].obj == a_obj) {
+                    idx = static_cast<int>(i);
+                    break;
+                }
+            }
+            if (idx < 0) return false;
+            auto& it = g_items[static_cast<std::size_t>(idx)];
+            const int take = Equip::EquipCountFor(a_obj, it.count);
+
+            if (take < it.count) {
+                // stackable counting down: the tile keeps its cell, the
+                // reconciler's own rule ("a tile owns its quantity") keeps
+                // this stable under the next full rebuild
+                it.count -= take;
+                if (const auto li = g_layout.find(a_key); li != g_layout.end()) {
+                    li->second.count = it.count;
+                }
+                if (g_drainHint.key == a_key) g_drainHint = {};
+                MarkCapacityDirty();
+                SKSE::log::info("[B3] ★use click '{}' -{} -> {} in '{}' -- no rebuild",
+                    a_obj->GetName(), take, it.count, a_key);
+                return true;
+            }
+
+            // the whole tile leaves: find its view, keep the space stats in
+            // step (typed bags and the trash never counted -- FinalizeRebuild's
+            // own rule), then erase and re-point every index above it
+            for (const auto& v : g_views) {
+                if (std::find(v.items.begin(), v.items.end(), idx) == v.items.end()) {
+                    continue;
+                }
+                if (v.accept.empty() && v.bagKey != kTrashKey) {
+                    g_spaceUsed -= MaskCells(it.mask.rows);
+                }
+                break;
+            }
+            g_items.erase(g_items.begin() + idx);
+            for (auto& v : g_views) {
+                std::erase(v.items, idx);
+                for (int& i : v.items) {
+                    if (i > idx) --i;
+                }
+            }
+            if (g_drainHint.key == a_key) g_drainHint = {};
+            MarkCapacityDirty();
+            SKSE::log::info("[B3] ★use click '{}' tile '{}' off the board -- no rebuild",
+                a_obj->GetName(), a_key);
+            return true;
+        }
+    }
+
     int GoldAmount()
     {
         return g_gold;
@@ -7191,6 +7275,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     void ClearPendingEquips()
     {
         g_pendingEquip.clear();
+        // same lifetime: a click queued in the frame the menu closed has no
+        // board to act on any more
+        g_clickRemove.reset();
     }
 
     void ReleaseAppliedPendingEquip(std::uint32_t a_form)
@@ -11784,6 +11871,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_target = {};        // recomputed by next frame's draws
         g_slotTarget.clear();
 
+        // ★B3: the use/equip click's deferred board-side work, BEFORE the
+        // rebuild gate -- a failed partial (tile already gone, shapes moved)
+        // downgrades to the flag and the very next line runs the rebuild.
+        if (g_clickRemove) {
+            const ClickRemove cr = *g_clickRemove;
+            g_clickRemove.reset();
+            auto* form = RE::TESForm::LookupByID(cr.form);
+            auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+            if (!obj || !TryUseClickPartialRemove(cr.key, obj)) {
+                SKSE::log::info("[B3] use click partial declined ('{}') -- "
+                                "full rebuild", cr.key);
+                g_needRebuild.store(true, std::memory_order_release);
+            }
+        }
         if (g_needRebuild.exchange(false, std::memory_order_acq_rel)) {
             Rebuild();
         }
