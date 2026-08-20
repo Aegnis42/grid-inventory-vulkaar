@@ -110,6 +110,12 @@ namespace FUI::Grid
     // cell reads as empty while carried.
     [[nodiscard]] RE::TESBoundObject* HeldPartnerObject();
 
+    // ★B4-4: is a CARRIER carry up -- the displaced second ring riding the
+    // cursor? The quiet ring-swap handoff keys its "no redraw needed" on
+    // exactly this: the drop path starts that carry before Wear runs, the
+    // right-click router displaces with no carry at all.
+    [[nodiscard]] bool CarrierCarryActive();
+
     // GI17: the same question narrowed to ONE sub-stack. Partner windows must
     // use this -- with several cells per form, the form-level test hides them
     // all the moment one is lifted.

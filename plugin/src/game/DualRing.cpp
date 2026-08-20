@@ -403,6 +403,15 @@ namespace FUI::DualRing
         if (a_standalone) {
             if (p && ring) p->PlayPickUpSound(ring, false, false);
             Grid::RequestRebuild();
+        } else if (!Grid::CarrierCarryActive()) {
+            // ★The quiet handoff assumed the displaced ring rides the cursor.
+            // True for the DROP swap -- its carry starts before Wear runs --
+            // and false for the right-click ROUTER, which displaces with no
+            // carry at all: the old ring went back to the pack with nothing
+            // to redraw it, and right-clicking through several rings appeared
+            // to wear them all (user report). No carrier carry up means the
+            // return still needs its draw.
+            Grid::RequestRebuild();
         }
         SKSE::log::info("[DUALRING] second ring '{}' removed{}", NameOf(ring),
                         a_standalone ? "" : " (handoff)");

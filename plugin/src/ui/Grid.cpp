@@ -7379,6 +7379,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                        /*a_drained=*/false);
     }
 
+    bool CarrierCarryActive()
+    {
+        return g_held && g_held->fromCarrier;
+    }
+
     int GoldAmount()
     {
         return g_gold;
