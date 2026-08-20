@@ -124,6 +124,12 @@ namespace FUI::DualRing
         }
 
         // A biped slot nothing is wearing right now.
+        // ★"!ring2slot = N" (editor 44..60): the player's word on where the
+        // carrier may sit. Slot habits are a MODLIST fact no mask can read --
+        // the measurement below proves it -- so the escape hatch has to be an
+        // ini line, not another heuristic.
+        int g_slotOverride = -1;   // bit index; -1 = pick automatically
+
         // ★Searched from the TOP: the low custom slots (44-49) are where
         // cloaks, backpacks and lanterns live, so taking one of those picks a
         // fight with whatever the player already has installed. kFX01 (31) is
@@ -131,7 +137,10 @@ namespace FUI::DualRing
         [[nodiscard]] int FreeSlot(RE::PlayerCharacter* a_p)
         {
             const std::uint32_t used = WornMask(a_p);
-            for (int i = static_cast<int>(kSlots) - 2; i >= 14; --i) {
+            if (g_slotOverride >= 0 && !(used & (1u << g_slotOverride))) {
+                return g_slotOverride;
+            }
+            for (int i = static_cast<int>(kSlots) - 3; i >= 14; --i) {
                 // ★editor slots 50/51 (bits 20/21): the DECAPITATION slots.
                 // Equipping anything there culls the head outright -- never a
                 // valid parking spot however crowded the rest of the biped is.
@@ -140,6 +149,13 @@ namespace FUI::DualRing
             }
             return -1;
         }
+        // ★★...and the scan now stops BELOW editor slot 60 (bit 30). Measured:
+        // no worn ARMO or addon claimed 60, the carrier sat there, and the
+        // helmet still went invisible over a bald head -- something in the
+        // MODLIST watches that slot (hair-physics and helmet-toggle systems
+        // are the usual tenants). A mask cannot see a watcher; the only
+        // honest move is to stay out of the known bad neighbourhood and hand
+        // the player the "!ring2slot" override for whatever their list does.
 
         // Lend the ring's enchantment to the carrier and put it on a_mask.
         // ★A ring's enchantment is kConstantEffect (verified: no vanilla ARMO
@@ -164,6 +180,25 @@ namespace FUI::DualRing
             c->formEnchanting = g_lent.ench;
             g_lent = {};
         }
+    }
+
+    void SetSlotOverride(int a_editorSlot)
+    {
+        // editor numbers run 30..61; bits run 0..31. Decapitation (50/51) and
+        // FX01 (61) are refused even by hand -- they cull the head or build
+        // no armour at all.
+        const int bit = a_editorSlot - 30;
+        const bool ok = bit >= 14 && bit <= 30 && bit != 20 && bit != 21;
+        g_slotOverride = ok ? bit : -1;
+        if (ok) {
+            SKSE::log::info("[DUALRING] carrier slot pinned to {} (!ring2slot)",
+                            a_editorSlot);
+        }
+    }
+
+    int SlotOverride()
+    {
+        return g_slotOverride < 0 ? -1 : g_slotOverride + 30;
     }
 
     RE::TESObjectARMO* Second() { return RingById(g_ringId); }

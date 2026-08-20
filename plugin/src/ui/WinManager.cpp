@@ -8,6 +8,7 @@
 #include "ui/WinManager.h"
 #include "game/Census.h"
 #include "game/DeltaWatch.h"
+#include "game/DualRing.h"
 #include "game/Ledger.h"
 
 #include <algorithm>
@@ -324,6 +325,12 @@ namespace FUI
             // this line is the escape hatch ("!census = 0"). See Census.h.
             if (key == "!census") {
                 Census::SetEnabled(rest == "1" || rest == "true");
+                continue;
+            }
+            // Carrier biped slot pin (editor 44..60) -- see DualRing.h. A
+            // modlist fact, so it is the player's line to write.
+            if (key == "!ring2slot") {
+                try { DualRing::SetSlotOverride(std::stoi(rest)); } catch (...) {}
                 continue;
             }
             // Test switch, not a setting: see Grid::SetRebuildDrop.
@@ -799,6 +806,9 @@ namespace FUI
         // an ordinary install still carries no line.
         if (!Census::Enabled())    out << "!census = 0\n";
         if (!Ledger::Enabled())    out << "!ledger = 0\n";
+        if (DualRing::SlotOverride() >= 0) {
+            out << "!ring2slot = " << DualRing::SlotOverride() << "\n";
+        }
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
         out << "!caplight = " << Theme::CaptureLightAz()

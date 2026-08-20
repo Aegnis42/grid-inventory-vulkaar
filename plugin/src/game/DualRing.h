@@ -88,6 +88,13 @@ namespace FUI::DualRing
     // refresh until the menu closes.
     // Wear also decides WHERE the ring goes -- it fills an empty first slot,
     // or trades places with the ring already on the second.
+    // "!ring2slot = N" -- pin the carrier's biped slot (EDITOR number,
+    // 44..60). Slot habits are a modlist fact no mask can read: the automatic
+    // pick avoids the known bad neighbourhoods, and this is the player's
+    // override for whatever their own list watches. Out-of-range clears.
+    void SetSlotOverride(int a_editorSlot);
+    [[nodiscard]] int SlotOverride();   // editor number, -1 = automatic
+
     bool Wear(RE::TESObjectARMO* a_ring, RE::ExtraDataList* a_xl);
     void TakeOff();
     // Queued form of TakeOff, for callers inside the render pass.
