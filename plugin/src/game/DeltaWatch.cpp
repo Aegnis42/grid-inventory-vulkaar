@@ -1,5 +1,6 @@
 #include "game/DeltaWatch.h"
 
+#include <atomic>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -50,15 +51,19 @@ namespace FUI::DeltaWatch
             return static_cast<int>(g_threads.size()) - 1;
         }
 
-        // Which of our surfaces is up. Cheap enough for an event handler and it
-        // is the context that makes a delta readable after the fact.
+        // Which of our surfaces is up -- read from a snapshot the MAIN thread
+        // refreshes once per frame (RefreshMenuSnapshot). The event handlers
+        // used to ask RE::UI directly, on whatever thread the engine was on;
+        // the UI's menu map belongs to the UI thread (REVIEW B-3). A frame of
+        // staleness costs nothing in a context stamp.
+        std::atomic<std::uint8_t> g_menuBits{ 0 };   // 1 grid, 2 wheel, 4 cont
+
         const char* MenuState()
         {
-            auto* ui = RE::UI::GetSingleton();
-            if (!ui) return "-";
-            const bool grid = ui->IsMenuOpen("GridInventoryMenu");
-            const bool wheel = ui->IsMenuOpen("GridWheelerMenu");
-            const bool cont = ui->IsMenuOpen(RE::ContainerMenu::MENU_NAME);
+            const std::uint8_t b = g_menuBits.load(std::memory_order_relaxed);
+            const bool grid = (b & 1) != 0;
+            const bool wheel = (b & 2) != 0;
+            const bool cont = (b & 4) != 0;
             if (wheel && cont)  return "wheel+cont";
             if (wheel)          return "wheel";     // ★the live one: no kPausesGame
             if (grid && cont)   return "grid+cont";
@@ -75,6 +80,18 @@ namespace FUI::DeltaWatch
     {
         g_on = a_on;
         if (a_on) logger::info("[DELTA] observation ON (B0)");
+    }
+
+    void RefreshMenuSnapshot()
+    {
+        if (!g_on) return;   // the stamp is only read while observing
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui) { g_menuBits.store(0, std::memory_order_relaxed); return; }
+        std::uint8_t b = 0;
+        if (ui->IsMenuOpen("GridInventoryMenu")) b |= 1;
+        if (ui->IsMenuOpen("GridWheelerMenu")) b |= 2;
+        if (ui->IsMenuOpen(RE::ContainerMenu::MENU_NAME)) b |= 4;
+        g_menuBits.store(b, std::memory_order_relaxed);
     }
 
     void OnContainer(const RE::TESContainerChangedEvent* a_event, const char* a_req)

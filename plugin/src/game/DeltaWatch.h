@@ -57,6 +57,14 @@ namespace FUI::DeltaWatch
     // re-baselines. Menu open/close are the natural moments.
     void Reconcile(const char* a_when);
 
+    // ★Main thread, once per frame (UIRoot::Tick -- alive both paused and
+    // unpaused). Refreshes the menu-context snapshot the EVENT handlers stamp
+    // into their log lines. The handlers used to ask RE::UI directly, which
+    // broke this header's own rule ("no lookups on unknown threads") -- the
+    // UI's menu map belongs to the UI thread, and a diagnostic that can crash
+    // is worse than no diagnostic (REVIEW B-3, PLAN §10-10).
+    void RefreshMenuSnapshot();
+
     // ★Throws the running total away. A load replaces the whole inventory
     // without a single event, so a baseline from before it describes a
     // different character -- comparing across that boundary reports every form

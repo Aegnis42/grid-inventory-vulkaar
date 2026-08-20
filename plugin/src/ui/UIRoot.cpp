@@ -2,6 +2,7 @@
 #include "ui/Editor.h"
 #include "ui/Equip.h"
 #include "game/Costume.h"
+#include "game/DeltaWatch.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
@@ -4057,6 +4058,10 @@ namespace FUI::UIRoot
 
     void Tick()
     {
+        // ★B-3: the menu-context snapshot the DeltaWatch event handlers stamp
+        // -- refreshed HERE because this tick runs on the main thread in both
+        // worlds (the update hook unpaused, AdvanceMovie paused).
+        DeltaWatch::RefreshMenuSnapshot();
         Grid::ProcessBookRead();   // raise the Book Menu OUTSIDE the render pass
         Grid::ProcessFavorites();  // GI32: favourites, same reason
         Grid::ProcessRecharge();   // (1.3.1) soul-gem recharge, same reason

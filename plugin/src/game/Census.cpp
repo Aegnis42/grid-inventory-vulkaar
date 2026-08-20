@@ -93,13 +93,34 @@ namespace FUI::Census
             return (n && *n) ? n : "?";
         }
 
-        // How far apart two kinds are, in the terms §3 states the rule in.
-        // Deliberately crude: B1 is here to find out whether a distance even
-        // separates the candidates, not to tune a metric.
+        // ★§8-4's own verdict, finally in the code it was measured with: the
+        // real signal is not the SIZE of a distance but WHICH AXES moved. A
+        // pair that changed one axis is the plausible relabel; a pair that
+        // grew an axis from nothing is two different items. The primary key
+        // is therefore the changed-axis count, and the scalar below is only
+        // the tiebreak within it.
+        int ChangedAxes(const Row& a, const Row& b)
+        {
+            int n = 0;
+            if (std::fabs(a.health - b.health) > 0.001f) ++n;
+            if (std::fabs(a.charge - b.charge) > 0.001f) ++n;
+            if (a.poison != b.poison) ++n;
+            if (a.soul != b.soul) ++n;
+            return n;
+        }
+
+        // Tiebreak scalar. ★Charge is NORMALISED: enchant charges run in the
+        // hundreds-to-thousands while temper is a ~1.x multiplier, so a raw
+        // |Δcharge| drowned every other axis in exactly the case §5-2 named
+        // as this rule's natural habitat -- several weapons draining in
+        // combat (REVIEW B-2). A fraction of the larger charge keeps every
+        // axis on the same ~0-100 scale.
         float Distance(const Row& a, const Row& b)
         {
+            const float chMax = (std::max)({ std::fabs(a.charge),
+                                             std::fabs(b.charge), 1.0f });
             return std::fabs(a.health - b.health) * 100.0f +
-                   std::fabs(a.charge - b.charge) +
+                   std::fabs(a.charge - b.charge) / chMax * 100.0f +
                    static_cast<float>(std::abs(a.poison - b.poison)) * 10.0f +
                    (a.soul == b.soul ? 0.0f : 50.0f);
         }
@@ -184,15 +205,29 @@ namespace FUI::Census
             }
 
             // ★★This is the case REVIEW B-2 said would come back, and here it
-            // is. Log every candidate distance so the §3 rule can be judged on
-            // real numbers rather than asserted.
+            // is. Candidates are RANKED by the §8-4 rule -- fewest changed
+            // axes first, normalised distance as the tiebreak -- and the top
+            // pick is marked, so when N→M finally happens in the wild the log
+            // shows what the rule would have chosen, judged on real numbers.
             ++ambiguous;
             logger::warn("[CENSUS]   {:08X} '{}': ★{} gone x {} appeared -- AMBIGUOUS",
                 form, NameOf(form), lost.size(), made.size());
             for (const auto& l : lost) {
+                struct Cand { const Row* m; int axes; float dist; };
+                std::vector<Cand> cands;
+                cands.reserve(made.size());
                 for (const auto& m : made) {
-                    logger::warn("[CENSUS]       {} -> {}  d={:.1f}",
-                        Describe(l), Describe(m), Distance(l, m));
+                    cands.push_back({ &m, ChangedAxes(l, m), Distance(l, m) });
+                }
+                std::sort(cands.begin(), cands.end(),
+                    [](const Cand& x, const Cand& y) {
+                        if (x.axes != y.axes) return x.axes < y.axes;
+                        return x.dist < y.dist;
+                    });
+                for (std::size_t c = 0; c < cands.size(); ++c) {
+                    logger::warn("[CENSUS]       {} -> {}  axes={} d={:.1f}{}",
+                        Describe(l), Describe(*cands[c].m), cands[c].axes,
+                        cands[c].dist, c == 0 ? "  <- rule picks" : "");
                 }
             }
         }
