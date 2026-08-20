@@ -1058,8 +1058,7 @@ namespace
                 on = !val.empty() && val[0] != '0';
             }
             key.erase(0, key.find_first_not_of(" 	"));
-            if (const auto e = key.find_last_not_of(" 	
-"); e != std::string::npos) {
+            if (const auto e = key.find_last_not_of(" 	"); e != std::string::npos) {
                 key.erase(e + 1);
             } else {
                 continue;
