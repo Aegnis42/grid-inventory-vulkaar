@@ -236,6 +236,16 @@ namespace FUI::Grid
     // render pass.
     void ProcessFavorites();
     void ClearPendingEquips();   // menu close / reset
+    // ★A confirmed CONSUME releases its suppression entry at once. The entry
+    // used to die only at the end of the rebuild it covered, and by then the
+    // engine's count had already dropped -- for that one rebuild the stack was
+    // subtracted twice, and at "last unit" the reconciler drained the slot to
+    // zero and ERASED it, so the survivor re-entered at the front gap. Worn
+    // equips never had the overlap (released mid-walk by the worn list);
+    // consumables have no worn list, and the ledger's "use" confirmation is
+    // their equivalent signal. Called from the Ledger OnConfirm delivery
+    // (main thread, via Tick/Flush).
+    void ReleaseAppliedPendingEquip(std::uint32_t a_form);
     // Equip::ProcessPending: the engine has run the queue. The next
     // rebuild consumes these and stops suppressing them.
     void MarkEquipsApplied();

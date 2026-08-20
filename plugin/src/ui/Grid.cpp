@@ -6827,6 +6827,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_pendingEquip.clear();
     }
 
+    void ReleaseAppliedPendingEquip(std::uint32_t a_form)
+    {
+        auto* form = RE::TESForm::LookupByID(a_form);
+        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+        if (!obj) return;
+        const std::string base = FormKey(obj);
+        // One event, one unit: erase the OLDEST applied entry of this base.
+        // The surplus half of the consumable pair never matches a request
+        // (Ledger), so it never reaches here -- one release per actual use.
+        for (auto it = g_pendingEquip.begin(); it != g_pendingEquip.end(); ++it) {
+            if (it->applied && it->base == base) {
+                g_pendingEquip.erase(it);
+                return;
+            }
+        }
+    }
+
     void MarkEquipsApplied()
     {
         for (auto& u : g_pendingEquip) u.applied = true;

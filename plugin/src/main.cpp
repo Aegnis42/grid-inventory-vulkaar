@@ -1833,6 +1833,14 @@ namespace
             });
             FUI::Ledger::SetOnConfirm([](const FUI::Ledger::Expired& a_e) {
                 if (a_e.delta < 0) FUI::Grid::CommitSlotDrop(a_e.form, a_e.slot);
+                // ★A confirmed consume releases its suppression entry NOW --
+                // see ReleaseAppliedPendingEquip. Without this the entry
+                // overlapped the dropped engine count for one rebuild and the
+                // stack was subtracted twice ("one drink removed two", and the
+                // last unit lost its cell to the front gap).
+                if (a_e.delta < 0 && a_e.who && std::strcmp(a_e.who, "use") == 0) {
+                    FUI::Grid::ReleaseAppliedPendingEquip(a_e.form);
+                }
             });
             break;
         case SKSE::MessagingInterface::kNewGame:

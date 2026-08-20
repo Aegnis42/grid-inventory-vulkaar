@@ -795,8 +795,13 @@ namespace FUI::Equip
         // so a use that consumes nothing does not sit in the queue expiring --
         // is what tells the next round whether the surplus event is ours or the
         // engine's.
+        // ★Ingredients (eaten on click) and spell tomes (consumed on learn)
+        // joined the list with the consume-release fix: their confirmation is
+        // what frees the suppression entry, and an unregistered consume left
+        // it to the applied-erase fallback -- one rebuild late.
         if (Ledger::Enabled() &&
-            (a_obj->As<RE::AlchemyItem>() || a_obj->As<RE::ScrollItem>())) {
+            (a_obj->As<RE::AlchemyItem>() || a_obj->As<RE::ScrollItem>() ||
+             a_obj->As<RE::IngredientItem>() || a_obj->As<RE::TESObjectBOOK>())) {
             Ledger::Submit(a_obj->GetFormID(),
                 -EquipCountFor(a_obj, a_tileCount), "use", a_uid, a_sig);
         }
