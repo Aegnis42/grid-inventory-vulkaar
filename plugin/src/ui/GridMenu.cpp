@@ -2,6 +2,7 @@
 #include "game/Census.h"
 #include "game/DeltaWatch.h"
 #include "game/Ledger.h"
+#include "game/WornLedger.h"
 #include "ui/Grid.h"
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
@@ -173,6 +174,9 @@ namespace FUI
         if (FUI::Census::Take("menu-open")) {
             FUI::Grid::RequestRebuild();
         }
+        // B4-2 observation: did the worn ledger stay in step with the engine
+        // across the closed-menu stretch on events alone?
+        FUI::WornLedger::Audit("menu-open");
         // ★B2 flushes on OPEN, not on close. Closing the menu right after a
         // request reported it outstanding at ONE frame old -- the confirmation
         // was simply still in flight. Waiting until the next open gives every
@@ -199,6 +203,8 @@ namespace FUI
         // (acting on it would make every reopen after an active session
         // rebuild for nothing, undoing B4-1).
         (void)FUI::Census::Take("menu-close");
+        // ...and across the in-menu session (our own equip UI's requests)
+        FUI::WornLedger::Audit("menu-close");
         ItemPreview::GetSingleton()->End();
         UIRoot::OnClose();
     }

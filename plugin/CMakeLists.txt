@@ -53,6 +53,8 @@ set(SOURCES
     src/game/Census.cpp
     src/game/Ledger.h
     src/game/Ledger.cpp
+    src/game/WornLedger.h
+    src/game/WornLedger.cpp
     src/ui/ItemPreview.h
     src/ui/ItemPreview.cpp
     src/ui/GridMenu.h

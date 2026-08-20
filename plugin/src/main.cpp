@@ -4,6 +4,7 @@
 #include "game/Costume.h"
 #include "game/DeltaWatch.h"
 #include "game/Ledger.h"
+#include "game/WornLedger.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "ui/Editor.h"
@@ -203,6 +204,10 @@ namespace
                 if (!a_event->equipped) {
                     const RE::FormID fid = a_event->baseObject;
                     SKSE::GetTaskInterface()->AddTask([fid]() {
+                        // B4-2 observation: the ledger hears every player
+                        // unequip, including the engine's own slot-conflict
+                        // removals -- the case our equip code never sees.
+                        FUI::WornLedger::OnUnequip(fid);
                         if (!FUI::Grid::OnFormDelta(fid)) {
                             FUI::Grid::RequestRebuild();
                         }
@@ -224,7 +229,11 @@ namespace
                     // threads (rule 4), and the menu/3D checks belong on the
                     // main thread anyway. Outside our menu the game is
                     // unpaused and refreshes itself -- skip.
-                    SKSE::GetTaskInterface()->AddTask([]() {
+                    const RE::FormID fid = a_event->baseObject;
+                    SKSE::GetTaskInterface()->AddTask([fid]() {
+                        // B4-2 observation: BEFORE the menu gate below -- the
+                        // ledger listens whether our menu is open or not.
+                        FUI::WornLedger::OnEquip(fid);
                         auto* ui = RE::UI::GetSingleton();
                         if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return;
                         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -1893,6 +1902,9 @@ namespace
             FUI::DeltaWatch::Reset("new game");
             FUI::Census::Reset("new game");
             FUI::Ledger::Reset("new game");
+            SKSE::GetTaskInterface()->AddTask([]() {
+                FUI::WornLedger::Rebaseline("new game");
+            });
             // no cosave load callback fires on new game — start with an empty
             // grid layout instead of migrating the legacy ini (old saves only)
             FUI::Grid::MarkLayoutFresh();
@@ -1907,6 +1919,12 @@ namespace
             break;
         case SKSE::MessagingInterface::kPostLoadGame:
             ResetSession();
+            // B4-2: a load is a discontinuity (rule 3) -- the worn ledger
+            // rebuilds from the engine once, here, where the new inventory is
+            // real. Deferred a task so the walk runs after the engine settles.
+            SKSE::GetTaskInterface()->AddTask([]() {
+                FUI::WornLedger::Rebaseline("load");
+            });
             // ★The costume has to be put on again -- more than once. See
             // Costume::NoteGameLoaded: the engine rebuilds the actor for a
             // while after this message, and every rebuild undoes it.
