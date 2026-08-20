@@ -6780,6 +6780,55 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             for (const auto& liveIt : g_items) g_liveObjs.insert(liveIt.obj);
             SKSE::log::info("[GRID] rebuilt: {} items, {} views, gold {}",
                 g_items.size(), g_views.size(), g_gold);
+            // ★B5: rule 13's missed enforcement -- the sweep for forms this
+            // walk never visited. A form whose entire presence is WORN has
+            // zero board units, so the walk skips it and the ordinary prune
+            // never reaches its slots: a layout entry leaked by an equip that
+            // bypassed ForgetTile (the engine's own conflict equips, a
+            // loadout apply, a costume pass) survived for good. The
+            // engine-walk sims never saw them; the board reader seated them
+            // as phantom occupancy -- five of them refused pickups with room
+            // in plain sight (measured: stranded lines with valid, colliding
+            // coordinates). Runs at the END of the rebuild, against the
+            // freshly collected board. Every keeper is named: displayed
+            // forms belong to the ordinary prune, reserved cells are MEMORY
+            // by design, the trash is parked, a queued drop is two-phase,
+            // and a held or pending-equip cell is in transit. What remains
+            // is a worn leak -- or an unowned ghost, the save-bloat class --
+            // and both go.
+            {
+                std::set<std::string> keepBases;
+                for (const auto& it : g_items) keepBases.insert(BaseKey(it.key));
+                for (const auto& u : g_pendingEquip) keepBases.insert(u.base);
+                if (g_held && g_held->obj) keepBases.insert(FormKey(g_held->obj));
+                std::set<std::string> queuedKeys;
+                for (const auto& [f, keys] : g_pendingSlotDrop) {
+                    queuedKeys.insert(keys.begin(), keys.end());
+                }
+                for (auto li = g_layout.begin(); li != g_layout.end();) {
+                    const std::string base = BaseKey(li->first);
+                    bool keep = keepBases.contains(base) ||
+                                li->second.bag == kTrashKey ||
+                                queuedKeys.contains(li->first) ||
+                                (g_held && li->first == g_held->key) ||
+                                GoldCoins::PinnedValue(li->first) >= 0;
+                    if (!keep) {
+                        if (auto* obj = ObjFromBaseKey(base)) {
+                            if (Loadout::ReservedCount(obj->GetFormID()) > 0) {
+                                keep = true;
+                            }
+                        }
+                    }
+                    if (keep) {
+                        ++li;
+                    } else {
+                        SKSE::log::info("[GRID] layout sweep: '{}' (unwalked "
+                                        "form) -- rule 13 leak or ghost",
+                                        li->first);
+                        li = g_layout.erase(li);
+                    }
+                }
+            }
             // ★DIAG: a tile with no column, or parked in the overflow zone, is
             // skipped by the occupancy shading AND by the sprite pass -- so
             // "the background is missing" and "the cell looks empty" are the
