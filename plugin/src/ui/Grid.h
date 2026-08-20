@@ -150,10 +150,12 @@ namespace FUI::Grid
     // Only then can the worn list left on the body after the replacement's
     // equip lands be mistaken for this unit's own -- see the clock in
     // OffBoardUnitsFor. Meaningless unless a_swappedOut.
+    // a_fromCarrier: lifted from the SECOND ring slot -- never engine-worn,
+    // so the carry must not claim a worn list (see Held::fromCarrier).
     void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0,
                     std::uint16_t a_sig = 0, int a_hand = 0,
                     bool a_swappedOut = false, int a_count = 1,
-                    bool a_swapSameForm = false);
+                    bool a_swapSameForm = false, bool a_fromCarrier = false);
 
     // Phase 5-B: carry a PARTNER (merchant/container) item on the cursor.
     // Dropping it onto the player grid takes (loot) or buys (barter).

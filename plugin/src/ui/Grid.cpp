@@ -254,6 +254,13 @@ namespace FUI::Grid
             // stack is attributed to the stolen pool rather than to the plain
             // one it does not belong to.
             std::string         srcPool;
+            // ★★Lifted from the SECOND RING slot: its unit was never
+            // engine-worn (a carrier wears the effect), so this carry has NO
+            // worn list to be backed by -- treating it as fromDoll-worn made
+            // the accounting consume the FIRST ring's list instead (same
+            // plain form) and that unit leaked onto the board. Appended LAST
+            // (§10-6).
+            bool                fromCarrier = false;
             // Adopting an angle (lifting a tile that already lies on its side)
             // must NOT animate -- there is nothing to show, the item was already
             // like that. Only a keypress starts a turn.
@@ -1534,7 +1541,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // listed unit" -- removing a sibling, freeing its cell, and
                 // putting a weapon the player never touched somewhere else.
                 // (Measured: worn 1, "REMOVED as any listed unit", freed=1.)
-                bool stillWorn = g_held->fromDoll;
+                // ★A CARRIER lift was never engine-worn: no worn list is its
+                // to claim, and claiming one anyway ate the FIRST ring's list
+                // (same plain form) and leaked that unit onto the board.
+                bool stillWorn = g_held->fromDoll && !g_held->fromCarrier;
                 if (stillWorn && g_held->swappedOut && g_held->swapSameForm) {
                     stillWorn = std::any_of(g_pendingEquip.begin(), g_pendingEquip.end(),
                         [&](const OffBoardUnit& u) {
@@ -1627,8 +1637,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the FORM, and the units it can stand in for are interchangeable
             // to the effect rule anyway. mayBeWorn=false -- the body never
             // wears this unit, so it must not consume a worn list.
+            // ★...but NOT while an equip of this form is still in flight: the
+            // pending-equip suppression already hides the unit on its way to
+            // the carrier, and both at once hid a SPARE as well -- the
+            // identical ring in the pack flickered for the rebuild or two
+            // until the suppression died (user report). The entry takes over
+            // when the suppression releases: a seamless handoff, one
+            // exclusion at every moment.
             if (auto* second = DualRing::Second();
-                second && FormKey(second) == a_base) {
+                second && FormKey(second) == a_base &&
+                std::none_of(g_pendingEquip.begin(), g_pendingEquip.end(),
+                             [&](const OffBoardUnit& u) { return u.base == a_base; })) {
                 OffBoardUnit r;
                 r.base = a_base;
                 r.sig  = DualRing::SecondSig();   // 0 for every vanilla ring
@@ -3715,7 +3734,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid, std::uint16_t a_sig,
-                    int a_hand, bool a_swappedOut, int a_count, bool a_swapSameForm)
+                    int a_hand, bool a_swappedOut, int a_count, bool a_swapSameForm,
+                    bool a_fromCarrier)
     {
         if (!a_obj || g_held) return;
         const GridDef def = g_resolver ? g_resolver(a_obj) : GridDef{};
@@ -3784,6 +3804,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
         g_held->swappedOut = a_swappedOut;
         g_held->swapSameForm = a_swapSameForm;
+        g_held->fromCarrier = a_fromCarrier;
         if (g_poolTrace) {
             SKSE::log::info("[ACT] lift-from-doll '{}' hand={} uid {:04X} sig {:04X} key '{}'",
                 a_obj->GetName(), a_hand, a_uid, a_sig, g_held->key);
@@ -11150,20 +11171,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // Only an ACCEPTED equip that actually displaces something starts the
             // return carry. A potion or spell tome dropped on a slot is drunk or
             // read -- nothing comes off, and there is nothing to hand back.
-            // ★★The SECOND RING slot settles its own displacement, so the
-            // cursor stays empty here -- BY DECISION, twice over. Its occupant
-            // was never engine-worn, so a fromDoll carry's worn-backed
-            // accounting consumes the FIRST ring's worn list instead (same
-            // plain form) and that unit leaks onto the board: the displaced
-            // ring showed on the cursor AND in the pack, and the cursor copy
-            // had no engine identity to land anywhere. Wear's own TakeOff
-            // returns it to the pack immediately -- the user chose that over a
-            // cursor carry the accounting cannot honestly back.
+            // ★★The SECOND RING'S displaced occupant rides the cursor like
+            // every other swap -- its carry is marked fromCarrier, so the
+            // worn-backed accounting cannot let it claim the FIRST ring's
+            // list (the leak that made the first cursor attempt draw the ring
+            // twice). The ONE exception: first slot empty, where Wear moves
+            // the displaced ring onto the FIRST slot instead of the pack --
+            // nothing leaves the body, and a cursor copy really would be a
+            // duplicate.
             // ★Captured BEFORE the reset above: `a_held` is the INCOMING item
             // and `worn` is the one being displaced. Same object pointer means
             // same form, which is the only case the worn-clock has to guard.
             const bool swapSameForm = (worn == swapInObj);
-            if (accepted && swapping && g_slotTarget != "ringL") {
+            const bool ringL = g_slotTarget == "ringL";
+            const bool ringLToFirst = ringL &&
+                                      Equip::WornObjectAt("ringR") == nullptr;
+            if (accepted && swapping && !ringLToFirst) {
                 // The engine has not unequipped it yet, so this is exactly a doll
                 // pickup -- and it must name the HAND, or the worn-unit match can
                 // consume the copy we just put IN and leave the displaced one
@@ -11176,7 +11199,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 BeginCarry(worn, wuid, wsig, wornHand, /*swappedOut=*/true,
                            Equip::EquipCountFor(worn,
                                Equip::WornCountAt(g_slotTarget)),
-                           swapSameForm);
+                           swapSameForm, /*fromCarrier=*/ringL);
             }
             // ★No tail rebuild for ACCEPTED drops. The !rbdrop interrogation
             // measured every accepted shape without it: plain equips, swaps,
