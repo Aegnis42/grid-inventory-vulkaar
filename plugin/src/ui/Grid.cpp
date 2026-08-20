@@ -4962,92 +4962,37 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // the [CAP] divergence log decides the flip (the B0~B2 precedent).
         void CollectCapacityTilesFromBoard(CapTiles& a_out)
         {
-            // The one fact the layout cannot answer alone: a bag FORM still
-            // owned anchors its contents even while its tile is transiently
-            // absent -- the tile IS the absence in question.
+            // ★B5, third and final shape -- the DISPLAY reader, restored.
+            // The layout walk between tried to answer occupancy from
+            // g_layout alone and needed an ownership filter, a reserved
+            // yield and a worn exemption to approximate what g_items simply
+            // is: the set of tiles that occupy cells. Its reserved yield
+            // then mis-picked by key order whenever the reserved unit was
+            // worn or hidden, and the sim under-modelled -- items past the
+            // overload line with no overload called (user report, the
+            // symmetric failure to the phantom refusals before it).
+            //
+            // Every class that pushed the reader off g_items has its real
+            // answer elsewhere now: reserved-hidden cells are FREE by
+            // design (user-corrected semantics -- a soft memory, not a
+            // wall); worn leaks and unowned ghosts are swept from the
+            // layout at every rebuild's end (rule 13's missed enforcement);
+            // in-transit cells were free in the engine walk too; and a
+            // stale or never-built board is the gate freshen's job.
             std::set<std::string> bagForms;
-            // ...and OWNERSHIP, the filter the engine walk had for free. The
-            // layout accumulates DEAD entries: the rebuild's prune only walks
-            // forms the inventory still holds, so a key whose item left long
-            // ago is never visited again and never cleaned. A save carried
-            // 134 placements against 78 live items, and reading them all
-            // flooded the sim board into a false overload at load (user
-            // report: overloaded with room in plain sight).
-            std::set<std::string> owned;
             if (auto* player = RE::PlayerCharacter::GetSingleton();
                 player && g_resolver) {
                 for (auto& [obj, data] : player->GetInventory()) {
                     if (!obj || data.first <= 0) continue;
-                    owned.insert(FormKey(obj));
                     if (const GridDef bd = g_resolver(obj); bd.bag != 0) {
                         bagForms.insert(FormKey(obj));
                     }
                 }
             }
-            // cells whose drop is queued read as FREE, mirroring the engine
-            // walk's slot collection (the refusal path restores them and the
-            // reflow absorbs a collision -- same bet both sims must make)
-            std::set<std::string> dropped;
-            for (const auto& [f, keys] : g_pendingSlotDrop) {
-                dropped.insert(keys.begin(), keys.end());
-            }
-            // ★A RESERVED-HIDDEN cell also reads as FREE (user correction of
-            // the flip's first judgment). An inactive preset's gear draws no
-            // tile, and its remembered cell is a SOFT memory -- it exists so
-            // preset switches do not shuffle the board, not to block
-            // arrivals: the real placement lets a pickup take that cell and
-            // the reflow settles any collision when the gear resurfaces. The
-            // observation round's thirty-two board-only tiles were the old
-            // walk mirroring exactly this, and calling them its defect would
-            // have shipped "refused with an empty cell in plain sight" --
-            // the very bug class this stage retires. Per form, the reserved
-            // units hide TRAILING tiles (the walk's own rule), approximated
-            // here by ordinal order.
-            std::map<std::string, int> reservedLeft;
-            for (const auto& [k, le] : g_layout) {
-                const std::string base = BaseKey(k);
-                if (reservedLeft.contains(base)) continue;
-                if (auto* o = ObjFromBaseKey(base)) {
-                    reservedLeft[base] = Loadout::ReservedCount(o->GetFormID());
-                }
-            }
-            std::set<std::string> reservedKeys;
-            for (auto& [base, left] : reservedLeft) {
-                if (left <= 0) continue;
-                std::vector<std::string> keys;
-                for (const auto& [k, le] : g_layout) {
-                    if (BaseKey(k) == base && le.bag != kTrashKey) keys.push_back(k);
-                }
-                std::sort(keys.begin(), keys.end());
-                for (auto it = keys.rbegin(); it != keys.rend() && left > 0; ++it) {
-                    const auto li = g_layout.find(*it);
-                    const int units = li == g_layout.end()
-                                          ? 1 : (std::max)(1, li->second.count);
-                    reservedKeys.insert(*it);
-                    left -= units;
-                }
-            }
-            for (const auto& [k, le] : g_layout) {
-                if (le.bag == kTrashKey) continue;   // deletion buffer: no cells
-                if (g_held && k == g_held->key) continue;   // carried: cell yields
-                if (dropped.contains(k)) continue;
-                if (reservedKeys.contains(k)) continue;
-                if (!owned.contains(BaseKey(k))) continue;   // dead key: no item behind it
-                auto* obj = ObjFromBaseKey(BaseKey(k));
-                if (!obj) continue;
-                const GridDef def = g_resolver ? g_resolver(obj) : GridDef{};
-                Item t;
-                t.key = k;
-                t.obj = obj;
-                t.def = def;
-                t.uid = le.uid;
-                t.sig = le.sig;
-                t.rot = (CanRotate(def) && le.rot != 0) ? (le.rot & 3) : 0;
-                t.mask = MaskOf(def, t.rot);
-                t.col = le.col;
-                t.row = le.row;
-                t.inBag = le.bag;
-                if (def.bag != 0) a_out.bagKeys.insert(t.key);
+            for (const auto& it : g_items) {
+                if (it.inBag == kTrashKey) continue;   // deletion buffer: no cells
+                Item t = it;
+                if (t.def.bag != 0) a_out.bagKeys.insert(t.key);
                 // overflow-zone spots are TEMPORARY and never honoured
                 if (t.inBag.empty() && t.row >= kMinRows) {
                     t.col = -1;
