@@ -2136,6 +2136,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         it->mask = std::move(upright);
                         continue;
                     }
+                } else if (CanRotate(it->def)) {
+                    // ★The mirror fallback. A FRESH tile arrives upright (rot 0
+                    // -- the turn is a property of the spot, and it has none
+                    // yet), but the capacity gate green-lights pickups by
+                    // trying BOTH orientations. Landing has to honour that
+                    // promise: a 1x3 staff green-lit for a 3x1 gap otherwise
+                    // sailed past it into the growth rows, upright, and the
+                    // pack went overloaded with the gap still empty (user
+                    // report). Turn it before letting it fall off the board.
+                    Mask turned = MaskOf(it->def, 1);
+                    if (tryFit(turned)) {
+                        it->rot = 1;
+                        it->mask = std::move(turned);
+                        continue;
+                    }
                 }
                 it->overflow = true;
             }
@@ -6522,7 +6537,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
 
             // An applied entry has covered the one rebuild it existed for.
-            std::erase_if(g_pendingEquip, [](const OffBoardUnit& u) { return u.applied; });
+            // ★...and if any actually died here, this rebuild was still drawn
+            // WITH their suppression -- one more pass shows the board as the
+            // engine now has it. ProcessPending's unconditional rebuild used
+            // to be that pass (removed in B3-c); worn equips still get theirs
+            // released mid-walk by ReleaseWornPendingEquips, but a CONSUMABLE
+            // never grows a worn list and never fires an unequip event, so its
+            // entry could only die here -- and the board then stood one unit
+            // short until the next unrelated rebuild: "one drink removed two"
+            // (user report). The request coalesces; steady state stays quiet.
+            if (std::erase_if(g_pendingEquip,
+                              [](const OffBoardUnit& u) { return u.applied; }) > 0) {
+                RequestRebuild();
+            }
 
             // ---- GI65: mark tiles that are new since the last look ----------
             // Runs BEFORE prevKeys is rebuilt, because "did this key exist last
