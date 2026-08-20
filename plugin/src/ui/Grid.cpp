@@ -6768,6 +6768,100 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         FinalizeRebuild();                      // stage 5
     }
 
+    // ---- ★B3 partial-update helpers: main-view occupancy -----------------
+    namespace
+    {
+        std::vector<std::vector<bool>> MainViewOcc()
+        {
+            const auto& mv = g_views[0];
+            std::vector<std::vector<bool>> occ(
+                static_cast<std::size_t>(mv.rows),
+                std::vector<bool>(static_cast<std::size_t>(mv.cols), false));
+            for (int idx : mv.items) {
+                const auto& it = g_items[static_cast<std::size_t>(idx)];
+                if (it.col < 0) continue;
+                for (std::size_t r = 0; r < it.mask.rows.size(); ++r) {
+                    for (std::size_t c = 0; c < it.mask.rows[r].size(); ++c) {
+                        if (!it.mask.rows[r][c]) continue;
+                        const int rr = it.row + static_cast<int>(r);
+                        const int cc = it.col + static_cast<int>(c);
+                        if (rr >= 0 && rr < mv.rows && cc >= 0 && cc < mv.cols) {
+                            occ[static_cast<std::size_t>(rr)]
+                               [static_cast<std::size_t>(cc)] = true;
+                        }
+                    }
+                }
+            }
+            return occ;
+        }
+
+        bool OccFits(const std::vector<std::vector<bool>>& a_occ,
+                     int a_c, int a_r, const Mask& a_m)
+        {
+            const int rows = static_cast<int>(a_occ.size());
+            const int cols = rows > 0 ? static_cast<int>(a_occ[0].size()) : 0;
+            for (std::size_t r = 0; r < a_m.rows.size(); ++r) {
+                for (std::size_t c = 0; c < a_m.rows[r].size(); ++c) {
+                    if (!a_m.rows[r][c]) continue;
+                    const int rr = a_r + static_cast<int>(r);
+                    const int cc = a_c + static_cast<int>(c);
+                    if (rr < 0 || rr >= rows || cc < 0 || cc >= cols) return false;
+                    if (a_occ[static_cast<std::size_t>(rr)]
+                             [static_cast<std::size_t>(cc)]) return false;
+                }
+            }
+            return true;
+        }
+
+        void OccMark(std::vector<std::vector<bool>>& a_occ,
+                     int a_c, int a_r, const Mask& a_m)
+        {
+            for (std::size_t r = 0; r < a_m.rows.size(); ++r) {
+                for (std::size_t c = 0; c < a_m.rows[r].size(); ++c) {
+                    if (a_m.rows[r][c]) {
+                        a_occ[static_cast<std::size_t>(a_r) + r]
+                             [static_cast<std::size_t>(a_c) + c] = true;
+                    }
+                }
+            }
+        }
+
+        bool OccFirstFit(const std::vector<std::vector<bool>>& a_occ,
+                         const Mask& a_m, int& a_c, int& a_r)
+        {
+            const int rows = static_cast<int>(a_occ.size());
+            const int cols = rows > 0 ? static_cast<int>(a_occ[0].size()) : 0;
+            for (int r = 0; r + a_m.h <= rows; ++r) {
+                for (int c = 0; c + a_m.w <= cols; ++c) {
+                    if (OccFits(a_occ, c, r, a_m)) { a_c = c; a_r = r; return true; }
+                }
+            }
+            return false;
+        }
+
+        // First-fit, both orientations -- the same pair the rebuild's placer
+        // tries. Sets col/row/rot on a_le and marks the occupancy on success.
+        bool OccPlace(std::vector<std::vector<bool>>& a_occ, const GridDef& a_def,
+                      LayoutEntry& a_le)
+        {
+            Mask m = MaskOf(a_def);
+            int  c = -1, r = -1;
+            if (OccFirstFit(a_occ, m, c, r)) {
+                a_le.rot = 0;
+            } else if (CanRotate(a_def)) {
+                m = MaskOf(a_def, 1);
+                if (!OccFirstFit(a_occ, m, c, r)) return false;
+                a_le.rot = 1;
+            } else {
+                return false;
+            }
+            a_le.col = c;
+            a_le.row = r;
+            OccMark(a_occ, c, r, m);
+            return true;
+        }
+    }
+
     // ---- ★B3 BODY: the partial board update ------------------------------
     //
     // An unequip puts ONE unit back on the board, and until now the only way
@@ -6806,7 +6900,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
         const GridDef gdef = g_resolver ? g_resolver(obj) : GridDef{};
         if (gdef.bag != 0) return decline("bag form (window wiring)");
-        if (EffectiveCap(obj, gdef) > 1) return decline("stackable (merge rules)");
+        const int cap = EffectiveCap(obj, gdef);
         // The rebuild would claim a fresh tile of a filtered form into a held
         // typed bag; first-fitting it onto the main board here would diverge
         // and the next rebuild would visibly move it.
@@ -6831,11 +6925,142 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
         if (count <= 0) return decline("count 0");
         if (!entry) return decline("no entry");
+        const std::string baseKey = FormKey(obj);
+        std::uint8_t glow = 0;
+        if (const auto* ef = obj->As<RE::TESEnchantableForm>();
+            ef && ef->formEnchanting) {
+            glow |= 1;
+        }
+        if (IsUniqueCached(obj)) glow |= 2;
+
+        // ---- ★stackable coverage: the PROVABLE clean case ----------------
+        // The rebuild's units computation for stackables is ~100 lines of
+        // hard-won interplay (worn/carried/pendingEquip -- the quiver sagas),
+        // and duplicating it here is exactly the drift this codebase keeps
+        // paying for. So the fast path takes only the state it can prove:
+        // no worn list left, nothing carried, nothing pending, nothing
+        // reserved or parked. That IS the common unequip (ammo swap, torch
+        // down, scroll away) -- everything else declines with a reason and
+        // the [B3] lines keep measuring what the fallback still costs.
+        //
+        // Distribution safety: a tile OWNS its quantity and the reconciler
+        // only closes the GAP between the saved sum and the engine count --
+        // so any fill whose sum is right is STABLE under the next rebuild.
+        if (cap > 1) {
+            if (entry->IsWorn()) return decline("still worn");
+            if (g_held && g_held->obj == obj) return decline("carried");
+            for (const auto& u : g_pendingEquip) {
+                if (u.base == baseKey) return decline("equip in flight");
+            }
+            if (g_pendingRemoveForm.contains(a_form)) return decline("removal in flight");
+            if (Loadout::ReservedCount(a_form) > 0) return decline("reserved");
+            if (TrashedUnits(baseKey) > 0) return decline("trash parked");
+            if (DualRing::Second() == obj) return decline("dual ring");
+
+            // pools from the shared authority (nothing is queued out of them
+            // -- the gates above proved it)
+            int  signedUnits = 0;
+            auto pools = SignedPools(entry, baseKey, signedUnits,
+                                     /*countTrashed=*/false);
+            pools[baseKey] += (std::max)(0, count - signedUnits);
+
+            // the tiles standing for this form, grouped by pool
+            std::map<std::string, std::vector<int>> tilesByPool;
+            std::map<std::string, int>              sumByPool;
+            for (std::size_t i = 0; i < g_items.size(); ++i) {
+                const auto& it = g_items[i];
+                if (it.obj != obj || it.inBag == kTrashKey) continue;
+                const std::string pool = PoolPrefix(baseKey, it.uid, it.sig);
+                tilesByPool[pool].push_back(static_cast<int>(i));
+                sumByPool[pool] += it.count;
+            }
+            for (const auto& [pool, sum] : sumByPool) {
+                const auto pi = pools.find(pool);
+                if ((pi == pools.end() ? 0 : pi->second) < sum) {
+                    return decline("a pool shrank");
+                }
+            }
+            bool grew = false;
+            for (const auto& [pool, n] : pools) {
+                if (n > sumByPool[pool]) { grew = true; break; }
+            }
+            if (!grew) {
+                SKSE::log::info("[B3] partial add ({:08X}): nothing fresh -- "
+                                "no rebuild", a_form);
+                return true;
+            }
+
+            // plan every fill and mint before touching anything (rule 5)
+            auto occ = MainViewOcc();
+            struct Fill { int idx; int add; };
+            struct Mint { LayoutEntry le; int units; };
+            std::vector<Fill> fills;
+            std::vector<Mint> mints;
+            for (auto& [pool, want] : pools) {
+                int delta = want - sumByPool[pool];
+                if (delta <= 0) continue;
+                // top up partial tiles in position order, like the reconciler
+                auto& idxs = tilesByPool[pool];
+                std::sort(idxs.begin(), idxs.end(), [](int a, int b) {
+                    const auto& x = g_items[static_cast<std::size_t>(a)];
+                    const auto& y = g_items[static_cast<std::size_t>(b)];
+                    if (x.inBag != y.inBag) return x.inBag < y.inBag;
+                    if (x.row != y.row) return x.row < y.row;
+                    return x.col < y.col;
+                });
+                for (int i : idxs) {
+                    if (delta <= 0) break;
+                    const int room = cap - g_items[static_cast<std::size_t>(i)].count;
+                    const int take = (std::min)(room, delta);
+                    if (take > 0) {
+                        fills.push_back({ i, take });
+                        delta -= take;
+                    }
+                }
+                // whatever the saved tiles cannot hold becomes fresh tiles --
+                // the pool prefix carries the identity the new slot records
+                while (delta > 0) {
+                    const int n = (std::min)(cap, delta);
+                    Mint mp;
+                    mp.le.uid = UidOf(pool);
+                    mp.le.sig = SigOf(pool);
+                    if (!OccPlace(occ, gdef, mp.le)) {
+                        return decline("no room (growth/spill)");
+                    }
+                    mp.units = n;
+                    mints.push_back(std::move(mp));
+                    delta -= n;
+                }
+            }
+
+            // commit: counts first, then the minted tiles with every trace
+            for (const auto& f : fills) {
+                auto& it = g_items[static_cast<std::size_t>(f.idx)];
+                it.count += f.add;
+                g_layout[it.key].count = it.count;
+                SKSE::log::info("[B3] ★stack fill '{}' +{} -> {} in '{}' -- no rebuild",
+                    obj->GetName(), f.add, it.count, it.key);
+            }
+            auto& mv = g_views[0];
+            for (auto& mp : mints) {
+                const std::string key = NextTileKey(baseKey);
+                mp.le.count = mp.units;
+                g_layout[key] = mp.le;
+                MakeDisplayTile(obj, entry, gdef, glow, key, mp.units, mp.le, -1);
+                mv.items.push_back(static_cast<int>(g_items.size()) - 1);
+                g_spaceUsed += MaskCells(g_items.back().mask.rows);
+                SKSE::log::info("[B3] ★stack mint '{}' x{} key '{}' at [{},{}] -- "
+                                "no rebuild",
+                    obj->GetName(), mp.units, key, mp.le.col, mp.le.row);
+            }
+            g_liveObjs.insert(obj);
+            MarkCapacityDirty();
+            return true;
+        }
 
         // The same walk the rebuild runs, scoped to this form: identity,
         // slot assignment, every off-board exclusion (held / trash / pending)
         // -- and mutate=true mints the GI21 placeholder for the fresh unit.
-        const std::string baseKey = FormKey(obj);
         std::vector<UnitTile> units_v;
         EnumerateUnitTiles(baseKey, count, (std::numeric_limits<int>::max)(),
                            entry, units_v, gdef.bag == 0, /*mutate=*/true);
@@ -6865,45 +7090,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         // Occupancy of the MAIN view, from the tiles standing on it.
         auto& mv = g_views[0];
-        std::vector<std::vector<bool>> occ(
-            static_cast<std::size_t>(mv.rows),
-            std::vector<bool>(static_cast<std::size_t>(mv.cols), false));
-        for (int idx : mv.items) {
-            const auto& it = g_items[static_cast<std::size_t>(idx)];
-            if (it.col < 0) continue;
-            for (std::size_t r = 0; r < it.mask.rows.size(); ++r) {
-                for (std::size_t c = 0; c < it.mask.rows[r].size(); ++c) {
-                    if (!it.mask.rows[r][c]) continue;
-                    const int rr = it.row + static_cast<int>(r);
-                    const int cc = it.col + static_cast<int>(c);
-                    if (rr >= 0 && rr < mv.rows && cc >= 0 && cc < mv.cols) {
-                        occ[static_cast<std::size_t>(rr)]
-                           [static_cast<std::size_t>(cc)] = true;
-                    }
-                }
-            }
-        }
-        const auto fits = [&](int a_c, int a_r, const Mask& a_m) {
-            for (std::size_t r = 0; r < a_m.rows.size(); ++r) {
-                for (std::size_t c = 0; c < a_m.rows[r].size(); ++c) {
-                    if (!a_m.rows[r][c]) continue;
-                    const int rr = a_r + static_cast<int>(r);
-                    const int cc = a_c + static_cast<int>(c);
-                    if (rr < 0 || rr >= mv.rows || cc < 0 || cc >= mv.cols) return false;
-                    if (occ[static_cast<std::size_t>(rr)]
-                           [static_cast<std::size_t>(cc)]) return false;
-                }
-            }
-            return true;
-        };
-        const auto firstFit = [&](const Mask& a_m, int& a_c, int& a_r) {
-            for (int r = 0; r + a_m.h <= mv.rows; ++r) {
-                for (int c = 0; c + a_m.w <= mv.cols; ++c) {
-                    if (fits(c, r, a_m)) { a_c = c; a_r = r; return true; }
-                }
-            }
-            return false;
-        };
+        auto  occ = MainViewOcc();
 
         // Decide EVERY placement before touching g_items -- a fallback after a
         // partial commit would leave a half-updated board for the rebuild to
@@ -6917,41 +7104,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (le.col >= 0) {
                 // a surviving saved spot (parked star, cancel) -- honour it if free
                 const Mask m = MaskOf(gdef, CanRotate(gdef) ? (le.rot & 3) : 0);
-                if (!fits(le.col, le.row, m)) return decline("saved spot occupied");
-                for (std::size_t r = 0; r < m.rows.size(); ++r)
-                    for (std::size_t c = 0; c < m.rows[r].size(); ++c)
-                        if (m.rows[r][c]) occ[le.row + r][le.col + c] = true;
+                if (!OccFits(occ, le.col, le.row, m)) {
+                    return decline("saved spot occupied");
+                }
+                OccMark(occ, le.col, le.row, m);
             } else {
                 // rule 13 forgot the cell at equip time: first-fit, both
                 // orientations, same as the rebuild's placer would
-                Mask m = MaskOf(gdef);
-                int  c = -1, r = -1;
-                if (firstFit(m, c, r)) {
-                    le.rot = 0;
-                } else if (CanRotate(gdef)) {
-                    m = MaskOf(gdef, 1);
-                    if (!firstFit(m, c, r)) return decline("no room (growth/spill)");
-                    le.rot = 1;
-                } else {
+                if (!OccPlace(occ, gdef, le)) {
                     return decline("no room (growth/spill)");
                 }
-                le.col = c;
-                le.row = r;
-                for (std::size_t mr = 0; mr < m.rows.size(); ++mr)
-                    for (std::size_t mc = 0; mc < m.rows[mr].size(); ++mc)
-                        if (m.rows[mr][mc]) occ[r + mr][c + mc] = true;
             }
             plan.push_back({ u, le });
         }
 
         // Commit: the one tile factory, then every bookkeeping trace the
         // rebuild would have left for this tile (rule 5).
-        std::uint8_t glow = 0;
-        if (const auto* ef = obj->As<RE::TESEnchantableForm>();
-            ef && ef->formEnchanting) {
-            glow |= 1;
-        }
-        if (IsUniqueCached(obj)) glow |= 2;
         for (const auto& p : plan) {
             g_layout[p.u->key] = p.le;   // persist BEFORE mint: the tile reads it
             MakeDisplayTile(obj, entry, gdef, glow, p.u->key, 1, p.le, p.u->xlIdx);
