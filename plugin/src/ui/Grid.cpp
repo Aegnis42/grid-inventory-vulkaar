@@ -4508,6 +4508,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (x.second.row != y.second.row) return x.second.row < y.second.row;
                 return x.second.col < y.second.col;
             };
+            // ★B3-b: keys whose drop is waiting on the engine's answer. The
+            // two-phase deletion keeps the entry in g_layout (cancel-safe), so
+            // without this exclusion the DEPARTING unit's cell was still a
+            // claimable slot -- and position-order matching handed it to the
+            // SURVIVOR. Storing the front of two identical daggers made the
+            // back one jump to the front cell, then jump back when the commit
+            // finally erased the slot: the reported "blink", front-store only,
+            // because storing the back one hands the survivor its own front
+            // cell. Excluded here, the entry survives untouched (the prune
+            // below only walks `slots`) until Commit erases it or Cancel
+            // returns it to circulation.
+            std::set<std::string> pendingDrop;
+            for (const auto& [fid, qs] : g_pendingSlotDrop) {
+                for (const auto& qk : qs) {
+                    if (BaseKey(qk) == a_base) pendingDrop.insert(qk);
+                }
+            }
             std::vector<std::pair<std::string, LayoutEntry>> slots;
             for (const auto& [k, le] : g_layout) {
                 if (BaseKey(k) != a_base) continue;
@@ -4519,6 +4536,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // and the slot keeps the remaining ones where they are (and
                 // restores it on cancel). Same for a queued equip.
                 if (inTransit.contains(k)) continue;
+                if (pendingDrop.contains(k)) continue;   // ★see above
                 slots.push_back({ k, le });
             }
             std::sort(slots.begin(), slots.end(), slotOrder);
@@ -4811,28 +4829,60 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     EnumerateUnitTiles(baseKey, count, (std::numeric_limits<int>::max)(),
                                        entry, unitKeys, gdef.bag == 0);
                 } else {
-                    // ★★★POOLED, exactly like the board (CollectDisplayTiles).
-                    // "units ARE fungible" was true only while stackable tiles
-                    // ignored signatures. Now a stolen / quest / poisoned
-                    // sub-stack gets its own tile, so a form-wide ceil(units/cap)
-                    // models a board one tile SMALLER than the one drawn -- and
-                    // every capacity gate reads this walk: space used, overload,
-                    // the pickup bounce, the buy clamp. The two walks have to
-                    // produce the same keys or they disagree about the board.
-                    int signedUnits = 0;
-                    auto pools = SignedPools(entry, baseKey, signedUnits,
-                                             /*countTrashed=*/true);
-                    pools[baseKey] += (std::max)(0, units - signedUnits);
-                    // ★Keys built from the POOL PREFIX, which is what the
-                    // board's NextTileKey produces too -- same strings, or the
-                    // two walks are modelling different boards.
-                    for (const auto& [pfx, n] : pools) {
-                        if (n <= 0) continue;
-                        const int tiles = (n + cap - 1) / cap;
-                        for (int k = 0; k < tiles; ++k) {
-                            unitKeys.push_back(
-                                { k == 0 ? pfx : pfx + "#" + std::to_string(k), -1 });
-                        }
+                    // ★★★THE SLOTS THE BOARD ACTUALLY OWNS, not synthesized
+                    // keys. The old code built keys from the POOL PREFIX
+                    // (base~sig / base@uid) and claimed NextTileKey produced
+                    // the same strings -- that stopped being true in 1.2.0,
+                    // when tile keys became bare ordinals (base / base#n) with
+                    // the pool identity moved onto le.uid/le.sig. Every signed
+                    // sub-stack (stolen, poisoned, tempered, filled soul gem)
+                    // therefore missed the g_layout lookup below, first-fit
+                    // into the front gaps, and the plain pool's ordinals stole
+                    // the cells the signed tiles were really standing on. The
+                    // cell COUNT stayed right while the SHAPE of the free
+                    // space went wrong -- which is a refused 2x2 with a 2x2
+                    // hole in plain sight (user report). Enumerating the
+                    // layout keys makes the lookup exact by construction.
+                    // ★The carried fragment mirrors the display walk (5708):
+                    // its units ride the cursor, and its tile's slot is
+                    // skipped, or the sim models the stack twice.
+                    if (g_held && g_held->obj && !g_held->fromPartner &&
+                        FormKey(g_held->obj) == baseKey) {
+                        units -= g_held->count;
+                    }
+                    if (units <= 0) continue;
+                    struct SimSlot { std::string key; int col, row, count; std::string bag; };
+                    std::vector<SimSlot> slots;
+                    for (const auto& [k, v] : g_layout) {
+                        if (BaseKey(k) != baseKey) continue;
+                        if (v.bag == kTrashKey) continue;   // deletion buffer: no cells
+                        if (g_held && k == g_held->key) continue;   // carried tile
+                        slots.push_back({ k, v.col, v.row, v.count, v.bag });
+                    }
+                    // fill in position order (top-left first), like the
+                    // reconciler; whatever the saved tiles cannot hold becomes
+                    // fresh first-fit tiles, exactly what the next rebuild
+                    // would mint
+                    std::sort(slots.begin(), slots.end(),
+                        [](const SimSlot& a, const SimSlot& b) {
+                            if (a.bag != b.bag) return a.bag < b.bag;
+                            if (a.row != b.row) return a.row < b.row;
+                            return a.col < b.col;
+                        });
+                    int left = units;
+                    for (const auto& s : slots) {
+                        if (left <= 0) break;
+                        const int hold = (std::min)(left,
+                            (std::max)(1, s.count > 0 ? (std::min)(s.count, cap) : cap));
+                        left -= hold;
+                        unitKeys.push_back({ s.key, -1 });
+                    }
+                    const int fresh = left > 0 ? (left + cap - 1) / cap : 0;
+                    for (int k = 0; k < fresh; ++k) {
+                        // "##" keys can never exist in g_layout: fresh tiles
+                        // stay col -1 and first-fit, same as a new arrival
+                        unitKeys.push_back(
+                            { baseKey + "##fresh" + std::to_string(k), -1 });
                     }
                 }
                 for (const auto& uk : unitKeys) {
@@ -7251,6 +7301,29 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_dropHint = {};
     }
 
+    namespace
+    {
+        // ★H1: the capacity gates answer while the MENU IS CLOSED, and nothing
+        // rebuilds the board there -- Rebuild's only consumers are OnShow and
+        // FinishFrame, both menu-side. So every pickup since the last open sat
+        // with no layout entry, and the sim first-fit it onto the hard board
+        // (no typed-bag claim, no growth rows), eating the very hole the
+        // player remembered leaving: "I kept a 2x2 gap and it refused the
+        // pickup". One real rebuild before answering makes g_layout the board
+        // the next open would show -- placeholders, bag claims, growth. The
+        // flag coalesces, so this costs one rebuild per burst of changes.
+        void FreshenLayoutForGates()
+        {
+            if (auto* ui = RE::UI::GetSingleton();
+                ui && ui->IsMenuOpen("GridInventoryMenu")) {
+                return;   // menu open: FinishFrame owns the flag
+            }
+            if (g_needRebuild.exchange(false, std::memory_order_acq_rel)) {
+                Rebuild();
+            }
+        }
+    }
+
     int MaxAcceptUnits(RE::TESBoundObject* a_obj, int a_want)
     {
         // How many units (<= a_want) the inventory can ACCEPT right now:
@@ -7263,6 +7336,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (!player) return a_want;
 
         if (!g_layoutLoaded) LoadLayout();
+        FreshenLayoutForGates();   // ★H1
 
         // stack cap of the incoming form (Mabinogi tiles of up-to-cap units)
         const GridDef aDef = g_resolver ? g_resolver(a_obj) : GridDef{};
@@ -7273,6 +7347,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         int room = 0;
         if (aCap > 1) {
             for (auto& [k, v] : g_layout) {
+                // ★not the deletion buffer: a stack parked in the trash is on
+                // its way out, and "merging" into it green-lit pickups whose
+                // units then had no cell to land on
+                if (v.bag == kTrashKey) continue;
                 if (BaseKey(k) == aKey && v.count > 0 && v.count < aCap) {
                     room += aCap - v.count;
                 }
@@ -7299,7 +7377,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         for (int i = 0; i < tilesNeeded; ++i) {
             probes[i].key = "##probe" + std::to_string(i);
             probes[i].def = aDef;
-            probes[i].mask = MaskOf(aDef);
+            // ★Try BOTH orientations, the way the player can. A probe placed
+            // upright-only refused a 1x3 staff for which a 3x1 gap was in
+            // plain sight. Seeding rot=1 makes PlaceItems try the turned mask
+            // first and its GI62 fallback then retries upright -- two
+            // orientations for the price of the existing fallback. Square
+            // masks are unchanged (the rotation is the identity).
+            probes[i].rot = CanRotate(aDef) ? 1 : 0;
+            probes[i].mask = MaskOf(aDef, probes[i].rot);
             list.push_back(&probes[i]);
         }
         PlaceItems(list, kCols, kMinRows, kMinRows);   // HARD board, no growth
@@ -7362,6 +7447,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (!player) return false;
 
         if (!g_layoutLoaded) LoadLayout();
+        FreshenLayoutForGates();   // ★H1
 
         const std::string targetKey = FormKey(a_obj);
         // shared headless collection (Phase 2) — one rule set for all sims

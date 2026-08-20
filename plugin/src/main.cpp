@@ -327,12 +327,12 @@ namespace
                 // reopen. Our own take/sell/drop paths already ask for this,
                 // and the flag coalesces per frame, so the extra request is
                 // free.
-                // ★Only while our menu is up: closed, the next open rebuilds
-                // from scratch anyway.
-                if (auto* ui = RE::UI::GetSingleton();
-                    ui && ui->IsMenuOpen("GridInventoryMenu"sv)) {
-                    FUI::Grid::RequestRebuild();
-                }
+                // ★Unconditional since the H1 fix: with the menu closed the
+                // flag is consumed by the capacity gates (FreshenLayoutForGates)
+                // instead of FinishFrame -- every pickup since the last open
+                // used to sit with no layout entry, and the sim first-fit it
+                // into the very hole the player remembered leaving.
+                FUI::Grid::RequestRebuild();
                 // G1: ledger (Gold001) or coin-form movement -> re-mirror.
                 // The reconciler's own edits re-mark dirty and settle at a
                 // zero diff next tick (also renormalises console-given coins).
