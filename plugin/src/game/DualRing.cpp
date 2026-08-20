@@ -400,26 +400,35 @@ namespace FUI::DualRing
         // nothing. That mid-swap frame is the deferred ring-blink's habitat
         // (survived the worn clocks and the counter absorption -- the
         // rebuild ITSELF was the remaining suspect).
-        if (a_standalone) {
-            if (p && ring) p->PlayPickUpSound(ring, false, false);
-            Grid::RequestRebuild();
-        } else if (!Grid::CarrierCarryActive()) {
-            // ★The quiet handoff assumed the displaced ring rides the cursor.
-            // True for the DROP swap -- its carry starts before Wear runs --
-            // and false for the right-click ROUTER, which displaces with no
-            // carry at all: the old ring went back to the pack with nothing
-            // to redraw it, and right-clicking through several rings appeared
-            // to wear them all (user report). No carrier carry up means the
-            // return still needs its draw.
-            Grid::RequestRebuild();
-        }
+        const bool wantDraw = a_standalone || !Grid::CarrierCarryActive();
+        // ★The quiet handoff assumed the displaced ring rides the cursor.
+        // True for the DROP swap -- its carry starts before Wear runs --
+        // and false for the right-click ROUTER, which displaces with no
+        // carry at all: the old ring went back to the pack with nothing
+        // to redraw it, and right-clicking through several rings appeared
+        // to wear them all (user report). No carrier carry up means the
+        // return still needs its draw.
+        if (a_standalone && p && ring) p->PlayPickUpSound(ring, false, false);
+        const RE::FormID retId = g_ringId;
         SKSE::log::info("[DUALRING] second ring '{}' removed{}", NameOf(ring),
                         a_standalone ? "" : " (handoff)");
+        // ★Ring session: state DOWN before the draw -- the partial add asks
+        // the ring2 exclusion, and with g_ringId still set it would hide the
+        // very unit it is trying to draw ("nothing fresh").
         g_ringId = 0;
         g_ringSig = 0;
+        if (wantDraw) {
+            // One form's return, not a repaint: the full rebuild here ran in
+            // the middle of the swap window (the blink's habitat). The
+            // partial declines -> the old rebuild, same fallback bargain as
+            // every B3 path.
+            if (!Grid::OnFormDelta(retId)) Grid::RequestRebuild();
+        }
     }
 
     void RequestTakeOff() { g_wantOff = true; }
+
+    void CancelTakeOff() { g_wantOff = false; }
 
     bool TakeOffPending() { return g_wantOff; }
 

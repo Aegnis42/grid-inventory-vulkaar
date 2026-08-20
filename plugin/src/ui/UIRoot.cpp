@@ -3663,7 +3663,14 @@ namespace FUI::UIRoot
         LootBarter::Reset();      // back to kNormal (loot/barter mode ends)
         Grid::ClearPendingEquips();   // no queued equip outlives the menu
         Equip::OnMenuClosed();        // GI53: nor does a loadout confirm popup
-        if (Grid::IsHolding()) Grid::CancelHold();   // never close mid-carry
+        if (Grid::IsHolding()) Grid::CancelHold();   // never close mid-carry --
+                                      // a doll/carrier origin queues its re-wear
+        // ★Ring session: EXECUTE the queue instead of abandoning it. "No
+        // queued equip outlives the menu" was a claim the queue never
+        // honoured -- a lift's unequip could sit here and fire on the NEXT
+        // open. Running it now (the same context LootBarter::Reset moves
+        // items in) also lands the cancel's re-wear before the menu dies.
+        Equip::ProcessPending();
         Grid::NoteInventorySeen();    // GI65: closing the menu IS "I have seen it"
         // ★A search is about THIS visit. Carrying it over means the next open
         // shows a dimmed board for a term the player has long forgotten typing.

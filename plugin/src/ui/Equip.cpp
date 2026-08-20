@@ -839,6 +839,23 @@ namespace FUI::Equip
         return true;
     }
 
+    void RequestWear(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                     std::uint16_t a_sig, int a_hand, int a_count, bool a_second)
+    {
+        if (!a_obj) return;
+        std::string slot;
+        if (a_second) {
+            slot = "ringL";   // the commit's ringL branch IS the carrier route
+        } else if (a_hand == 2 && a_obj->Is(RE::FormType::Weapon)) {
+            slot = "shieldL";   // a left-hand lift goes back to the left hand
+        }
+        SKSE::log::info("[ACT] re-wear '{}' (cancelled carry) slot '{}' hand={}",
+            a_obj->GetName(), slot.empty() ? std::string("-") : slot, a_hand);
+        g_pending.push_back({ a_obj->GetFormID(), slot, false, a_uid, -1,
+                              a_sig, {}, a_hand,
+                              EquipCountFor(a_obj, a_count), a_count });
+    }
+
     bool EquipItem(RE::TESBoundObject* a_obj, const std::string& a_slotId,
                    std::uint16_t a_uid, int a_xlIdx, std::uint16_t a_sig,
                    const std::string& a_srcKey, int a_tileCount)

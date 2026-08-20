@@ -57,6 +57,14 @@ namespace FUI::Equip
     bool UnequipItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0,
                      std::uint16_t a_sig = 0, int a_hand = 0, int a_count = 1);
 
+    // ★Ring session: a cancelled carry returns to the slot it was lifted
+    // from (origin rule). Queues through the same pending pipeline as every
+    // equip -- router, conflict pass, srcList resolve all apply. a_second
+    // aims the SECOND ring slot (the carrier route); a_hand==2 sends a
+    // one-hander back to the left hand.
+    void RequestWear(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                     std::uint16_t a_sig, int a_hand, int a_count, bool a_second);
+
     // Does using this take the unit OFF the board — worn, drunk, eaten, learnt?
     // The board bookkeeping (vacate the cell, forget the tile, hint the drain)
     // must run for those and NOT for a scripted item that is only being poked:

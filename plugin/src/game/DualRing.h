@@ -99,6 +99,10 @@ namespace FUI::DualRing
     void TakeOff();
     // Queued form of TakeOff, for callers inside the render pass.
     void RequestTakeOff();
+    // ★Ring session: withdraw a queued take-off that has not run yet. The
+    // origin-return of a cancelled second-ring carry re-wears the ring; a
+    // stand-down still queued from the lift would strip it right back off.
+    void CancelTakeOff();
 
     // A take-off has been asked for and not yet run (the render pass defers
     // it to Tick). THE ring2-lift window: the cursor is holding the very unit

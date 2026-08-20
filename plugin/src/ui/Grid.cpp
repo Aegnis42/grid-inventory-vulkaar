@@ -429,6 +429,14 @@ namespace FUI::Grid
             // the release bookkeeping that genuinely is about the call.
             // (Appended last, same aggregate rule as `arriving`.)
             bool          landed = false;
+            // ★Ring session: does this form CONFIRM? Gear (the worn ledger's
+            // types) gets a TESEquipEvent and retires through landed-release /
+            // match-release / the settle sweep. A consumable never does -- the
+            // applied-erase in FinalizeRebuild is ITS retirement, and it must
+            // stop eating gear entries there: every erase requested another
+            // rebuild, and during a swap run that cascade was measured at 11
+            // rebuilds per second -- the blink's engine room.
+            bool          confirmable = false;
         };
         std::vector<OffBoardUnit>             g_pendingEquip;
         std::chrono::steady_clock::time_point g_pendingEquipWhen{};
@@ -3707,10 +3715,58 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return true;
     }
 
+    namespace
+    {
+        // ★Ring session: the cursor's exits, by ORIGIN (user spec). A carry
+        // cancelled (ESC, menu close) or refused at a drop returns to the
+        // space it was lifted FROM -- the doll slot, the second-ring carrier
+        // -- not to the grid, which never owned it. Returns false when the
+        // origin IS the grid (or is gone: a displaced occupant's slot is
+        // taken); the caller redraws and the saved layout entry does the rest.
+        //
+        // The re-wear rides the same pending pipeline as every equip (queue ->
+        // Tick -> router/conflict pass/srcList), and NotePendingEquip bridges
+        // the frames until the engine's confirm -- the same bridge a drop uses.
+        bool ReturnCarryToOrigin(const Held& a_h)
+        {
+            if (!a_h.obj || a_h.swappedOut) return false;
+            if (a_h.fromCarrier) {
+                auto* armo = a_h.obj->As<RE::TESObjectARMO>();
+                if (!armo || DualRing::Second()) return false;
+                // the lift queued a carrier stand-down; it must not fire after
+                // the re-wear and strip the ring we just put back
+                DualRing::CancelTakeOff();
+                NotePendingEquip(a_h.obj, a_h.uid, a_h.sig, 0, a_h.key, 1,
+                                 a_h.xlIdx);
+                Equip::RequestWear(a_h.obj, a_h.uid, a_h.sig, 0, a_h.count,
+                                   /*a_second=*/true);
+                return true;
+            }
+            if (a_h.fromDoll) {
+                NotePendingEquip(a_h.obj, a_h.uid, a_h.sig, a_h.hand, a_h.key,
+                                 Equip::EquipCountFor(a_h.obj, a_h.count),
+                                 a_h.xlIdx);
+                Equip::RequestWear(a_h.obj, a_h.uid, a_h.sig, a_h.hand,
+                                   a_h.count, /*a_second=*/false);
+                return true;
+            }
+            return false;
+        }
+    }
+
     void CancelHold()
     {
         if (!g_held) return;
+        const Held h = *g_held;
         g_held.reset();
+        if (ReturnCarryToOrigin(h)) {
+            // The board never owned this carry: nothing moved on the grid,
+            // so nothing is redrawn here. The pending bridge covers the
+            // frames until the engine confirms the re-wear.
+            SKSE::log::info("[ACT] carry cancel -> origin slot '{}'",
+                h.obj ? h.obj->GetName() : "?");
+            return;
+        }
         Rebuild();   // the item resumes its saved spot (pickup never erased it)
     }
 
@@ -3806,7 +3862,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // frames painted mid-handoff in the ring swap window (the deferred
         // blink's habitat). An engine-worn lift keeps its redraw: the
         // parked-star bookkeeping (GI30/31) still draws through it.
-        if (!a_fromCarrier) RequestRebuild();
+        // ★Ring session: a SWAP-DISPLACED lift changes nothing either -- the
+        // occupant was worn (no tile) and goes straight to the cursor, and
+        // this redraw fired in the middle of every drop-swap ([RB] measured
+        // it as half the 11/s storm). Only the plain doll lift keeps its
+        // redraw, and no engine churn races that one.
+        if (!a_fromCarrier && !a_swappedOut) RequestRebuild();
     }
 
     void BeginPartnerCarry(RE::TESBoundObject* a_obj, int a_count, int a_value,
@@ -6590,8 +6651,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // entry could only die here -- and the board then stood one unit
             // short until the next unrelated rebuild: "one drink removed two"
             // (user report). The request coalesces; steady state stays quiet.
+            // ★Ring session: NON-CONFIRMABLE entries only. Gear entries have
+            // an equip event coming (landed-release, match-release, settle
+            // sweep); erasing them here on the `applied` flag -- which flips
+            // when OUR CALL returns, not when the engine wears the unit --
+            // scheduled a rebuild per rebuild while a swap run was in flight
+            // (measured: 11/s, alternating with the displaced-lift redraw).
             if (std::erase_if(g_pendingEquip,
-                              [](const OffBoardUnit& u) { return u.applied; }) > 0) {
+                              [](const OffBoardUnit& u) {
+                                  return u.applied && !u.confirmable;
+                              }) > 0) {
                 RequestRebuild();
             }
 
@@ -7437,6 +7506,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         eq.arriving  = true;
         eq.xlIdx     = a_xlIdx;
         eq.units     = (std::max)(1, a_units);
+        // Same type set as WornLedger::Tracked: these forms get an equip
+        // event, so they have real retirement paths and the applied-erase
+        // must leave them alone.
+        eq.confirmable = a_obj->Is(RE::FormType::Armor) ||
+                         a_obj->Is(RE::FormType::Weapon) ||
+                         a_obj->Is(RE::FormType::Light) ||
+                         a_obj->Is(RE::FormType::Ammo);
         g_pendingEquip.push_back(std::move(eq));
         g_pendingEquipWhen = std::chrono::steady_clock::now();
         // B4-2b: the worn ledger hears the same request, with the same
@@ -11328,6 +11404,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             // ★Held BEFORE the reset below, which invalidates `a_held`.
             RE::TESBoundObject* const swapInObj = a_held.obj;
+            // ★Ring session: the whole carry, for the REJECT path's origin
+            // return -- a doll-lifted piece refused at another slot goes back
+            // where it was worn, not to the grid (user spec).
+            const Held heldSnap = a_held;
             if (accepted) {
                 // GI54: the INCOMING item's engine hand, not the occupant's --
                 // a shield replacing a left-hand sword is still hand 0.
@@ -11397,8 +11477,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // carry is consumed either way (g_held.reset above), the layout
             // entry is intact, and the only thing that ever put the tile back
             // on screen was this rebuild -- without it a refused ring vanished
-            // until the next reopen (user report). The reject path keeps it.
-            if (!accepted) RequestRebuild();
+            // until the next reopen (user report). The reject path keeps it --
+            // unless the carry's origin is a SLOT, where the piece goes back
+            // on the body instead and the board has nothing to redraw.
+            if (!accepted && !ReturnCarryToOrigin(heldSnap)) RequestRebuild();
             return true;
         }
 
@@ -12129,9 +12211,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (held.justPicked) {
                 held.justPicked = false;   // the pickup click must not drop (C1)
             } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                g_held.reset();            // C7: cancel, item resumes its spot
+                CancelHold();              // C7: cancel -> the origin space
                 Sfx::SelectOff();
-                RequestRebuild();
             } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 // Phase 3: the old 6~7-deep else-if chain lives in the
                 // drop-route tables above (ResolveDrop) — no consuming
