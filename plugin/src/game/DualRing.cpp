@@ -1,6 +1,7 @@
 #include "game/DualRing.h"
 
 #include "game/Costume.h"
+#include "game/WornLedger.h"
 #include "ui/Grid.h"
 
 #include <vector>
@@ -276,6 +277,10 @@ namespace FUI::DualRing
 
         g_ringId = a_ring->GetFormID();
         g_ringSig = Grid::InstanceSigOf(a_xl);   // nullptr -> 0 (plain)
+        // B4-2b: the ring's own equip never runs on this path -- the carrier
+        // stands in -- so the worn ledger's pending for it would go stale
+        // (measured, round one of the state machine). Withdraw it here.
+        WornLedger::CancelPending(g_ringId);
         // ★The carrier bypasses the engine's equip of the RING itself, which
         // is where the vanilla equip sound lives -- so the second slot wore
         // rings in total silence (user report). The pickup clink is the same

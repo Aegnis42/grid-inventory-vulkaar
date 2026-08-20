@@ -105,6 +105,17 @@ namespace FUI::WornLedger
         g_entries.push_back(std::move(e));
     }
 
+    void CancelPending(RE::FormID a_form)
+    {
+        if (!g_have) return;
+        for (auto it = g_entries.begin(); it != g_entries.end(); ++it) {
+            if (it->form == a_form && it->state == State::pending) {
+                g_entries.erase(it);
+                return;
+            }
+        }
+    }
+
     void OnEquip(RE::FormID a_form)
     {
         if (!g_have || !TrackedForm(a_form)) return;

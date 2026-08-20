@@ -39,6 +39,14 @@ namespace FUI::WornLedger
     void NotePending(RE::FormID a_form, std::uint16_t a_uid, std::uint16_t a_sig,
                      int a_hand, int a_units);
 
+    // Our request was fulfilled by something the engine never wears -- the
+    // ring CARRIER stands in for a second-slot ring, so the ring's own equip
+    // event never comes and its pending would sit until the stale sweep
+    // (measured: two ring pendings, first state-machine round). Drops the
+    // oldest pending of the form. (B4-2c gives the carried ring a state of
+    // its own; until then the ledger tracks engine-worn only.)
+    void CancelPending(RE::FormID a_form);
+
     // Both arrive already marshalled to the main thread (the sink AddTasks;
     // equip events land on arbitrary threads -- rule 4).
     void OnEquip(RE::FormID a_form);
