@@ -7327,7 +7327,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (i > idx) --i;
                 }
             }
-            if (g_drainHint.key == a_key) g_drainHint = {};
+            // ★The hint STAYS ARMED here (unlike the partial branch above,
+            // whose layout write settles everything synchronously). A poison
+            // goes through the vanilla apply-confirm, so the engine takes the
+            // unit FRAMES after this runs -- the before/after read in
+            // ProcessPending sees no change, rule 13 rightly keeps the cell,
+            // and this tile's layout claim outlives its display. The rebuild
+            // behind the eventual confirm event pays its deficit hint-first,
+            // which is the only thing that stops it eating the potion BAG's
+            // copy instead (user report). Spent or not, the hint dies at that
+            // form walk, and a cancelled dialog just re-emits the tile in its
+            // own cell. Store/sell settled the layout in NotePendingRemove,
+            // so their hint has no job left.
+            if (a_drained && g_drainHint.key == a_key) g_drainHint = {};
             MarkCapacityDirty();
             SKSE::log::info("[B3] ★use click '{}' tile '{}' off the board -- no rebuild",
                 a_obj->GetName(), a_key);
