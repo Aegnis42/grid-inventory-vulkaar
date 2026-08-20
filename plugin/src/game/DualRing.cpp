@@ -201,6 +201,8 @@ namespace FUI::DualRing
         }
     }
 
+    void TakeOffImpl(bool a_standalone);   // defined below TakeOff
+
     void SetSlotOverride(int a_editorSlot)
     {
         // editor numbers run 30..61; bits run 0..31. Decapitation (50/51) and
@@ -315,7 +317,7 @@ namespace FUI::DualRing
                 // to the engine's own ring slot, and the incoming one takes the
                 // carrier.
                 auto* prev = RingById(g_ringId);
-                TakeOff();
+                TakeOffImpl(/*a_standalone=*/false);   // B4-4: handoff, no redraw
                 if (prev) {
                     em->EquipObject(p, prev, nullptr, 1, nullptr,
                                     false, false, false, true);
@@ -332,7 +334,7 @@ namespace FUI::DualRing
             }
         }
 
-        if (g_ringId) TakeOff();   // one at a time
+        if (g_ringId) TakeOffImpl(/*a_standalone=*/false);   // B4-4: handoff
 
         const int slot = FreeSlot(p);
         if (slot < 0) return false;
@@ -361,7 +363,9 @@ namespace FUI::DualRing
         return true;
     }
 
-    void TakeOff()
+    void TakeOff() { TakeOffImpl(/*a_standalone=*/true); }
+
+    void TakeOffImpl(bool a_standalone)
     {
         if (!g_ringId) return;
         auto* ring = RingById(g_ringId);
@@ -375,17 +379,25 @@ namespace FUI::DualRing
             p->RemoveItem(c, 99, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
         }
         Reclaim();
-        // ★Both INSIDE the gate (규칙 6): every caller of TakeOff needs them.
+        // ★Both INSIDE the gate (규칙 6): every STANDALONE caller needs them.
         // The sound for the same reason as Wear's; the rebuild because the
         // carrier's stand-down is a board return with NO engine unequip event
-        // -- equipping the same form normally makes the carrier let go
-        // (Equip::ProcessPending), and the only thing that ever drew that
-        // return was the doll-drop tail rebuild. The !rbdrop interrogation of
-        // Grid.cpp:11162 found it: the ring vanished until the next unrelated
-        // rebuild. The place that knows the carrier let go asks for the draw.
-        if (p && ring) p->PlayPickUpSound(ring, false, false);
-        Grid::RequestRebuild();
-        SKSE::log::info("[DUALRING] second ring '{}' removed", NameOf(ring));
+        // -- the !rbdrop interrogation of Grid.cpp:11162 measured the ring
+        // vanishing until the next unrelated rebuild without it.
+        // ★★B4-4: the HANDOFF calls inside Wear are the exception the old
+        // "every caller" claim missed. In a swap the displaced ring goes to
+        // the CURSOR (WholeOnDoll starts that carry) or straight onto the
+        // FIRST slot -- either way it never lands on the board here, so the
+        // redraw painted a frame in the middle of the exclusion handoff for
+        // nothing. That mid-swap frame is the deferred ring-blink's habitat
+        // (survived the worn clocks and the counter absorption -- the
+        // rebuild ITSELF was the remaining suspect).
+        if (a_standalone) {
+            if (p && ring) p->PlayPickUpSound(ring, false, false);
+            Grid::RequestRebuild();
+        }
+        SKSE::log::info("[DUALRING] second ring '{}' removed{}", NameOf(ring),
+                        a_standalone ? "" : " (handoff)");
         g_ringId = 0;
         g_ringSig = 0;
     }
