@@ -11,7 +11,7 @@ namespace FUI::WornLedger
 {
     namespace
     {
-        enum class State { pending, worn };
+        enum class State { pending, worn, doffing };
 
         struct Entry
         {
@@ -140,10 +140,56 @@ namespace FUI::WornLedger
         g_entries.push_back(std::move(e));
     }
 
+    void NoteDoffing(RE::FormID a_form, int a_hand)
+    {
+        if (!g_have || !TrackedForm(a_form)) return;
+        // the HAND names the unit exactly while it is on the body (one item
+        // per hand) -- prefer it, fall back to any worn entry of the form
+        Entry* pick = nullptr;
+        for (auto& e : g_entries) {
+            if (e.form != a_form || e.state != State::worn) continue;
+            if (a_hand != 0 && e.hand == a_hand) { pick = &e; break; }
+            if (!pick) pick = &e;
+        }
+        if (!pick) {
+            // lifting something the ledger never saw worn is the same class
+            // of finding OnUnequip logs -- record a doffing entry anyway so
+            // the retire below still has its counterpart
+            logger::warn("[WORN] doffing of {:08X} '{}' the ledger never saw "
+                         "worn", a_form, NameOf(a_form));
+            Entry e;
+            e.form  = a_form;
+            e.hand  = a_hand;
+            e.state = State::doffing;
+            e.when  = std::chrono::steady_clock::now();
+            g_entries.push_back(std::move(e));
+            return;
+        }
+        pick->state = State::doffing;
+        pick->when  = std::chrono::steady_clock::now();
+    }
+
+    bool Doffing(RE::FormID a_form)
+    {
+        for (const auto& e : g_entries) {
+            if (e.form == a_form && e.state == State::doffing) return true;
+        }
+        return false;
+    }
+
     void OnUnequip(RE::FormID a_form)
     {
         if (!g_have || !TrackedForm(a_form)) return;
-        // Retire one worn entry of the form. The event cannot name which; the
+        // ★Doffing entries retire FIRST: an unequip we asked for answers our
+        // own request before it answers anything else -- the same rule the
+        // container ledger runs on (a confirmation retires its own entry).
+        for (auto it = g_entries.begin(); it != g_entries.end(); ++it) {
+            if (it->form == a_form && it->state == State::doffing) {
+                g_entries.erase(it);
+                return;
+            }
+        }
+        // Then one worn entry of the form. The event cannot name which; the
         // OLDEST goes, mirroring OnEquip's order so a same-form pair cycles
         // instead of starving one entry.
         for (auto it = g_entries.begin(); it != g_entries.end(); ++it) {
@@ -174,7 +220,14 @@ namespace FUI::WornLedger
         }
         const auto engine = EngineWalk();
         const auto eByForm = CountByForm(engine, State::worn);
-        const auto lByForm = CountByForm(g_entries, State::worn);
+        // ★doffing counts WITH worn here: the engine still wears a unit whose
+        // unequip is in flight, so the audit must expect it on both sides
+        std::map<RE::FormID, int> lByForm;
+        for (const auto& e : g_entries) {
+            if (e.state == State::worn || e.state == State::doffing) {
+                ++lByForm[e.form];
+            }
+        }
 
         int bad = 0;
         for (const auto& [f, n] : eByForm) {
@@ -201,12 +254,17 @@ namespace FUI::WornLedger
         const auto now = std::chrono::steady_clock::now();
         int stuck = 0;
         std::erase_if(g_entries, [&](const Entry& e) {
-            if (e.state != State::pending) return false;
+            if (e.state != State::pending && e.state != State::doffing) return false;
             if (now - e.when < std::chrono::seconds(2)) return false;
             ++stuck;
-            logger::warn("[WORN] @{} ★stale pending {:08X} '{}' (uid {:04X} "
-                         "sig {:04X} hand {}) -- dropped", a_when, e.form,
-                         NameOf(e.form), e.uid, e.sig, e.hand);
+            // a stale pending is an equip the engine silently refused; a
+            // stale doffing is an unequip that never landed -- either way the
+            // request's window is long over and the entry must not sit in
+            // the books (the engine-bend below re-counts the unit correctly)
+            logger::warn("[WORN] @{} ★stale {} {:08X} '{}' (uid {:04X} "
+                         "sig {:04X} hand {}) -- dropped", a_when,
+                         e.state == State::pending ? "pending" : "doffing",
+                         e.form, NameOf(e.form), e.uid, e.sig, e.hand);
             return true;
         });
 

@@ -47,6 +47,20 @@ namespace FUI::WornLedger
     // its own; until then the ledger tracks engine-worn only.)
     void CancelPending(RE::FormID a_form);
 
+    // ★B4-2c: our UNEQUIP is out -- a doll lift starts one the moment the
+    // carry begins. The matching worn entry turns `doffing`: still on the
+    // body as far as the engine is concerned, already spoken for as far as
+    // the board is. The unequip event retires doffing entries first.
+    void NoteDoffing(RE::FormID a_form, int a_hand);
+
+    // Any doffing entry of this form still open? THE doll-carry clock: true
+    // means the lift's unequip has not landed, so the carried unit is still
+    // engine-worn (never in the board's set); false means it landed and the
+    // carry must come out of the set like any other unit. Replaces the
+    // pendingEquip-scan swap clock, which could only reason about the
+    // same-form-swap shape and answered the rest by assumption.
+    [[nodiscard]] bool Doffing(RE::FormID a_form);
+
     // Both arrive already marshalled to the main thread (the sink AddTasks;
     // equip events land on arbitrary threads -- rule 4).
     void OnEquip(RE::FormID a_form);

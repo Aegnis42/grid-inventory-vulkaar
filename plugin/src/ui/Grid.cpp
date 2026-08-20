@@ -1565,15 +1565,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // ★A CARRIER lift was never engine-worn: no worn list is its
                 // to claim, and claiming one anyway ate the FIRST ring's list
                 // (same plain form) and leaked that unit onto the board.
-                bool stillWorn = g_held->fromDoll && !g_held->fromCarrier;
-                if (stillWorn && g_held->swappedOut && g_held->swapSameForm) {
-                    stillWorn = std::any_of(g_pendingEquip.begin(), g_pendingEquip.end(),
-                        [&](const OffBoardUnit& u) {
-                            return u.base == a_base &&
-                                   (u.hand == 0 || g_held->hand == 0 ||
-                                    u.hand == g_held->hand);
-                        });
-                }
+                // ★B4-2c: the ledger's doffing entry IS the clock now. It
+                // opens when the lift begins (BeginCarry -> NoteDoffing) and
+                // closes when the engine's own unequip event lands -- every
+                // lift shape, one rule. The pendingEquip scan it replaces
+                // could only reason about the SAME-FORM SWAP (the one shape
+                // that leaves an identical worn list behind) and answered
+                // every other shape by assumption; the assumption was right,
+                // but only because the swap was the only shape that ever
+                // asked. A carrier lift stays out on its own flag -- it was
+                // never engine-worn and has no doffing entry to consult.
+                bool stillWorn = g_held->fromDoll && !g_held->fromCarrier &&
+                                 g_held->obj &&
+                                 WornLedger::Doffing(g_held->obj->GetFormID());
                 // (!simdrift) both halves of the identity are corrupted, so
                 // every exact path misses and only the carry fallback can
                 // still take the unit off the board -- the thing under test.
@@ -3846,6 +3850,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_held->swappedOut = a_swappedOut;
         g_held->swapSameForm = a_swapSameForm;
         g_held->fromCarrier = a_fromCarrier;
+        // B4-2c: a doll lift IS an unequip request -- tell the worn ledger at
+        // the same moment the carry begins, so Doffing() can answer the
+        // "still on the body?" question from the request/event lifecycle
+        // instead of scanning the equip queue. A carrier lift was never
+        // engine-worn; there is nothing to doff.
+        if (!a_fromCarrier) {
+            WornLedger::NoteDoffing(a_obj->GetFormID(), a_hand);
+        }
         if (g_poolTrace) {
             SKSE::log::info("[ACT] lift-from-doll '{}' hand={} uid {:04X} sig {:04X} key '{}'",
                 a_obj->GetName(), a_hand, a_uid, a_sig, g_held->key);
