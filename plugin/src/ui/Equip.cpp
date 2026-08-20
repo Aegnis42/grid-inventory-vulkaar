@@ -1126,8 +1126,22 @@ namespace FUI::Equip
             // ★Ammo always empties its tile: the whole tileful went on the back,
             // so that cell is free whatever the rest of the quiver still holds.
             // The count test below cannot see this — it asks about the FORM.
+            // ★★And the test is TYPE-SENSITIVE, because `cnt` is read AFTER the
+            // engine call. A WORN item stays in the inventory, so "cnt <= 1"
+            // really asks "was this the only one" -- right for a single torch.
+            // A CONSUMED item already left, so at two-going-on-one the post-use
+            // count reads 1 and the old test forgot the cell of a tile that
+            // still held an apple: drinking a middle-of-board stack down to
+            // its last unit teleported that unit to the front gap (user
+            // report; present since rule 13 -- 1.3.x ships it too). What a
+            // consumable's tile being empty actually means is "nothing left".
+            const bool consumedType = obj->Is(RE::FormType::AlchemyItem) ||
+                                      obj->Is(RE::FormType::Ingredient) ||
+                                      obj->Is(RE::FormType::Book);
             const bool emptied = obj->Is(RE::FormType::Ammo) ||
-                                 Grid::StackCap(obj) <= 1 || cnt <= 1;
+                                 (consumedType
+                                      ? cnt <= 0
+                                      : Grid::StackCap(obj) <= 1 || cnt <= 1);
             if (IsWearOrConsume(obj) && emptied) {
                 Grid::ForgetTile(act.srcKey);
             }
