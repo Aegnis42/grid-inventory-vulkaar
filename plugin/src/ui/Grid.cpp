@@ -4966,10 +4966,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // owned anchors its contents even while its tile is transiently
             // absent -- the tile IS the absence in question.
             std::set<std::string> bagForms;
+            // ...and OWNERSHIP, the filter the engine walk had for free. The
+            // layout accumulates DEAD entries: the rebuild's prune only walks
+            // forms the inventory still holds, so a key whose item left long
+            // ago is never visited again and never cleaned. A save carried
+            // 134 placements against 78 live items, and reading them all
+            // flooded the sim board into a false overload at load (user
+            // report: overloaded with room in plain sight).
+            std::set<std::string> owned;
             if (auto* player = RE::PlayerCharacter::GetSingleton();
                 player && g_resolver) {
                 for (auto& [obj, data] : player->GetInventory()) {
                     if (!obj || data.first <= 0) continue;
+                    owned.insert(FormKey(obj));
                     if (const GridDef bd = g_resolver(obj); bd.bag != 0) {
                         bagForms.insert(FormKey(obj));
                     }
@@ -5023,6 +5032,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (g_held && k == g_held->key) continue;   // carried: cell yields
                 if (dropped.contains(k)) continue;
                 if (reservedKeys.contains(k)) continue;
+                if (!owned.contains(BaseKey(k))) continue;   // dead key: no item behind it
                 auto* obj = ObjFromBaseKey(BaseKey(k));
                 if (!obj) continue;
                 const GridDef def = g_resolver ? g_resolver(obj) : GridDef{};
