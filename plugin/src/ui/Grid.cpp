@@ -11338,6 +11338,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // nothing leaves the body, and a cursor copy really would be a
             // duplicate.
             const bool ringL = g_slotTarget == "ringL";
+            SKSE::log::info("[RING] drop-swap slot '{}': in='{}' occupant='{}' "
+                            "second='{}' accepted={}",
+                g_slotTarget, swapInObj ? swapInObj->GetName() : "?",
+                worn ? worn->GetName() : "-",
+                DualRing::Second() ? DualRing::Second()->GetName() : "-",
+                accepted ? 1 : 0);
             const bool ringLToFirst = ringL &&
                                       Equip::WornObjectAt("ringR") == nullptr;
             if (accepted && swapping && !ringLToFirst) {

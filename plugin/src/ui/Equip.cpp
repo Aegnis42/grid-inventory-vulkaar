@@ -1008,6 +1008,15 @@ namespace FUI::Equip
                         toSecond = DualRing::SharesEffect(second, ringIn) &&
                                    !DualRing::SharesEffect(first, ringIn);
                     }
+                    // ★[RING] every routed click, decision and state -- the
+                    // "all my rings ended up worn" report needs the router's
+                    // own words, not a reconstruction.
+                    SKSE::log::info("[RING] rclick '{}': first='{}' second='{}' "
+                                    "toSecond={} carrierCarry={}",
+                        obj->GetName(),
+                        first ? first->GetName() : "-",
+                        second ? second->GetName() : "-",
+                        toSecond ? 1 : 0, Grid::CarrierCarryActive() ? 1 : 0);
                     if (toSecond && DualRing::Wear(ringIn, nullptr)) {
                         Grid::ForgetTile(act.srcKey);   // rule 13, same as the drop path
                         Grid::NoteFormSeen(obj);
