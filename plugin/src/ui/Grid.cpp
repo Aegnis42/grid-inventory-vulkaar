@@ -13,6 +13,7 @@
 #include "game/BagFilter.h"
 #include "game/Census.h"
 #include "game/Costume.h"
+#include "game/WornLedger.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
@@ -7486,6 +7487,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         eq.units     = (std::max)(1, a_units);
         g_pendingEquip.push_back(std::move(eq));
         g_pendingEquipWhen = std::chrono::steady_clock::now();
+        // B4-2b: the worn ledger hears the same request, with the same
+        // identity, at the same moment (rule 2: this is when the unit is
+        // known). Its own type filter drops the consumables that pass
+        // through here on the use path.
+        WornLedger::NotePending(a_obj->GetFormID(), a_uid, a_sig, a_hand,
+                                (std::max)(1, a_units));
     }
 
     void ClearPendingEquips()

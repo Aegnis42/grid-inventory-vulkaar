@@ -1,23 +1,44 @@
 #pragma once
 
-// 1.4 / B4-2 -- the WORN LEDGER, observation mode.
+// 1.4 / B4-2 -- the WORN LEDGER.
 //
 // The board holds only unworn units, and re-reads who is worn from the
 // engine's ExtraWorn on every derivation -- which is why half the exclusion
 // ladder exists (PLAN_B4_DEMOLITION §2). Before that arithmetic can flip to
 // "the board knows", the ledger has to prove it can stay in step with the
-// engine on events alone.
+// engine on requests and events alone.
 //
-// This phase therefore only COUNTS: worn stacks per form, advanced by the
-// player's TESEquipEvents (a quiver equips as one list however many arrows
-// ride in it, and the event fires once -- lists are the unit both sides can
-// agree on), rebaselined wholesale at every load (rule 3: a load is a
-// discontinuity, and the engine is the authority across one). Nothing
-// consumes it. Every menu open and close audits the ledger against a fresh
-// ExtraWorn walk and logs agreement or mismatch -- the B0~B2 precedent:
-// measure to a standstill first, then promote.
+// ★B4-2b: ENTRIES, not counts. The first observation round ran count-level
+// and scored 30/30 -- but the takeOne ladder's worn questions ("has my equip
+// landed", "is this doll carry still on the body") turn on WINDOWS where the
+// engine flag count and the ledger count are equal while meaning different
+// things. Only identity plus a lifecycle can answer those, so the ledger now
+// carries what the REQUEST knew (uid / sig / hand -- rule 2: the request is
+// the only moment that knows the unit) through the states the takeOne clock
+// machinery currently juggles by matching worn lists:
+//
+//     pending  -- our equip request is out; the engine has not applied it
+//     worn     -- the engine confirmed (TESEquipEvent), or wore it unasked
+//                 (slot-conflict removal's counterpart, loadout, script)
+//
+// An unequip event retires one worn entry. (A `doffing` state -- our unequip
+// request in flight -- joins in B4-2c, where the doll-carry question needs
+// it; nothing consumes the ledger until then.)
+//
+// One entry = one WORN LIST (a quiver equips as one list however many arrows
+// ride in it, and the event fires once) -- the unit both sides agree on.
+// Rebaselined wholesale at every load (rule 3). Every menu open and close
+// audits entry counts against a fresh ExtraWorn walk AND reports lifecycle
+// residue (a pending that never landed), bending to the engine on mismatch
+// -- the engine stays the authority until B4-2c flips consumption.
 namespace FUI::WornLedger
 {
+    // Our own equip request, at the moment it is queued -- the one moment
+    // that knows the unit (rule 2). a_units: what the action moves (a
+    // tileful for ammo); data, not the list count.
+    void NotePending(RE::FormID a_form, std::uint16_t a_uid, std::uint16_t a_sig,
+                     int a_hand, int a_units);
+
     // Both arrive already marshalled to the main thread (the sink AddTasks;
     // equip events land on arbitrary threads -- rule 4).
     void OnEquip(RE::FormID a_form);
@@ -26,9 +47,9 @@ namespace FUI::WornLedger
     // Load replaces the inventory wholesale: rebuild from the engine, once.
     void Rebaseline(const char* a_why);
 
-    // Compare against the engine's ExtraWorn walk and log the verdict. In
-    // observation mode a mismatch also bends the ledger back to the engine --
-    // the engine is still the authority, and each divergence must be counted
-    // from a clean baseline or one miss would echo through every later audit.
+    // Compare worn-entry counts per form against the engine's ExtraWorn walk,
+    // report lifecycle residue, and log the verdict. On mismatch the ledger
+    // bends to the engine -- each divergence must be counted from a clean
+    // baseline or one miss would echo through every later audit.
     void Audit(const char* a_when);
 }
