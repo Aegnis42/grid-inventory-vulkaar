@@ -107,6 +107,17 @@ namespace FUI::DualRing
                 if (data.first <= 0 || !data.second || !data.second->IsWorn()) continue;
                 if (auto* a = obj->As<RE::TESObjectARMO>()) {
                     used |= static_cast<std::uint32_t>(a->GetSlotMask());
+                    // ★★THE ADDONS TOO. A modded helmet often draws through an
+                    // ArmorAddon that covers slots its ARMO mask never names
+                    // (hair physics on 60 is the classic). The ARMO mask alone
+                    // called those slots free, the carrier sat down on one,
+                    // and the engine culled the helmet's addon over the
+                    // conflict: wear both rings, and the helmet turns
+                    // invisible over a bald head (user report -- the preset
+                    // cycling that "healed" it was removing the second ring).
+                    for (auto* arma : a->armorAddons) {
+                        if (arma) used |= static_cast<std::uint32_t>(arma->GetSlotMask());
+                    }
                 }
             }
             return used;
@@ -121,6 +132,10 @@ namespace FUI::DualRing
         {
             const std::uint32_t used = WornMask(a_p);
             for (int i = static_cast<int>(kSlots) - 2; i >= 14; --i) {
+                // ★editor slots 50/51 (bits 20/21): the DECAPITATION slots.
+                // Equipping anything there culls the head outright -- never a
+                // valid parking spot however crowded the rest of the biped is.
+                if (i == 20 || i == 21) continue;
                 if (!(used & (1u << i))) return i;
             }
             return -1;
