@@ -69,6 +69,9 @@ namespace FUI::DualRing
     // test callers must use instead of comparing FORMS -- a plain pair of one
     // form is two legal rings (user spec), form identity is not the rule.
     [[nodiscard]] bool WouldDuplicate(RE::TESObjectARMO* a_ring);
+    // The same test between ANY two rings -- the equip router asks it about
+    // the engine-slot ring, which WouldDuplicate (carried ring only) cannot.
+    [[nodiscard]] bool SharesEffect(RE::TESObjectARMO* a_x, RE::TESObjectARMO* a_y);
     // English, for the log. A player-facing string would mean a new Lang key
     // and four translations; nothing shows these to the player yet.
     [[nodiscard]] const char* VerdictText(Verdict a_v);

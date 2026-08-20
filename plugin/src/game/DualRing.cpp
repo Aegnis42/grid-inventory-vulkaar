@@ -157,6 +157,11 @@ namespace FUI::DualRing
         return second && ShareAnEffect(second, a_ring);
     }
 
+    bool SharesEffect(RE::TESObjectARMO* a_x, RE::TESObjectARMO* a_y)
+    {
+        return ShareAnEffect(a_x, a_y);
+    }
+
     bool IsCarrier(const RE::TESForm* a_form)
     {
         auto* c = Carrier();

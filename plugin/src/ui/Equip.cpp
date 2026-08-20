@@ -1067,6 +1067,44 @@ namespace FUI::Equip
                 srcList = Grid::ExtraForInstance(Grid::LiveEntryOf(player, obj),
                                                  act.uid, act.xlIdx);
             }
+            // ★★RING ROUTER for SLOTLESS equips (right-click, wheel). The
+            // engine always swaps the first slot, but two slots exist -- so a
+            // second ring used to displace the first instead of joining it.
+            // The routing (user spec):
+            //   first slot worn, second free, no effect collision with the
+            //     first  ->  the new ring joins on the SECOND slot;
+            //   both worn  ->  the DUPLICATE names the victim: a ring sharing
+            //     the second ring's effect trades with the SECOND (Wear's own
+            //     "one at a time" TakeOff does the trade), anything else
+            //     trades with the first as before;
+            //   any refusal (no carrier, no free biped slot, effect collision
+            //     with the first)  ->  fall through to the engine's first-slot
+            //     swap, which the stand-down guard below keeps duplication-
+            //     free. Targeted drops (act.slotId set) keep their aim.
+            if (act.slotId.empty()) {
+                if (auto* ringIn = obj->As<RE::TESObjectARMO>();
+                    ringIn && Grid::IsRing(ringIn) && !DualRing::IsCarrier(ringIn)) {
+                    auto* firstObj = WornObjectAt("ringR");
+                    auto* first = firstObj ? firstObj->As<RE::TESObjectARMO>() : nullptr;
+                    if (first && !Grid::IsRing(first)) first = nullptr;
+                    auto* second = DualRing::Second();
+                    bool  toSecond = false;
+                    if (first && !second) {
+                        toSecond = !DualRing::SharesEffect(first, ringIn);
+                    } else if (first && second) {
+                        toSecond = DualRing::SharesEffect(second, ringIn) &&
+                                   !DualRing::SharesEffect(first, ringIn);
+                    }
+                    if (toSecond && DualRing::Wear(ringIn, srcList)) {
+                        Grid::ForgetTile(act.srcKey);   // rule 13, same as the drop path
+                        Grid::NoteFormSeen(obj);
+                        Grid::RequestRebuild();
+                        SKSE::log::info("[EQUIP] '{}' -> second ring slot (routed)",
+                            obj->GetName());
+                        continue;
+                    }
+                }
+            }
             // ★The SECOND ring slot is reached by DROPPING on it, never by a
             // plain click -- that is the rule the feature is built on, so the
             // slot id has to survive this far. A ring aimed at the second slot
