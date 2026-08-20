@@ -5106,16 +5106,36 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             NormalizeBagRefs(a_out, bagForms);
         }
 
-        // *B5: the same collection READ OFF THE BOARD. g_items is what the
-        // player sees and what the deltas maintain (B3/B4); deriving a second
-        // board from the engine re-opens every gap between the two -- H2's
-        // "refused 2x2 with a 2x2 hole in plain sight" was exactly such a
-        // gap, and H6's coin drift is another. Runs BESIDE the engine walk
-        // for one observation round; the [CAP] divergence log decides the
-        // flip (the B0~B2 precedent, once more).
+        // *B5: BaseKey -> form, the reverse of FormKey. The layout reader
+        // below needs it for keys whose form has no displayed tile -- the
+        // preset-hidden cells that the first observation round caught the
+        // g_items reader missing.
+        RE::TESBoundObject* ObjFromBaseKey(const std::string& a_base)
+        {
+            const auto bar = a_base.find('|');
+            if (bar == std::string::npos || a_base.size() < bar + 4) return nullptr;
+            const auto id = static_cast<RE::FormID>(
+                std::strtoul(a_base.c_str() + bar + 3, nullptr, 16));
+            RE::TESForm* f = nullptr;
+            if (a_base.compare(0, bar, "Dynamic") == 0) {
+                f = RE::TESForm::LookupByID(id);
+            } else if (auto* dh = RE::TESDataHandler::GetSingleton()) {
+                f = dh->LookupForm(id, std::string_view(a_base).substr(0, bar));
+            }
+            return f ? f->As<RE::TESBoundObject>() : nullptr;
+        }
+
+        // *B5: the same collection READ OFF THE BOARD -- and the board's
+        // truth is g_layout, not g_items. The first observation round proved
+        // the distinction: preset-hidden units draw no tile but HOLD their
+        // cells, so the display reader under-modelled exactly where it
+        // matters (a pickup green-lit onto a hidden tile's cell). The layout
+        // IS the persisted placement 1.4 made authoritative; reading anything
+        // else re-derives it. Runs BESIDE the engine walk for observation;
+        // the [CAP] divergence log decides the flip (the B0~B2 precedent).
         void CollectCapacityTilesFromBoard(CapTiles& a_out)
         {
-            // The one fact the board cannot answer alone: a bag FORM still
+            // The one fact the layout cannot answer alone: a bag FORM still
             // owned anchors its contents even while its tile is transiently
             // absent -- the tile IS the absence in question.
             std::set<std::string> bagForms;
@@ -5128,10 +5148,32 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     }
                 }
             }
-            for (const auto& it : g_items) {
-                if (it.inBag == kTrashKey) continue;   // deletion buffer: no cells
-                Item t = it;
-                if (t.def.bag != 0) a_out.bagKeys.insert(t.key);
+            // cells whose drop is queued read as FREE, mirroring the engine
+            // walk's slot collection (the refusal path restores them and the
+            // reflow absorbs a collision -- same bet both sims must make)
+            std::set<std::string> dropped;
+            for (const auto& [f, keys] : g_pendingSlotDrop) {
+                dropped.insert(keys.begin(), keys.end());
+            }
+            for (const auto& [k, le] : g_layout) {
+                if (le.bag == kTrashKey) continue;   // deletion buffer: no cells
+                if (g_held && k == g_held->key) continue;   // carried: cell yields
+                if (dropped.contains(k)) continue;
+                auto* obj = ObjFromBaseKey(BaseKey(k));
+                if (!obj) continue;
+                const GridDef def = g_resolver ? g_resolver(obj) : GridDef{};
+                Item t;
+                t.key = k;
+                t.obj = obj;
+                t.def = def;
+                t.uid = le.uid;
+                t.sig = le.sig;
+                t.rot = (CanRotate(def) && le.rot != 0) ? (le.rot & 3) : 0;
+                t.mask = MaskOf(def, t.rot);
+                t.col = le.col;
+                t.row = le.row;
+                t.inBag = le.bag;
+                if (def.bag != 0) a_out.bagKeys.insert(t.key);
                 // overflow-zone spots are TEMPORARY and never honoured
                 if (t.inBag.empty() && t.row >= kMinRows) {
                     t.col = -1;
