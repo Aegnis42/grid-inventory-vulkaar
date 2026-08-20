@@ -4982,10 +4982,47 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             for (const auto& [f, keys] : g_pendingSlotDrop) {
                 dropped.insert(keys.begin(), keys.end());
             }
+            // ★A RESERVED-HIDDEN cell also reads as FREE (user correction of
+            // the flip's first judgment). An inactive preset's gear draws no
+            // tile, and its remembered cell is a SOFT memory -- it exists so
+            // preset switches do not shuffle the board, not to block
+            // arrivals: the real placement lets a pickup take that cell and
+            // the reflow settles any collision when the gear resurfaces. The
+            // observation round's thirty-two board-only tiles were the old
+            // walk mirroring exactly this, and calling them its defect would
+            // have shipped "refused with an empty cell in plain sight" --
+            // the very bug class this stage retires. Per form, the reserved
+            // units hide TRAILING tiles (the walk's own rule), approximated
+            // here by ordinal order.
+            std::map<std::string, int> reservedLeft;
+            for (const auto& [k, le] : g_layout) {
+                const std::string base = BaseKey(k);
+                if (reservedLeft.contains(base)) continue;
+                if (auto* o = ObjFromBaseKey(base)) {
+                    reservedLeft[base] = Loadout::ReservedCount(o->GetFormID());
+                }
+            }
+            std::set<std::string> reservedKeys;
+            for (auto& [base, left] : reservedLeft) {
+                if (left <= 0) continue;
+                std::vector<std::string> keys;
+                for (const auto& [k, le] : g_layout) {
+                    if (BaseKey(k) == base && le.bag != kTrashKey) keys.push_back(k);
+                }
+                std::sort(keys.begin(), keys.end());
+                for (auto it = keys.rbegin(); it != keys.rend() && left > 0; ++it) {
+                    const auto li = g_layout.find(*it);
+                    const int units = li == g_layout.end()
+                                          ? 1 : (std::max)(1, li->second.count);
+                    reservedKeys.insert(*it);
+                    left -= units;
+                }
+            }
             for (const auto& [k, le] : g_layout) {
                 if (le.bag == kTrashKey) continue;   // deletion buffer: no cells
                 if (g_held && k == g_held->key) continue;   // carried: cell yields
                 if (dropped.contains(k)) continue;
+                if (reservedKeys.contains(k)) continue;
                 auto* obj = ObjFromBaseKey(BaseKey(k));
                 if (!obj) continue;
                 const GridDef def = g_resolver ? g_resolver(obj) : GridDef{};
