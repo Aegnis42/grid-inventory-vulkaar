@@ -433,6 +433,10 @@ namespace FUI::Grid
         std::vector<OffBoardUnit>             g_pendingEquip;
         std::chrono::steady_clock::time_point g_pendingEquipWhen{};
         constexpr std::chrono::seconds      kPendingEquipTTL{ 2 };
+        // How long the request stream must be QUIET before a landed record is
+        // considered settled (its equip event arrived and nothing new is in
+        // flight). Well past any engine equip latency, well under the TTL.
+        constexpr std::chrono::milliseconds kPendingEquipSettle{ 250 };
 
         // GI1 tile-key grammar:  formKey [ '@' uid-hex ] [ '#' ordinal ]
         //
@@ -12091,12 +12095,32 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // could fire) hid a unit for the rest of the session (measured:
         // engine=2 worn=0 off=[equipping] drawn=1, held for good). The sweep
         // belongs to the frame, not to the rebuild that may never come.
-        if (!g_pendingEquip.empty() &&
-            std::chrono::steady_clock::now() - g_pendingEquipWhen > kPendingEquipTTL) {
-            SKSE::log::warn("[GRID] pending equip expired ({} units) -- releasing"
-                            " (frame sweep)", g_pendingEquip.size());
-            g_pendingEquip.clear();
-            RequestRebuild();
+        if (!g_pendingEquip.empty()) {
+            const auto quiet = std::chrono::steady_clock::now() - g_pendingEquipWhen;
+            if (quiet > kPendingEquipTTL) {
+                SKSE::log::warn("[GRID] pending equip expired ({} units) -- releasing"
+                                " (frame sweep)", g_pendingEquip.size());
+                g_pendingEquip.clear();
+                RequestRebuild();
+            } else if (quiet > kPendingEquipSettle && !g_held) {
+                // ★Prompt retirement for the TAIL of a click run. A LANDED
+                // record's job -- bridging the frames between the request and
+                // the engine's apply -- ended when the equip event arrived;
+                // after that only a rebuild's match-release could retire it,
+                // and a quiet board (B4-1) may never rebuild. So the last
+                // equips of a spam sat suppressing their units until the TTL
+                // (measured: 'expired (2 units)' exactly 2s after the last
+                // click -- the "ring appears late" report). Landed + a quiet
+                // request stream = settled; the worn list is the engine's own
+                // and skipWorn covers the unit from here. Unlanded records
+                // keep the full TTL -- their confirmation may still be coming.
+                // And no releases while the cursor carries: the rebuild this
+                // schedules would land mid-swap-window, the old blink.
+                if (std::erase_if(g_pendingEquip,
+                                  [](const OffBoardUnit& u) { return u.landed; }) > 0) {
+                    RequestRebuild();
+                }
+            }
         }
         if (g_held) {
             auto& held = *g_held;
