@@ -355,6 +355,14 @@ namespace FUI::Grid
     // (its tail rebuild repainted the swap window for one tile's removal).
     // The layout half is ForgetTile's, called by rule 13 at the same site.
     void DropTileDisplay(const std::string& a_key, RE::TESBoundObject* a_obj);
+
+    // ★B4-4: a carrier-route equip LANDS at DualRing::Wear -- no engine equip
+    // event will ever come for the ring itself, so nothing else can retire
+    // its equip-queue entry. Left in the books, the entries a swap spam piles
+    // up each kept excluding one unit of the form until the TTL swept them,
+    // and an innocent same-form spare in the pack blinked (user report).
+    // Retires the oldest arriving entry of the form.
+    void ReleasePendingEquipFor(RE::FormID a_form);
     // B2: expire the partner-drop placement hint (qty slider cancelled/closed)
     void ClearDropHint();
 

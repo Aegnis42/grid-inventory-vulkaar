@@ -352,6 +352,14 @@ namespace FUI::DualRing
         // stands in -- so the worn ledger's pending for it would go stale
         // (measured, round one of the state machine). Withdraw it here.
         WornLedger::CancelPending(g_ringId);
+        // ★B4-4: and the GRID's equip-queue entry retires here too -- this
+        // moment IS the carrier route's landing. Waiting for the TTL let a
+        // swap spam pile up entries that each excluded one more unit of the
+        // form, and a same-form spare in the pack blinked out until the sweep
+        // (user report). The ring2 exclusion takes over seamlessly: the
+        // none_of guard that was waiting on this entry opens the instant it
+        // goes.
+        Grid::ReleasePendingEquipFor(g_ringId);
         // ★The carrier bypasses the engine's equip of the RING itself, which
         // is where the vanilla equip sound lives -- so the second slot wore
         // rings in total silence (user report). The pickup clink is the same

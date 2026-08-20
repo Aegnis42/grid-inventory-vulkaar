@@ -7560,6 +7560,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         for (auto& u : g_pendingEquip) u.applied = true;
     }
 
+    void ReleasePendingEquipFor(RE::FormID a_form)
+    {
+        auto* form = RE::TESForm::LookupByID(a_form);
+        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+        if (!obj) return;
+        const std::string base = FormKey(obj);
+        for (auto it = g_pendingEquip.begin(); it != g_pendingEquip.end(); ++it) {
+            if (it->base == base && it->arriving) {
+                g_pendingEquip.erase(it);
+                return;
+            }
+        }
+    }
+
     void NoteEquipLanded(RE::FormID a_form)
     {
         // B4-2c: the engine's own confirm, one event landing one entry --
