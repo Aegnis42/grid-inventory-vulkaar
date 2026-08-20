@@ -6,6 +6,7 @@
 #include <cmath>
 #include <format>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,7 +14,9 @@ namespace FUI::Census
 {
     namespace
     {
-        bool g_on = false;
+        // ★ON since the promotion: the assignment below steers the rebuild's
+        // relabel pairing, so this is deployment behaviour now, not a probe.
+        bool g_on = true;
 
         // One row per (form, sig). The raw values ride along because the §3
         // pairing rule is stated in terms of distance, and a hash has none.
@@ -31,6 +34,12 @@ namespace FUI::Census
         using Key = std::pair<RE::FormID, std::uint16_t>;
         std::map<Key, Row> g_prev;
         bool               g_have = false;
+
+        // The verdict of the LAST take: (form, vanished sig) -> assigned
+        // appeared sig. Written whole by Take, consumed pair-by-pair through
+        // TakePair, discarded whole at the next Take/Reset. Main thread only,
+        // like everything else here.
+        std::map<Key, std::uint16_t> g_picks;
 
         // Everything the sig hashes that has a MAGNITUDE. Read straight off the
         // list so the census and the signature cannot describe different things.
@@ -137,7 +146,13 @@ namespace FUI::Census
     void SetEnabled(bool a_on)
     {
         g_on = a_on;
-        if (a_on) logger::info("[CENSUS] kind audit ON (B1)");
+        if (!a_on) {
+            // mirror of the ledger's escape hatch: turning the census off
+            // hands the relabel pairing back to hash order, which is worth a
+            // loud line in any report it appears in
+            logger::warn("[CENSUS] ★EMERGENCY OFF -- relabel pairing falls "
+                         "back to arrival order");
+        }
     }
 
     void Reset(const char* a_why)
@@ -145,12 +160,26 @@ namespace FUI::Census
         if (!g_on) return;
         g_prev.clear();
         g_have = false;
+        g_picks.clear();
         logger::info("[CENSUS] reset ({}) -- next take re-baselines", a_why);
+    }
+
+    std::optional<std::uint16_t> TakePair(RE::FormID a_form,
+                                          std::uint16_t a_goneSig)
+    {
+        const auto it = g_picks.find({ a_form, a_goneSig });
+        if (it == g_picks.end()) return std::nullopt;
+        const std::uint16_t to = it->second;
+        g_picks.erase(it);
+        return to;
     }
 
     void Take(const char* a_when)
     {
         if (!g_on) return;
+        // the verdict describes ONE diff; whatever the last one left unclaimed
+        // must not outlive it
+        g_picks.clear();
         auto now = Snapshot();
         if (now.empty()) return;
 
@@ -196,6 +225,38 @@ namespace FUI::Census
             ++forms;
             const auto& made = ait->second;
 
+            // ★★The B1 rule, promoted from a RANKING to an ASSIGNMENT: every
+            // (gone, appeared) pair of this form, ordered fewest-changed-axes
+            // first with the normalised distance as tiebreak, claimed
+            // greedily -- one appeared kind per vanished kind, no double
+            // claims (the old per-row "rule picks" could hand two vanished
+            // kinds the same survivor). Leftovers on either side are real
+            // creations and destructions (PLAN §3 rule 4). Ties keep
+            // insertion order, which stands in for the board-position
+            // tiebreak the census cannot see from here.
+            struct Cand { std::size_t li, mi; int axes; float dist; };
+            std::vector<Cand> cands;
+            cands.reserve(lost.size() * made.size());
+            for (std::size_t li = 0; li < lost.size(); ++li) {
+                for (std::size_t mi = 0; mi < made.size(); ++mi) {
+                    cands.push_back({ li, mi, ChangedAxes(lost[li], made[mi]),
+                                      Distance(lost[li], made[mi]) });
+                }
+            }
+            std::stable_sort(cands.begin(), cands.end(),
+                [](const Cand& x, const Cand& y) {
+                    if (x.axes != y.axes) return x.axes < y.axes;
+                    return x.dist < y.dist;
+                });
+            std::vector<int>  pickOf(lost.size(), -1);
+            std::vector<char> claimed(made.size(), 0);
+            for (const auto& c : cands) {
+                if (pickOf[c.li] >= 0 || claimed[c.mi]) continue;
+                pickOf[c.li] = static_cast<int>(c.mi);
+                claimed[c.mi] = 1;
+                g_picks[{ form, lost[c.li].sig }] = made[c.mi].sig;
+            }
+
             if (lost.size() == 1 && made.size() == 1) {
                 ++unique;
                 logger::info("[CENSUS]   {:08X} '{}': {} -> {}  (x{}, d={:.1f}) UNIQUE",
@@ -204,31 +265,16 @@ namespace FUI::Census
                 continue;
             }
 
-            // ★★This is the case REVIEW B-2 said would come back, and here it
-            // is. Candidates are RANKED by the §8-4 rule -- fewest changed
-            // axes first, normalised distance as the tiebreak -- and the top
-            // pick is marked, so when N→M finally happens in the wild the log
-            // shows what the rule would have chosen, judged on real numbers.
+            // ★★This is the case REVIEW B-2 said would come back. The dump
+            // shows every candidate in rule order and marks what the
+            // assignment actually chose -- which the rebuild will enact.
             ++ambiguous;
             logger::warn("[CENSUS]   {:08X} '{}': ★{} gone x {} appeared -- AMBIGUOUS",
                 form, NameOf(form), lost.size(), made.size());
-            for (const auto& l : lost) {
-                struct Cand { const Row* m; int axes; float dist; };
-                std::vector<Cand> cands;
-                cands.reserve(made.size());
-                for (const auto& m : made) {
-                    cands.push_back({ &m, ChangedAxes(l, m), Distance(l, m) });
-                }
-                std::sort(cands.begin(), cands.end(),
-                    [](const Cand& x, const Cand& y) {
-                        if (x.axes != y.axes) return x.axes < y.axes;
-                        return x.dist < y.dist;
-                    });
-                for (std::size_t c = 0; c < cands.size(); ++c) {
-                    logger::warn("[CENSUS]       {} -> {}  axes={} d={:.1f}{}",
-                        Describe(l), Describe(*cands[c].m), cands[c].axes,
-                        cands[c].dist, c == 0 ? "  <- rule picks" : "");
-                }
+            for (const auto& c : cands) {
+                logger::warn("[CENSUS]       {} -> {}  axes={} d={:.1f}{}",
+                    Describe(lost[c.li]), Describe(made[c.mi]), c.axes, c.dist,
+                    static_cast<int>(c.mi) == pickOf[c.li] ? "  <- assigned" : "");
             }
         }
 

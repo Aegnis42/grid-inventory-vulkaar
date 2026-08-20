@@ -1,6 +1,9 @@
 #pragma once
 
-// 1.4 / B1 — OBSERVATION ONLY, one step above B0.
+#include <optional>
+
+// 1.4 / B1 — kind-level audit, one step above B0. Observation-only at birth;
+// promoted to permanent wiring below (★★PROMOTED).
 //
 // B0 counted FORMS. That is enough to ask "did the engine tell us everything",
 // and the answer was yes. It is not enough to run a board: two iron daggers are
@@ -20,7 +23,15 @@
 // distance. That rule cannot be evaluated, let alone implemented, from sigs
 // alone. Learning this is itself part of what B1 was for.
 //
-// OFF unless GridInventory_ui.ini says "!census = 1".
+// ★★PROMOTED: ON BY DEFAULT, and no longer observation-only. Each Take now
+// ASSIGNS the pairs it used to merely rank -- greedily, fewest changed axes
+// first, normalised distance as the tiebreak (the B1-measured rule, PLAN
+// §8-4) -- and the rebuild's relabel block consumes the assignment through
+// TakePair. Before this, N vacated pools met M arriving pools in HASH ORDER,
+// which is no order at all: two enchanted swords draining differently in
+// combat could swap board cells at the next menu open, the very §1(b)
+// violation the census was built to measure. "!census = 0" remains as an
+// emergency cutoff (the ledger's promotion pattern).
 namespace FUI::Census
 {
     [[nodiscard]] bool Enabled();
@@ -32,4 +43,13 @@ namespace FUI::Census
     // A load replaces the inventory wholesale -- the previous census describes
     // someone else. Same rule B0 had to learn the hard way.
     void Reset(const char* a_why);
+
+    // The verdict, one pair at a time: which appeared kind the rule assigned
+    // to this vanished kind. CONSUMING -- a pair answers once, then retires
+    // (§1 rule 7's shape: a confirmation retires only its own entry), so a
+    // stale verdict cannot steer a later, unrelated relabel. Empty when the
+    // census has no opinion; sig 0 (the plain pool) is a legitimate answer,
+    // which is why the miss is an empty optional and not a zero.
+    [[nodiscard]] std::optional<std::uint16_t> TakePair(RE::FormID a_form,
+                                                        std::uint16_t a_goneSig);
 }

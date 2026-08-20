@@ -11,6 +11,7 @@
 #include "ui/Sfx.h"
 #include "ui/Wheeler.h"
 #include "game/BagFilter.h"
+#include "game/Census.h"
 #include "game/Costume.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
@@ -5810,12 +5811,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     for (const auto& [pk, want] : poolUnits) {
                         if (want > 0 && !byPool.contains(pk)) arriving.push_back(pk);
                     }
-                    std::size_t taken = 0;
-                    for (const auto& to : arriving) {
-                        if (taken >= vacated.size()) break;
-                        const std::string from = vacated[taken++];
+                    auto relabel = [&](const std::string& from,
+                                       const std::string& to, const char* how) {
                         const auto node = byPool.find(from);
-                        if (node == byPool.end()) continue;
+                        if (node == byPool.end()) return;
                         for (const auto si : node->second) {
                             slots[si].le.uid = UidOf(to);
                             slots[si].le.sig = SigOf(to);
@@ -5824,11 +5823,51 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             live.sig = slots[si].le.sig;
                         }
                         if (g_poolTrace) {
-                            SKSE::log::info("[POOL] relabel {} slot(s) '{}' -> '{}'",
-                                            node->second.size(), from, to);
+                            SKSE::log::info("[POOL] relabel {} slot(s) '{}' -> '{}' ({})",
+                                            node->second.size(), from, to, how);
                         }
                         byPool[to] = node->second;
                         byPool.erase(from);
+                    };
+                    // ★★The census ASSIGNS the pairs now (B1 rule promoted,
+                    // §8-4): fewest changed axes first, normalised distance
+                    // as the tiebreak. What decided this before was map order
+                    // over sig-keyed pool strings -- hash order, no order at
+                    // all -- so two enchanted swords draining differently in
+                    // combat could swap cells at the next menu open, the very
+                    // §1(b) violation B1 was built to measure. Uid-keyed
+                    // pools ('@') stay out of it twice over: their key
+                    // survives a value change so they never relabel, and
+                    // SigOf reads 0 on them, which would collide with the
+                    // plain pool's legitimate sig 0.
+                    std::vector<std::string> vacLeft;
+                    for (const auto& from : vacated) {
+                        std::optional<std::uint16_t> want;
+                        if (UidOf(from) == 0) {
+                            want = Census::TakePair(obj->GetFormID(), SigOf(from));
+                        }
+                        bool paired = false;
+                        if (want) {
+                            for (auto at = arriving.begin(); at != arriving.end(); ++at) {
+                                if (UidOf(*at) == 0 && SigOf(*at) == *want) {
+                                    relabel(from, *at, "census");
+                                    arriving.erase(at);
+                                    paired = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!paired) vacLeft.push_back(from);
+                    }
+                    // Leftovers keep the old first-come pairing: right for
+                    // the 1<->1 case that needs no rule (either answer is the
+                    // same relabel), and the honest fallback for a drift the
+                    // census never saw -- its take runs at menu open/close,
+                    // and a mid-menu change diffs against nothing.
+                    std::size_t taken = 0;
+                    for (const auto& to : arriving) {
+                        if (taken >= vacLeft.size()) break;
+                        relabel(vacLeft[taken++], to, "order");
                     }
                 }
 

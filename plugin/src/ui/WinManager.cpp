@@ -319,7 +319,9 @@ namespace FUI
                 DeltaWatch::SetEnabled(rest == "1" || rest == "true");
                 continue;
             }
-            // 1.4 / B1: kind-level audit. See Census.h.
+            // 1.4 / B1: kind-level audit -- ON BY DEFAULT since its promotion
+            // (the take's assignment steers the rebuild's relabel pairing);
+            // this line is the escape hatch ("!census = 0"). See Census.h.
             if (key == "!census") {
                 Census::SetEnabled(rest == "1" || rest == "true");
                 continue;
@@ -792,10 +794,10 @@ namespace FUI
         if (Grid::PoolTrace()) out << "!pooltrace = 1\n";
         if (Grid::SimDrift())  out << "!simdrift = 1\n";
         if (DeltaWatch::Enabled()) out << "!delta = 1\n";
-        if (Census::Enabled())     out << "!census = 1\n";
-        // ★Inverted since the ledger's promotion: ON is the default, so the
-        // line is written only while OFF -- the escape hatch survives a
-        // restart, and an ordinary install still carries no line.
+        // ★Inverted since their promotions: ON is the default, so the line is
+        // written only while OFF -- the escape hatch survives a restart, and
+        // an ordinary install still carries no line.
+        if (!Census::Enabled())    out << "!census = 0\n";
         if (!Ledger::Enabled())    out << "!ledger = 0\n";
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
