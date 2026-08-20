@@ -343,11 +343,13 @@ namespace FUI::Equip
                     }
                     continue;
                 }
-                // ★The second ring is standing in the pack, not on the body --
-                // a carrier wears its look and its enchantment -- so it is
-                // never "worn" here and would fall through as an ordinary
-                // spare. It is placed by hand after this loop instead.
-                if (DualRing::Second() == armo) continue;
+                // ★No form-level skip for the second ring here. The carried
+                // ring is in the PACK, not worn, so this IsWorn loop never
+                // meets it -- the old `Second() == armo continue` was a FORM
+                // comparison that could only ever fire when a SIBLING unit of
+                // that form was engine-worn, and then it hid exactly the ring
+                // that deserved the first slot: a plain same-form pair showed
+                // one ring on the doll while both were worn (user report).
                 if (slot && std::string_view(slot) == "ringR") {
                     // ★The doll has two ring slots but the body has one kRing
                     // bit, so the second is only ever reached by a mod that
@@ -358,8 +360,11 @@ namespace FUI::Equip
                     // ★Asked of a_out, not remembered in a flag -- the map IS
                     // the answer to "is that slot taken", and a flag was a
                     // second copy of it that could only ever be wrong.
+                    // ★ringL belongs to the carrier while one is active -- an
+                    // engine-worn spill must not take the slot the hand
+                    // placement below will overwrite.
                     if (!a_out.contains("ringR"))      slot = "ringR";
-                    else if (!a_out.contains("ringL")) slot = "ringL";
+                    else if (!a_out.contains("ringL") && !DualRing::Second()) slot = "ringL";
                     else                               slot = nullptr;
                 }
                 add(slot, obj, 1, Grid::GlowBits(obj, entry.get(), Grid::WornExtraOf(entry.get())));
@@ -953,6 +958,54 @@ namespace FUI::Equip
                 continue;
             }
 
+            // ★★RING ROUTER for SLOTLESS equips (right-click, wheel). The
+            // engine always swaps the first slot, but two slots exist -- so a
+            // second ring used to displace the first instead of joining it.
+            // The routing (user spec):
+            //   first slot worn, second free, no effect collision with the
+            //     first  ->  the new ring joins on the SECOND slot;
+            //   both worn  ->  the DUPLICATE names the victim: a ring sharing
+            //     the second ring's effect trades with the SECOND (Wear's own
+            //     "one at a time" TakeOff does the trade), anything else
+            //     trades with the first as before;
+            //   any refusal (no carrier, no free biped slot, effect collision
+            //     with the first)  ->  fall through to the engine's first-slot
+            //     swap, which the stand-down guard below keeps duplication-
+            //     free. Targeted drops (act.slotId set) keep their aim.
+            // ★★BEFORE the conflict pass below, which is exactly where the
+            // first version died: that pass strips everything on kRing before
+            // equipping, so by the time the router asked "what is on the first
+            // slot" the answer was already nothing, and every enchanted ring
+            // fell through to the plain engine swap. Only a same-form pair
+            // ever routed -- its worn sibling survived on the pass's sameUnit
+            // exemption. The router must read the board BEFORE anyone clears
+            // it. (Wear ignores its list argument, so resolving srcList later
+            // costs this call nothing.)
+            if (act.slotId.empty()) {
+                if (auto* ringIn = obj->As<RE::TESObjectARMO>();
+                    ringIn && Grid::IsRing(ringIn) && !DualRing::IsCarrier(ringIn)) {
+                    auto* firstObj = WornObjectAt("ringR");
+                    auto* first = firstObj ? firstObj->As<RE::TESObjectARMO>() : nullptr;
+                    if (first && !Grid::IsRing(first)) first = nullptr;
+                    auto* second = DualRing::Second();
+                    bool  toSecond = false;
+                    if (first && !second) {
+                        toSecond = !DualRing::SharesEffect(first, ringIn);
+                    } else if (first && second) {
+                        toSecond = DualRing::SharesEffect(second, ringIn) &&
+                                   !DualRing::SharesEffect(first, ringIn);
+                    }
+                    if (toSecond && DualRing::Wear(ringIn, nullptr)) {
+                        Grid::ForgetTile(act.srcKey);   // rule 13, same as the drop path
+                        Grid::NoteFormSeen(obj);
+                        Grid::RequestRebuild();
+                        SKSE::log::info("[EQUIP] '{}' -> second ring slot (routed)",
+                            obj->GetName());
+                        continue;
+                    }
+                }
+            }
+
             // Same-slot conflict resolution BY HAND: while paused the engine's
             // own queued conflict pass is unreliable (stacked body armour) —
             // unequip everything sharing a biped slot with the incoming piece.
@@ -1066,44 +1119,6 @@ namespace FUI::Equip
             } else {
                 srcList = Grid::ExtraForInstance(Grid::LiveEntryOf(player, obj),
                                                  act.uid, act.xlIdx);
-            }
-            // ★★RING ROUTER for SLOTLESS equips (right-click, wheel). The
-            // engine always swaps the first slot, but two slots exist -- so a
-            // second ring used to displace the first instead of joining it.
-            // The routing (user spec):
-            //   first slot worn, second free, no effect collision with the
-            //     first  ->  the new ring joins on the SECOND slot;
-            //   both worn  ->  the DUPLICATE names the victim: a ring sharing
-            //     the second ring's effect trades with the SECOND (Wear's own
-            //     "one at a time" TakeOff does the trade), anything else
-            //     trades with the first as before;
-            //   any refusal (no carrier, no free biped slot, effect collision
-            //     with the first)  ->  fall through to the engine's first-slot
-            //     swap, which the stand-down guard below keeps duplication-
-            //     free. Targeted drops (act.slotId set) keep their aim.
-            if (act.slotId.empty()) {
-                if (auto* ringIn = obj->As<RE::TESObjectARMO>();
-                    ringIn && Grid::IsRing(ringIn) && !DualRing::IsCarrier(ringIn)) {
-                    auto* firstObj = WornObjectAt("ringR");
-                    auto* first = firstObj ? firstObj->As<RE::TESObjectARMO>() : nullptr;
-                    if (first && !Grid::IsRing(first)) first = nullptr;
-                    auto* second = DualRing::Second();
-                    bool  toSecond = false;
-                    if (first && !second) {
-                        toSecond = !DualRing::SharesEffect(first, ringIn);
-                    } else if (first && second) {
-                        toSecond = DualRing::SharesEffect(second, ringIn) &&
-                                   !DualRing::SharesEffect(first, ringIn);
-                    }
-                    if (toSecond && DualRing::Wear(ringIn, srcList)) {
-                        Grid::ForgetTile(act.srcKey);   // rule 13, same as the drop path
-                        Grid::NoteFormSeen(obj);
-                        Grid::RequestRebuild();
-                        SKSE::log::info("[EQUIP] '{}' -> second ring slot (routed)",
-                            obj->GetName());
-                        continue;
-                    }
-                }
             }
             // ★The SECOND ring slot is reached by DROPPING on it, never by a
             // plain click -- that is the rule the feature is built on, so the
