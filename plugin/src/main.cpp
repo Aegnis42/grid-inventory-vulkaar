@@ -203,7 +203,7 @@ namespace
                 if (!a_event->equipped) {
                     const RE::FormID fid = a_event->baseObject;
                     SKSE::GetTaskInterface()->AddTask([fid]() {
-                        if (!FUI::Grid::OnEngineUnequip(fid)) {
+                        if (!FUI::Grid::OnFormDelta(fid)) {
                             FUI::Grid::RequestRebuild();
                         }
                     });
@@ -335,12 +335,22 @@ namespace
                 // reopen. Our own take/sell/drop paths already ask for this,
                 // and the flag coalesces per frame, so the extra request is
                 // free.
-                // ★Unconditional since the H1 fix: with the menu closed the
-                // flag is consumed by the capacity gates (FreshenLayoutForGates)
-                // instead of FinishFrame -- every pickup since the last open
-                // used to sit with no layout entry, and the sim first-fit it
-                // into the very hole the player remembered leaving.
-                FUI::Grid::RequestRebuild();
+                // ★1.4: the delta applier, at last. Every player-side container
+                // delta first tries the per-form partial (the same walk and
+                // tile factory the rebuild uses, scoped to one form); anything
+                // unproven declines into the full rebuild, and a pending flag
+                // short-circuits the partial -- a take-all burst coalesces to
+                // one rebuild exactly as before. Menu closed, the partial
+                // declines quietly and the flag is consumed by the capacity
+                // gates (H1) or the next open, unchanged.
+                {
+                    const RE::FormID deltaForm = a_event->baseObj;
+                    SKSE::GetTaskInterface()->AddTask([deltaForm]() {
+                        if (!FUI::Grid::OnFormDelta(deltaForm)) {
+                            FUI::Grid::RequestRebuild();
+                        }
+                    });
+                }
                 // G1: ledger (Gold001) or coin-form movement -> re-mirror.
                 // The reconciler's own edits re-mark dirty and settle at a
                 // zero diff next tick (also renormalises console-given coins).

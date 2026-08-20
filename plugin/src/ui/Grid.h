@@ -185,7 +185,11 @@ namespace FUI::Grid
     // the caller then runs the full rebuild -- correctness is unchanged, the
     // fast path only covers what it can prove. Every decline logs its reason
     // ("[B3]"), so coverage is measured, not assumed. Main thread only.
-    bool OnEngineUnequip(std::uint32_t a_form);
+    // (Named OnEngineUnequip when the unequip event was its only caller; the
+    // ContainerSink now routes EVERY player-side container delta through it,
+    // making it the delta applier §8-10 aimed at -- scoped to one form, adds
+    // only, everything else declines into the rebuild.)
+    bool OnFormDelta(std::uint32_t a_form);
     // Trace switch: "!rbtrace = 1".
     [[nodiscard]] bool RebuildTrace();
     void               SetRebuildTrace(bool a_on);

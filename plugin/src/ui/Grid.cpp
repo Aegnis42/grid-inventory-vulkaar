@@ -1358,7 +1358,17 @@ namespace FUI::Grid
         // (§3-6) named that rebuild's only use/equip job as "draw the
         // optimistic exit NOW"; this does exactly that job and nothing else.
         // FormID, not a pointer (원칙 2) -- resolved when consumed.
-        struct ClickRemove { std::string key; RE::FormID form = 0; };
+        // take: units leaving the clicked tile (0 = derive via EquipCountFor,
+        // the use/equip legacy). drained: NotePendingRemove already adjusted
+        // the LAYOUT count (store/sell paths) -- the partial must then sync
+        // only the display, or the stack would be drained twice.
+        struct ClickRemove
+        {
+            std::string key;
+            RE::FormID  form = 0;
+            int         take = 0;
+            bool        drained = false;
+        };
         std::optional<ClickRemove> g_clickRemove;
 
         // B2: one-shot placement hint for the next ACQUIRE that creates a new
@@ -3244,6 +3254,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                                              it.uid, it.sig, it.fav,
                                                              it.xlIdx, it.key);
                                     NotePendingRemove(it.obj, it.key, it.count, it.xlIdx);
+                                    // ★1.4: the whole tile leaves NOW, by the
+                                    // same deferred partial the use click
+                                    // takes -- the layout is already drained
+                                    // (NotePendingRemove above), so only the
+                                    // display follows.
+                                    g_clickRemove = ClickRemove{
+                                        it.key, it.obj->GetFormID(),
+                                        it.count, /*drained=*/true };
                                 }
                             }
                         } else if (LootBarter::CurrentMode() ==
@@ -3296,6 +3314,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                                                 it.uid, it.sig, it.fav,
                                                                 it.xlIdx, it.key);
                                         NotePendingRemove(it.obj, it.key, 1, it.xlIdx);
+                                        // ★1.4: one unit leaves the display
+                                        // now; the layout is already drained.
+                                        g_clickRemove = ClickRemove{
+                                            it.key, it.obj->GetFormID(),
+                                            1, /*drained=*/true };
                                     }
                                 }
                             }
@@ -6941,13 +6964,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // exactly yesterday's, the fast path only covers what it can prove. Every
     // decline logs its reason, so the coverage is measured, not assumed
     // (the same bargain !rbdrop struck).
-    bool OnEngineUnequip(std::uint32_t a_form)
+    bool OnFormDelta(std::uint32_t a_form)
     {
         const auto decline = [&](const char* a_why) {
             SKSE::log::info("[B3] partial add declined ({:08X}): {} -- full rebuild",
                 a_form, a_why);
             return false;
         };
+        // A full rebuild is already on its way: let it cover this delta too.
+        // Partials one-by-one against a pending full pass are pure waste, and
+        // this line is what coalesces a take-all burst into ONE rebuild --
+        // the first decline raises the flag, the rest short-circuit here.
+        if (g_needRebuild.load(std::memory_order_relaxed)) return false;
         // Menu closed: the coalesced flag is already the cheap path -- the
         // next open (or a capacity gate) rebuilds once for the whole batch.
         auto* ui = RE::UI::GetSingleton();
@@ -7088,7 +7116,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     Mint mp;
                     mp.le.uid = UidOf(pool);
                     mp.le.sig = SigOf(pool);
-                    if (!OccPlace(occ, gdef, mp.le)) {
+                    // partner-drop hint, same rules as the gear branch above
+                    if (g_dropHint.Wants(baseKey, pool)) {
+                        if (!g_dropHint.bag.empty()) {
+                            return decline("hinted into a bag");
+                        }
+                        const int  hrot = CanRotate(gdef) ? (g_dropHint.rot & 3) : 0;
+                        const Mask hm = MaskOf(gdef, hrot);
+                        if (OccFits(occ, g_dropHint.col, g_dropHint.row, hm)) {
+                            mp.le.col = g_dropHint.col;
+                            mp.le.row = g_dropHint.row;
+                            mp.le.rot = hrot;
+                            OccMark(occ, mp.le.col, mp.le.row, hm);
+                            g_dropHint = {};
+                        }
+                    }
+                    if (mp.le.col < 0 && !OccPlace(occ, gdef, mp.le)) {
                         return decline("no room (growth/spill)");
                     }
                     mp.units = n;
@@ -7173,6 +7216,28 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
                 OccMark(occ, le.col, le.row, m);
             } else {
+                // ★A partner-drop hint aims the fresh tile at the drop cell --
+                // the same honour CollectDisplayTiles pays it (GI21/B2). A
+                // hint into a BAG is the rebuild's business (bag views are not
+                // placed here); an occupied hint falls through to first-fit,
+                // matching the placer's own behaviour.
+                if (g_dropHint.Wants(baseKey,
+                        PoolPrefix(baseKey, u->uid, u->sig))) {
+                    if (!g_dropHint.bag.empty()) {
+                        return decline("hinted into a bag");
+                    }
+                    const int  hrot = CanRotate(gdef) ? (g_dropHint.rot & 3) : 0;
+                    const Mask hm = MaskOf(gdef, hrot);
+                    if (OccFits(occ, g_dropHint.col, g_dropHint.row, hm)) {
+                        le.col = g_dropHint.col;
+                        le.row = g_dropHint.row;
+                        le.rot = hrot;
+                        OccMark(occ, le.col, le.row, hm);
+                        g_dropHint = {};
+                        plan.push_back({ u, le });
+                        continue;
+                    }
+                }
                 // rule 13 forgot the cell at equip time: first-fit, both
                 // orientations, same as the rebuild's placer would
                 if (!OccPlace(occ, gdef, le)) {
@@ -7208,7 +7273,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // the next real rebuild would spend it a second time. False = the
         // caller rebuilds (tile gone, shapes changed -- anything unproven).
         bool TryUseClickPartialRemove(const std::string& a_key,
-                                      RE::TESBoundObject* a_obj)
+                                      RE::TESBoundObject* a_obj,
+                                      int a_take, bool a_drained)
         {
             int idx = -1;
             for (std::size_t i = 0; i < g_items.size(); ++i) {
@@ -7219,15 +7285,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             if (idx < 0) return false;
             auto& it = g_items[static_cast<std::size_t>(idx)];
-            const int take = Equip::EquipCountFor(a_obj, it.count);
+            const int take = a_take > 0 ? a_take
+                                        : Equip::EquipCountFor(a_obj, it.count);
 
             if (take < it.count) {
                 // stackable counting down: the tile keeps its cell, the
                 // reconciler's own rule ("a tile owns its quantity") keeps
                 // this stable under the next full rebuild
                 it.count -= take;
-                if (const auto li = g_layout.find(a_key); li != g_layout.end()) {
-                    li->second.count = it.count;
+                // ★store/sell already drained the LAYOUT in NotePendingRemove
+                // (cancel-safe, confirm-time semantics) -- writing it again
+                // here would drain the stack twice. Only the display syncs.
+                if (!a_drained) {
+                    if (const auto li = g_layout.find(a_key); li != g_layout.end()) {
+                        li->second.count = it.count;
+                    }
                 }
                 if (g_drainHint.key == a_key) g_drainHint = {};
                 MarkCapacityDirty();
@@ -11939,7 +12011,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_clickRemove.reset();
             auto* form = RE::TESForm::LookupByID(cr.form);
             auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
-            if (!obj || !TryUseClickPartialRemove(cr.key, obj)) {
+            if (!obj || !TryUseClickPartialRemove(cr.key, obj, cr.take, cr.drained)) {
                 SKSE::log::info("[B3] use click partial declined ('{}') -- "
                                 "full rebuild", cr.key);
                 g_needRebuild.store(true, std::memory_order_release);
