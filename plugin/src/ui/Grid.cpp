@@ -11944,6 +11944,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return true;
         }
 
+        // defined with the gold routes below; the whole-tile store needs it
+        // for the same reason the fragment route does
+        int StoreCoinValueTo(RE::TESObjectREFR* a_dst, Held& a_held);
+
         bool WholeStore(Held& a_held)
         {
             // dropped on the container window = STORE (coins excluded —
@@ -11960,14 +11964,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid)) {
                 // P2/3-5: same two destinations as the fragment's route above --
                 // a pouch cell under the cursor, else the container itself.
-                const int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
-                RE::TESObjectREFR* const dst = moved > 0 ? nullptr : LootBarter::Partner();
-                if (moved > 0 || dst) {
-                    if (moved > 0) {
-                        GoldCoins::DebitLedger(moved);
-                    } else {
-                        GoldCoins::StoreToContainer(dst, a_held.coinValue);
-                    }
+                // ★The pin comes home first -- see StoreCoinValueTo, and the
+                // report it exists for. A whole COIN TILE can be a pinned purse
+                // just as a fragment can (dragging gold out of a chest makes
+                // one), so this branch was losing the store for the same reason.
+                int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
+                if (moved > 0) {
+                    GoldCoins::DebitLedger(moved);
+                } else if (auto* dst = LootBarter::Partner()) {
+                    moved = StoreCoinValueTo(dst, a_held);
+                }
+                if (moved > 0) {
                     if (GoldCoins::PinnedValue(a_held.key) >= 0) {
                         GoldCoins::UnpinTile(a_held.key);
                     }
@@ -11977,6 +11984,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     RequestRebuild();
                     return true;
                 }
+                // ★Nothing moved. Consume the drop but KEEP the carry: falling
+                // through would reach the tail below, which resets the carry --
+                // and a coin tile whose store was refused would vanish off the
+                // cursor with its cell already gone.
+                Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
+                return true;
             }
             // (no quest guard: storing CHANGES CONTAINERS -- see PoolIsQuest)
             bool queued = false;   // O-2: did anything actually leave?
@@ -12502,19 +12515,49 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // ★The merchant is not on this list and needs no test for it: the row
         // that reaches here is kPartnerLoot, which only matches a container or
         // a follower. Selling gold to a shopkeeper is not a thing.
+        // ★★A PINNED PURSE HAS TO COME HOME BEFORE IT CAN BE SPENT, and this is
+        // the one line the whole gold-into-a-chest feature turned on.
+        //
+        // Pinning SUBTRACTS a value from walking gold -- that is what a pin is
+        // -- so a purse's own value is, by definition, not in the pool
+        // StoreToContainer measures against. With 10,000 G banked in a pouch
+        // and 663 G riding as a pin, walking gold is exactly 0, the store
+        // clamps to 0 and moves nothing, and the caller then unpins the purse
+        // and erases its cell for a transfer that never happened: the 663
+        // reappears as an ordinary coin tile in the first free square. That is
+        // the "sometimes it does not store, and it jumps to an empty cell"
+        // report, and it needed the gold to have been DRAGGED OUT of a
+        // container first -- which is what makes it a pin.
+        //
+        // The pouch route next door has always known this ("the pin returns to
+        // walking first so the pouch can draw from it"). Same move here, with
+        // the same restore when the destination refuses.
+        int StoreCoinValueTo(RE::TESObjectREFR* a_dst, Held& a_held)
+        {
+            const bool wasPinned = GoldCoins::PinnedValue(a_held.key) >= 0;
+            if (wasPinned) GoldCoins::UnpinTile(a_held.key);
+            const int moved = GoldCoins::StoreToContainer(a_dst, a_held.coinValue);
+            if (moved <= 0 && wasPinned) {
+                GoldCoins::PinAmount(a_held.key, a_held.coinValue);   // put it back
+            }
+            return moved;
+        }
+
         bool GoldOnPartnerPouch(Held& a_held)
         {
             if (a_held.coinValue <= 0) return false;
             int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
-            if (moved <= 0) {
-                if (auto* dst = LootBarter::Partner()) {
-                    GoldCoins::StoreToContainer(dst, a_held.coinValue);
-                    moved = a_held.coinValue;
-                } else {
-                    return false;
-                }
-            } else {
+            if (moved > 0) {
                 GoldCoins::DebitLedger(moved);   // the pouch route debits here
+            } else if (auto* dst = LootBarter::Partner()) {
+                moved = StoreCoinValueTo(dst, a_held);
+            } else {
+                return false;
+            }
+            if (moved <= 0) {
+                // refused: the purse is intact and keeps riding the cursor
+                Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
+                return true;
             }
             if (GoldCoins::PinnedValue(a_held.key) >= 0) {
                 GoldCoins::UnpinTile(a_held.key);

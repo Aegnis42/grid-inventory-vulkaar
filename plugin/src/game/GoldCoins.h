@@ -162,7 +162,10 @@ namespace FUI::GoldCoins
     // through RequestStore would have the transfer counted twice -- once by the
     // request ledger and once here. One debit, from the book that owns the
     // gold.
-    void StoreToContainer(RE::TESObjectREFR* a_dst, int a_value);
+    // ★Returns the amount actually queued -- 0 means nothing moved. A caller
+    // that assumes success will unpin a purse and erase its cell for a
+    // transfer that never happened.
+    int StoreToContainer(RE::TESObjectREFR* a_dst, int a_value);
 
     void DropAsGold(int a_value);     // ledger down; a Coin_Sack (0x805,
                                       // coinbaglarge.nif) ref lands at the feet

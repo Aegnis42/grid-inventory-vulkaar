@@ -976,13 +976,26 @@ namespace FUI::GoldCoins
         }
     }
 
-    void StoreToContainer(RE::TESObjectREFR* a_dst, int a_value)
+    // ★★RETURNS WHAT IT ACTUALLY QUEUED, because it can queue nothing and the
+    // caller has no other way to find out. The clamp to walking gold is right
+    // -- this must never move money the player does not have -- but a caller
+    // that read a refusal as success unpinned the purse and erased its cell
+    // while the coins stayed put, which is how 663 G left a chest and came
+    // back as a tile in the first free square (reported). See the callers:
+    // a PINNED purse has to come home to walking before it can be spent.
+    int StoreToContainer(RE::TESObjectREFR* a_dst, int a_value)
     {
-        if (!a_dst || a_value <= 0) return;
+        if (!a_dst || a_value <= 0) return 0;
         const int v = (std::min)(a_value, WalkingGold());
-        if (v <= 0) return;
+        if (v <= 0) {
+            SKSE::log::warn("[GOLD] store of {} G declined -- only {} G is walking "
+                            "(pinned {}, pouch {})",
+                            a_value, WalkingGold(), PinnedSum(), PouchSum());
+            return 0;
+        }
         g_pending.push_back({ LedgerOp::kStoreCoin, v, a_dst->GetFormID() });
         g_dirty = true;
+        return v;
     }
 
     void DropAsGold(int a_value)
