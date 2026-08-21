@@ -1410,6 +1410,15 @@ namespace
     bool HandleFavoritesMenuIntercept(const RE::MenuOpenCloseEvent& a_event)
     {
         if (a_event.menuName != RE::FavoritesMenu::MENU_NAME) return false;
+        // ★Measurement, not decoration. "The vanilla menu still does not
+        // appear" has two very different causes -- we closed it, or the engine
+        // never opened it -- and only the event itself can tell them apart. If
+        // no line appears when the key is pressed, the press never became a
+        // menu request and nothing on our side is holding it.
+        logger::info("[FAV] FavoritesMenu {} (wheel={} yielding={})",
+            a_event.opening ? "opening" : "closing",
+            FUI::Wheeler::Enabled() ? 1 : 0,
+            FUI::Wheeler::YieldingToVanilla() ? 1 : 0);
         // ★★★THE SWITCH LIVES HERE, not only on the wheel's own input. This is
         // the half that gives the vanilla screen back: with the wheel off it
         // opens exactly as it always did, hotkey binding and all. Gating only

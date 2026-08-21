@@ -10709,9 +10709,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const float before = readXp();
             p->AddSkillExperience(RE::ActorValue::kEnchanting, mag);
             const float after = readXp();
-            SKSE::log::info("[RECHARGE] enchanting mag {:.4f} -> xp {:.2f} -> {:.2f} "
-                            "(delta {:.2f}, soul {:.0f}/{:.0f})",
-                mag, before, after, after - before, soul, grand);
+            // ★ANSWERED, in game: mag 0.0083 produced a delta of 7.50, which
+            // is exactly useMult 900 applied to what we passed. The engine
+            // DOES scale it -- so 1.3.x's 12.5 was eleven thousand points,
+            // some thirty levels for one petty gem, and the whole of report ①.
+            SKSE::log::info("[RECHARGE] enchanting +{:.1f} xp (soul {:.0f}/{:.0f})",
+                after - before, soul, grand);
+            (void)before;
         }
         p->PlayPickUpSound(gemObj, false, false);
         SKSE::log::info("[RECHARGE] '{}' {:.0f} -> {:.0f} (+{:.0f}, soul {})",
