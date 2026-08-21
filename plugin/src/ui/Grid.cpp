@@ -254,6 +254,14 @@ namespace FUI::Grid
             // plain form) and that unit leaked onto the board. Appended LAST
             // (§10-6).
             bool                fromCarrier = false;
+            // ★ONE PATH / O-0: a SYNTHETIC carry -- one the code made on the
+            // player's behalf so a right-click can travel the same road a drag
+            // does. It is born and consumed inside one call, so it must never
+            // reach the cursor: no icon, no pickup sound, no second frame. The
+            // flag is what every "is the player holding something" reader uses
+            // to tell the two apart, and what the leak guard in FinishFrame
+            // watches for. Appended LAST (§10-6).
+            bool                transient = false;
             // Adopting an angle (lifting a tile that already lies on its side)
             // must NOT animate -- there is nothing to show, the item was already
             // like that. Only a keypress starts a turn.
@@ -12326,6 +12334,67 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // no consuming route: keep carrying (window chrome etc.)
             if (alwaysRebuild) RequestRebuild();
         }
+
+        // ---- ★ONE PATH / O-0: the synthetic carry -------------------------
+        //
+        // A right-click is a QUICK transfer, not a DIFFERENT kind of transfer.
+        // The drag path earns its correctness from one property -- at every
+        // instant exactly one place owns the unit, and a failure hands it back
+        // to where it came from -- and the click path has never had it: each
+        // branch improvises the same job with a ledger of its own (the drain
+        // hint, the click-remove, the acting spot). This is the plumbing that
+        // lets a click borrow the drag's road instead.
+        //
+        // O-0 builds it and moves NOTHING. Nothing calls the two functions
+        // below yet; the branches arrive one at a time in O-1..O-4, so each
+        // move is a change small enough to judge on its own.
+
+        // Lift a displayed tile into a carry the player never sees. Silent by
+        // design: the route that consumes it plays whatever sound belongs to
+        // the destination, and a pickup clink for a carry that lasted one call
+        // would be a sound with no gesture behind it.
+        [[nodiscard]] bool BeginSyntheticCarry(const Item& a_it)
+        {
+            if (g_held || !a_it.obj) return false;
+            g_held = Held{ a_it.key, a_it.obj, a_it.mask, a_it.count,
+                           a_it.def.bag != 0, a_it.def.scale, 0.0f, 0.0f,
+                           /*justPicked=*/false };
+            g_held->coinValue = a_it.coinValue;
+            g_held->xlIdx = a_it.xlIdx;
+            g_held->uid = a_it.uid;
+            g_held->sig = a_it.sig;
+            g_held->fav = a_it.fav;
+            g_held->stolen = a_it.stolen;
+            g_held->quest = a_it.quest;
+            g_held->SetRot(a_it.rot);
+            g_held->transient = true;
+            return true;
+        }
+
+        // Run one route over a synthetic carry and guarantee the carry is gone
+        // afterwards, whatever the route decided.
+        //
+        // ★A route that returns WITHOUT consuming the carry means "keep
+        // carrying" -- the right answer for a drag over window chrome, and no
+        // answer at all here, because there is no cursor to keep it on. For a
+        // synthetic carry that is a FAILURE, and a failure goes back where it
+        // came from: the tile's layout entry was never erased (a carry does not
+        // erase, the commit does), so the board redraws it exactly where it was.
+        bool RunSyntheticRoute(bool (*a_route)(Held&))
+        {
+            if (!g_held || !g_held->transient) return false;
+            const bool consumed = a_route(*g_held);
+            if (g_held) {
+                // still held: the route declined. Put it back.
+                const std::string key = g_held->key;
+                g_held.reset();
+                RequestRebuild();
+                SKSE::log::info("[ONEPATH] route declined '{}' -- carry returned "
+                                "to its cell", key);
+                return false;
+            }
+            return consumed;
+        }
     }
 
     void FinishFrame()
@@ -12364,6 +12433,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     RequestRebuild();
                 }
             }
+        }
+        // ★ONE PATH / O-0: THE LEAK GUARD. A synthetic carry is born and
+        // consumed inside one call, so one reaching here at all is a bug --
+        // some route kept it without saying so. Insurance rather than
+        // decoration: without this the player would be left holding an
+        // invisible item, unable to click anything else, with no gesture that
+        // could put it down. Return it to its cell and say so loudly.
+        if (g_held && g_held->transient) {
+            const std::string key = g_held->key;
+            g_held.reset();
+            RequestRebuild();
+            SKSE::log::error("[ONEPATH] a synthetic carry survived its call "
+                             "('{}') -- returned to its cell", key);
         }
         if (g_held) {
             auto& held = *g_held;
