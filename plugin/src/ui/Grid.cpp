@@ -11075,36 +11075,53 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // (titlebar / bottom bar) cancels back to its spot.
             if (LootBarter::IsPartnerHovered() &&
                 LootBarter::IsLootMode(LootBarter::CurrentMode())) {
+                // ★★MOVING SOMETHING INSIDE A CHEST MOVES NOTHING. The engine
+                // total does not change, the item does not travel, and the only
+                // thing that happens is that a cell is somewhere else -- which
+                // is now what the code does, instead of pushing a claim onto a
+                // transfer queue and hoping a matcher re-attached it to the
+                // right cell two frames later.
                 const auto sd = LootBarter::QueryStoreDrop();
                 if (sd.onCell && sd.freeSpot) {
-                    // ★(1.3.1) a carry lifted OUT OF A SHELF BAG surfaces
-                    // here: the engine item never moved, so releasing it from
-                    // the bundle is what makes its cell appear -- and the
-                    // pending spot below is what catches that cell at the
-                    // drop cell. A plain partner carry passes through false.
+                    // ★(1.3.1) a carry lifted OUT OF A SHELF BAG surfaces here:
+                    // the engine item never moved, so releasing it from the
+                    // bundle is what makes its cell appear. A plain partner
+                    // carry passes through false.
                     LootBarter::ConsumeBundleCarry(a_held.obj, a_held.count);
-                    LootBarter::NoteStoreSpot(a_held.obj, sd.col, sd.row, HeldInstanceSig(), a_held.rot);
+                    LootBarter::MoveHeldCell(sd.col, sd.row, a_held.rot);
                     if (g_sound) g_sound(a_held.obj, false);
                     g_held.reset();
                 } else if (sd.onCell && sd.occ && LootBarter::IsBundleCarry()) {
                     // (1.3.1) no swap with a bundled carry -- the occupant's
                     // slot machinery has nothing to hand it. Keep carrying.
                 } else if (sd.onCell && sd.occ) {
-                    // swap: the held item takes the occupant's anchor, the
-                    // occupant rides the cursor in its place
-                    LootBarter::NoteStoreSpot(a_held.obj, sd.occCol, sd.occRow, HeldInstanceSig(), a_held.rot);
-                    if (g_sound) g_sound(a_held.obj, false);
-                    const auto occ = sd;   // copy: reset() invalidates the query
-                    g_held.reset();
-                    // GI24: the displaced occupant keeps its OWN identity and its
-                    // OWN pool slot. Picking it up anonymously left its slot in
-                    // the pool unreserved -- position order then handed that slot
-                    // to a sibling, and the occupant itself came back down as a
-                    // fresh arrival in the first free cell.
-                    BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
-                                      -1.0f, -1.0f,
-                                      occ.occUid, occ.occXlIdx, occ.occOrd, occ.occRot);
-                    LootBarter::NoteCarriedSpot(occ.occSpotKey);
+                    // ★Same thing on an occupied square, and the same grammar
+                    // the player's own board uses: the same pool MERGES up to
+                    // the cap (what will not fit keeps riding the cursor);
+                    // anything else trades places.
+                    const int left = LootBarter::MergeHeldCellInto(sd.occSpotKey);
+                    if (left == 0) {
+                        if (g_sound) g_sound(a_held.obj, false);
+                        g_held.reset();
+                    } else if (left > 0) {
+                        a_held.count = left;   // the remainder stays in hand
+                        if (g_sound) g_sound(a_held.obj, false);
+                    } else {
+                        // not a merge: swap. The cells exchange positions and
+                        // the occupant comes to the cursor.
+                        const auto occ = sd;   // copy: reset() invalidates it
+                        LootBarter::SwapHeldCellWith(occ.occSpotKey);
+                        if (g_sound) g_sound(a_held.obj, false);
+                        g_held.reset();
+                        // GI24: the displaced occupant keeps its OWN identity
+                        // and its own cell -- picking it up anonymously used to
+                        // leave that cell unclaimed, and position order then
+                        // handed it to a sibling.
+                        BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
+                                          -1.0f, -1.0f,
+                                          occ.occUid, occ.occXlIdx, occ.occOrd, occ.occRot);
+                        LootBarter::NoteCarriedSpot(occ.occSpotKey);
+                    }
                 } else if (sd.onCell) {
                     // 2+ blockers: keep carrying (player-grid parity)
                 } else {
@@ -11499,9 +11516,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));   // (1.3.3)
                 return true;   // the fragment keeps riding the cursor
             }
+            // ★★THE FRAGMENT AIMS AT A SQUARE TOO, and it was the only store
+            // path that never said so: a whole tile has always honoured its drop
+            // cell, while five potions carefully split off and placed landed in
+            // the front gap. Nothing makes a fragment less aimed than a whole
+            // tile -- it is MORE aimed, since the player already chose how many.
+            const auto sd = LootBarter::QueryStoreDrop();
             LootBarter::RequestStore(a_held.obj, a_held.count,
                                      HeldUidOf(a_held.key, a_held.uid), a_held.sig,
                                      a_held.fav, -1, a_held.key);   // (3) store
+            if (sd.onCell && sd.freeSpot) {
+                LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
+                                            sd.col, sd.row, a_held.rot,
+                                            HeldUidOf(a_held.key, a_held.uid),
+                                            a_held.sig);
+            }
             // fragment (empty key) = form-level pending only
             NotePendingRemove(a_held.obj, a_held.key, a_held.count, a_held.xlIdx);
             g_held.reset();
@@ -11973,6 +12002,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     GoldCoins::DebitLedger(moved);
                 } else if (auto* dst = LootBarter::Partner()) {
                     moved = StoreCoinValueTo(dst, a_held);
+                    // ★S-1: gold is a stack with a big cap on the shelf side, so
+                    // it takes the square it was dropped on exactly as an ingot
+                    // does. The form that lands over there is Gold001, not our
+                    // coin tile -- the mirror is this side's business only.
+                    if (moved > 0) {
+                        const auto sd = LootBarter::QueryStoreDrop();
+                        if (sd.onCell && sd.freeSpot) {
+                            if (auto* vg = GoldCoins::VanillaGold()) {
+                                LootBarter::NoteStoredUnits(vg, moved);
+                                LootBarter::PlaceStoredCell(vg, moved,
+                                                            sd.col, sd.row, 0);
+                            }
+                        }
+                    }
                 }
                 if (moved > 0) {
                     if (GoldCoins::PinnedValue(a_held.key) >= 0) {
@@ -12004,7 +12047,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // the engine removal was still queued).
                     // F7: an empty drop cell rides the slider as a spot hint
                     if (sd.onCell && sd.freeSpot) {
-                        LootBarter::SetStoreSpotHint(a_held.obj, sd.col, sd.row, HeldInstanceSig(), a_held.rot);
+                        LootBarter::AimStoreAt(a_held.obj, sd.col, sd.row,
+                                               HeldInstanceSig(), a_held.rot);
                     }
                     LootBarter::OpenSlider(a_held.obj, a_held.count,
                         LootBarter::XferDir::kStore, a_held.key, 0, a_held.uid, a_held.sig,
@@ -12032,28 +12076,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // non-stackable form are DIFFERENT units, so that is a
                         // swap (rule 20) -- exactly what the partner's own
                         // rearrange path already does. Only a genuine stack
-                        // merges, and the partner shows one aggregate cell per
-                        // stackable form, so same form + cap>1 is that case.
+                        // merges.
                         const bool merging = sd.occ == a_held.obj &&
                                              EffectiveCap(a_held.obj) > 1;
                         if (sd.occ && !merging) {
-                            // F7 rule 4: swap — stored item takes the
-                            // occupant's anchor, the occupant rides the cursor
-                            LootBarter::NoteStoreSpot(a_held.obj, sd.occCol, sd.occRow, HeldInstanceSig(), a_held.rot);
+                            // rule 4: swap — the stored item takes the
+                            // occupant's square, the occupant rides the cursor
+                            const auto occ = sd;   // copy: reset invalidates it
+                            LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
+                                occ.occCol, occ.occRow, a_held.rot,
+                                HeldUidOf(a_held.key, a_held.uid), HeldInstanceSig());
                             g_held.reset();
                             // GI24: same as the rearrange swap — the occupant
-                            // keeps its identity and its pool slot
-                            BeginPartnerCarry(sd.occ, sd.occCount, sd.occValue,
+                            // keeps its identity and its own cell
+                            BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
                                               -1.0f, -1.0f,
-                                              sd.occUid, sd.occXlIdx, sd.occOrd, sd.occRot);
-                            LootBarter::NoteCarriedSpot(sd.occSpotKey);
+                                              occ.occUid, occ.occXlIdx, occ.occOrd, occ.occRot);
+                            LootBarter::NoteCarriedSpot(occ.occSpotKey);
                             RequestRebuild();
                             return true;
                         }
-                        // F7 rule 3: a FREE spot = stored right there
-                        // (2+ blockers leave no spot note -> first-fit)
+                        // rule 3: a FREE square = stored right there. A MERGE
+                        // needs no square of its own -- the reconcile pours the
+                        // arriving units into the cell that is already showing
+                        // them, which is what merging means.
                         if (sd.freeSpot) {
-                            LootBarter::NoteStoreSpot(a_held.obj, sd.col, sd.row, HeldInstanceSig(), a_held.rot);
+                            LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
+                                sd.col, sd.row, a_held.rot,
+                                HeldUidOf(a_held.key, a_held.uid), HeldInstanceSig());
                         }
                     }
                 }

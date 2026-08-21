@@ -273,20 +273,57 @@ namespace FUI::LootBarter
     // for it, or the next drop treats it as a brand-new arrival.
     void NoteCarriedSpot(const std::string& a_spotKey);
 
-    // remember a_obj's spot in the ACTIVE container layout (drop-to-cell /
-    // swap / in-container move); footprint size comes from the def resolver
-    // GI18: a_sig = Grid::HeldInstanceSig() of the unit being stored (0 for a
-    // plain one). The spot is claimed by the matching cell once it lands.
-    // GI62: a_rot = the quarter-turn the player dropped it at. This is how a
-    // rotation crosses from the inventory into a container -- the spot on this
-    // side is created from the hint, so it is created already turned.
-    void NoteStoreSpot(RE::TESBoundObject* a_obj, int a_col, int a_row,
-                       std::uint16_t a_sig = 0, int a_rot = 0);
+    // ---- writing to the container's board ---------------------------------
+    //
+    // ★★★These replace NoteStoreSpot / SetStoreSpotHint, which were NOTES: a
+    // claim pushed onto a pending queue describing where an item ought to end
+    // up once the engine got round to moving it, for a matcher to try to honour
+    // some frames later. The container owns its cells now, so these are writes,
+    // and they take effect the instant the player lets go.
 
-    // drop-cell spot for a STACK store: kept until the quantity slider
-    // confirms (kStore applies it) or cancels
-    void SetStoreSpotHint(RE::TESBoundObject* a_obj, int a_col, int a_row,
-                          std::uint16_t a_sig = 0, int a_rot = 0);
+    // The carried cell (the one this carry was lifted from) lands on an empty
+    // square of the same shelf. No engine transfer is involved -- nothing
+    // enters or leaves the container -- which is what made the old road absurd:
+    // a rearrange had to travel machinery built for transfers.
+    bool MoveHeldCell(int a_col, int a_row, int a_rot);
+
+    // ...or lands on another cell, and the two trade places.
+    bool SwapHeldCellWith(const std::string& a_otherKey);
+
+    // ...or lands on a cell holding the same thing, and they become one up to
+    // the cap. Returns what would not fit (0 = all of it went, -1 = not a
+    // merge at all); the caller keeps carrying the remainder.
+    int MergeHeldCellInto(const std::string& a_otherKey);
+
+    // A PLAYER item put down on the shelf: the cell exists from this instant.
+    // The engine transfer backing it is queued separately and lands next Tick;
+    // the promised-units ledger keeps the reconcile from doubting the cell in
+    // between. a_rot = the quarter-turn it was dropped at, which is how a
+    // rotation crosses from the inventory into a container.
+    // ★a_uid/a_sig name the POOL the arriving units belong to, and they are
+    // not decoration: the reconcile matches this cell to the engine by pool, so
+    // a cell minted without the unit's uid sits in a pool nothing arrives into
+    // and is swept away on the very next pass -- the aimed square would be lost
+    // for exactly the items most worth aiming (a named weapon, a tempered one).
+    void PlaceStoredCell(RE::TESBoundObject* a_obj, int a_count,
+                         int a_col, int a_row, int a_rot = 0,
+                         std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);
+
+    // A store with no aimed square (right-click, take-all, a slider the player
+    // opened from the list): no cell is placed, but the units still have to
+    // count as present until the engine catches up, or the reconcile would show
+    // them arriving twice.
+    void NoteStoredUnits(RE::TESBoundObject* a_obj, int a_count,
+                         std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);
+
+    // A stack store opens a quantity popup first, and the square the player
+    // aimed at has to survive that round trip -- the drop happened before
+    // the number was known. Remembered here, spent by the confirm (which
+    // then calls PlaceStoredCell with the chosen amount), dropped on cancel.
+    // ★Not a claim on a future cell like the old pending-spot queue: it is
+    // one square, held across one modal, for one carry.
+    void AimStoreAt(RE::TESBoundObject* a_obj, int a_col, int a_row,
+                    std::uint16_t a_sig = 0, int a_rot = 0);
 
     // cosave 'GCLY' v1: container ref FormID -> (item key -> spot), LRU 128.
     // main.cpp owns the record loop.

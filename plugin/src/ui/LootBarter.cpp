@@ -136,6 +136,58 @@ namespace FUI::LootBarter
             }
         }
 
+        // ---- units this side has been PROMISED --------------------------------
+        //
+        // ★★THE EXACT MIRROR OF g_outPool, and the piece the board model needs
+        // that the derivation never did. A store is queued from the render pass
+        // and applied on the next Tick, so for those few frames the container
+        // does not hold the units yet -- while the board ALREADY shows a cell for
+        // them, because the drop is what created that cell. Without this the
+        // reconcile would find a cell the engine cannot account for and shrink it
+        // away before it ever drew: the item would blink out and reappear
+        // somewhere else, which is the store half of every placement complaint.
+        //
+        // Same TTL escape as the out ledger: a request that never reached the
+        // engine must not prop up a phantom cell for the rest of the session.
+        struct InUnits
+        {
+            RE::FormID    form = 0;
+            std::uint16_t uid = 0;
+            std::uint16_t sig = 0;
+            int           count = 0;
+        };
+        std::map<std::string, InUnits>        g_in;
+        std::chrono::steady_clock::time_point g_inWhen{};
+
+        void NoteIn(RE::TESBoundObject* a_obj, std::uint16_t a_uid, std::uint16_t a_sig,
+                    int a_count)
+        {
+            if (!a_obj || a_count <= 0) return;
+            auto& e = g_in[OutKey(a_obj->GetFormID(), a_uid, a_sig)];
+            e.form = a_obj->GetFormID();
+            e.uid = a_uid;
+            e.sig = a_sig;
+            e.count += a_count;
+            g_inWhen = std::chrono::steady_clock::now();
+        }
+
+        void ClearIn(RE::TESBoundObject* a_obj, std::uint16_t a_uid, std::uint16_t a_sig,
+                     int a_count)
+        {
+            if (!a_obj || a_count <= 0) return;
+            const auto k = OutKey(a_obj->GetFormID(), a_uid, a_sig);
+            if (auto it = g_in.find(k); it != g_in.end()) {
+                it->second.count -= a_count;
+                if (it->second.count <= 0) g_in.erase(it);
+            }
+        }
+
+        void SweepIn()
+        {
+            if (g_in.empty()) return;
+            if (std::chrono::steady_clock::now() - g_inWhen > kOutTTL) g_in.clear();
+        }
+
         // Vanilla speech XP for a barter transaction: the skill-use points are
         // the BASE value of the goods (the haggled price doesn't matter), fed
         // through the AVIF skill-use curve xp = useMult * points + offsetMult.
@@ -194,11 +246,43 @@ namespace FUI::LootBarter
         bool g_merchGoldInf = false;
         bool g_merchBuysAll = false;
 
-        // ---- F7: per-container remembered spots (kLoot / kSteal) ----
-        // Key = "Plugin.esp|0xLocalID" (load-order stable, mirrors the grid);
-        // absent items KEEP their spot (re-storing the same form returns it).
-        struct ContSpot
+        // ---- THE CONTAINER'S BOARD ----------------------------------------
+        //
+        // ★★★A CELL, NOT A REMEMBERED POSITION. This is the change the whole
+        // module turns on, so it is worth saying why plainly.
+        //
+        // The player's board keeps a real layout: a tile owns its position AND
+        // its count, and the engine inventory is something the rebuild
+        // RECONCILES against. Moving a tile is two field writes. This side used
+        // to keep only positions, and rebuild every cell from the engine every
+        // frame -- then run a three-tier matcher to guess which freshly derived
+        // cell inherited which remembered position. There was no icon to move:
+        // the cell the player dragged stopped existing at the end of the frame.
+        //
+        // While a form owned exactly one cell there was nothing to guess between
+        // and none of this showed. The moment a form owned several -- gold, and
+        // then every stack -- the guessing became the behaviour: dragging one
+        // cell moved another, stores landed in the front gap, amounts shuffled.
+        // Those were not separate bugs.
+        //
+        // So the cell is the state now. The engine total is an input to a
+        // reconcile pass, never the source of cells, and every operation is a
+        // write: move = col/row, merge = count, take = count, store = a new
+        // cell. The matcher, the pending-spot queue and the acting-spot dance
+        // are gone with the derivation that needed them.
+        //
+        // Key = an OPAQUE id ("Plugin.esp|0xLocalID" possibly with #n). Nothing
+        // parses it any more -- what the cell holds is in the fields below.
+        struct ContCell
         {
+            // ---- WHAT ----
+            // ★The form used to be recovered by parsing the key, which is what
+            // made a cell's identity depend on its NAME. It is a field.
+            RE::FormID form = 0;
+            int        count = 0;   // ★units in this cell (never above the cap)
+            int        xlIdx = -1;  // which extra list, for a per-unit cell
+
+            // ---- WHERE ----
             int col = -1;
             int row = -1;
             int w = 1;   // footprint at record time: absent spots still hold
@@ -235,10 +319,18 @@ namespace FUI::LootBarter
         };
         struct ContLayout
         {
-            std::map<std::string, ContSpot> spots;
+            std::map<std::string, ContCell> cells;
             std::uint32_t                   stamp = 0;   // LRU recency
         };
         std::unordered_map<RE::FormID, ContLayout> g_contLayouts;
+        // ★★A MERCHANT'S BOARD IS REAL TOO, it just is not remembered. Barter
+        // used to run a separate derive-and-auto-pack path because it had no
+        // spot memory to consult; now it gets an ordinary layout that lives for
+        // as long as the window is open and is never written to a save. One code
+        // path, and the difference between a chest and a shop is only whether
+        // the board outlives the visit.
+        ContLayout g_barterBoard;
+
         // ★★ASKED OF THE LAYOUT, NOT CARRIED ON THE CELL. The amount was
         // being copied onto PartnerCell during slot assignment and read back
         // at draw time -- one hop too many: the cell list is rebuilt between
@@ -336,23 +428,6 @@ namespace FUI::LootBarter
         // when the player lets go -- and by then its ordinal in THIS container
         // is unknown anyway. (form, sig) is the only identity that survives the
         // move: the ExtraDataList travels intact, so its signature does too.
-        struct PendingSpot
-        {
-            RE::FormID    form = 0;
-            std::uint16_t sig = 0;
-            int           col = -1;
-            int           row = -1;
-            // GI23: for a REARRANGE, the slot the carry took with it. Empty for a
-            // store, where the unit has no slot here yet. Guessing which slot to
-            // move ("reuse the first one in the pool") picked a sibling's slot,
-            // so dragging the second dagger somewhere moved the FIRST one.
-            std::string   slotKey;
-            // GI62: the angle the player dropped it at. This is the whole reason
-            // a turn survives inventory -> container: the spot on the other side
-            // is created FROM this hint, so it is created already turned.
-            int           rot = 0;
-        };
-        std::vector<PendingSpot> g_pendingSpots;
 
         // GI20: the pool slot of the cell the player is acting on. A take must
         // free THAT slot; without it the pool merely loses its trailing position
@@ -360,7 +435,13 @@ namespace FUI::LootBarter
         // looting follow storage order instead of the cursor.
         std::string g_actingSpot;
 
-        void ConsumeActingSpot(RE::TESBoundObject* a_obj)
+        // ★★A TAKE SPENDS A CELL, it does not necessarily END one. The cell
+        // used to be erased outright, which was right only because a form owned
+        // exactly one cell and taking meant taking all of it. A cell owns a count
+        // now, so a take of three out of ten leaves seven where they were --
+        // and the pouch's gold and the bag's bundle are only handed back when the
+        // cell actually empties, which is the moment the thing truly leaves.
+        void ConsumeActingSpot(RE::TESBoundObject* a_obj, int a_count)
         {
             if (g_actingSpot.empty()) return;
             std::vector<BundleItem> bundle;
@@ -374,8 +455,15 @@ namespace FUI::LootBarter
                     // single take never tripped it and the amount died with the
                     // spot ("pouch returned but nothing was away"). Deposit
                     // first, then retire.
-                    if (const auto si = ci->second.spots.find(g_actingSpot);
-                        si != ci->second.spots.end()) {
+                    if (const auto si = ci->second.cells.find(g_actingSpot);
+                        si != ci->second.cells.end()) {
+                        si->second.count -= (std::max)(0, a_count);
+                        if (si->second.count > 0) {
+                            // part of the cell stayed: nothing retires, and the
+                            // acting key clears so the next click names its own
+                            g_actingSpot.clear();
+                            return;
+                        }
                         if (si->second.gold > 0) {
                             SKSE::log::info("[LOOT] pouch taken back with {} G ('{}')",
                                 si->second.gold, g_actingSpot);
@@ -387,7 +475,7 @@ namespace FUI::LootBarter
                         // re-enter this function and must find it empty).
                         bundle = std::move(si->second.bundle);
                     }
-                    ci->second.spots.erase(g_actingSpot);
+                    ci->second.cells.erase(g_actingSpot);
                 }
             }
             g_actingSpot.clear();
@@ -575,7 +663,7 @@ namespace FUI::LootBarter
                 auto victim = g_contLayouts.end();
                 for (auto it = g_contLayouts.begin(); it != g_contLayouts.end(); ++it) {
                     bool banks = false;
-                    for (const auto& [k, s] : it->second.spots) {
+                    for (const auto& [k, s] : it->second.cells) {
                         if (s.gold > 0) { banks = true; break; }
                     }
                     if (banks) continue;
@@ -651,9 +739,14 @@ namespace FUI::LootBarter
         Grid::ClearDropHint();            // B2
         g_slider.active = false;
         g_confirm.active = false;
-        g_storeHint = {};        // F7: session-scoped drop hint (the grid geometry
-        g_pendingSpots.clear();  // re-arms per frame in DrawWindows — kNormal
+        g_storeHint = {};        // F7: session-scoped aim (the grid geometry
                                  // leaves it dead, so no teardown needed here)
+        g_in.clear();            // promises whose transfers were just flushed
+        // ★A merchant's board lives exactly as long as the visit. It is a real
+        // board while the window is open -- one code path with a chest -- and
+        // it is never written to a save, because a shop restocks and its shelf
+        // is not a place the player arranged.
+        g_barterBoard.cells.clear();
         // (1.3.0-C) a leaving-pouch hint whose transfer never fired (lost
         // pick roll, refused move) must not name a tile for the NEXT session
         GoldCoins::NotePouchLeaving({});
@@ -793,7 +886,7 @@ namespace FUI::LootBarter
             req.useAfter = a_useAfter;
             g_xfer.push_back(std::move(req));
             NoteOut(a_obj, a_uid, a_sig, a_count);
-            ConsumeActingSpot(a_obj);   // GI20: the hovered cell's slot, not the last one
+            ConsumeActingSpot(a_obj, a_count);   // GI20: the hovered cell's slot, not the last one
             ConsumeBundleCarry(a_obj, a_count);   // (1.3.1) a shelf-bag carry taken home
             return true;
         }
@@ -807,6 +900,9 @@ namespace FUI::LootBarter
         if (a_obj && a_count > 0) {
             g_xfer.push_back({ XferReq::kStore, a_obj, a_count, 0, 0, a_srcKey,
                                a_uid, a_sig, false, a_fav, a_xlIdx });
+            // ★the units are the container's from this instant, whatever the
+            // engine has got round to (see g_in)
+            NoteIn(a_obj, a_uid, a_sig, a_count);
             // ★B4-3b: the ledger's books open when the PLAYER commits -- the
             // same moment the removal counters arm (NotePendingRemove rides
             // beside every caller of this function). Submitting from the
@@ -832,7 +928,7 @@ namespace FUI::LootBarter
             g_xfer.push_back({ XferReq::kBuy, a_obj, a_count, a_price, a_baseTotal,
                                {}, a_uid, a_sig });
             NoteOut(a_obj, a_uid, a_sig, a_count);
-            ConsumeActingSpot(a_obj);   // GI20
+            ConsumeActingSpot(a_obj, a_count);   // GI20
         }
     }
 
@@ -862,7 +958,7 @@ namespace FUI::LootBarter
             g_xfer.push_back({ XferReq::kPickTake, a_obj, a_count, 0, 0, {}, a_uid, a_sig,
                                a_fromWorn });
             NoteOut(a_obj, a_uid, a_sig, a_count);
-            ConsumeActingSpot(a_obj);   // GI25
+            ConsumeActingSpot(a_obj, a_count);   // GI25
         }
     }
 
@@ -873,6 +969,7 @@ namespace FUI::LootBarter
         if (a_obj && a_count > 0) {
             g_xfer.push_back({ XferReq::kPickStore, a_obj, a_count, 0, 0, a_srcKey,
                                a_uid, a_sig, false, a_fav, a_xlIdx });
+            NoteIn(a_obj, a_uid, a_sig, a_count);   // see RequestStore
             // Every other player -> partner direction suppresses the tile at
             // REQUEST time; only this one waited for the Tick, so the planted
             // item sat back down on the board for a frame or two before being
@@ -1064,6 +1161,7 @@ namespace FUI::LootBarter
                 }
                 // (B4-3c: no counter to drain -- the engine event that this
                 // call just fired has already confirmed the ledger entry)
+                ClearIn(r.obj, r.uid, r.sig, r.count);   // the engine caught up
                 itemSound(r.obj, false);
                 break;
             }
@@ -1217,6 +1315,7 @@ namespace FUI::LootBarter
                     // put in place at click time
                     g_outPool.clear();
                     g_outForm.clear();
+                    g_in.clear();   // ...and nothing was promised to them either
                     // B4-3c: the counter drains that lived here went with the
                     // counters. r rides in g_xfer too -- its own ledger entry
                     // cancels with the queue's in one sweep.
@@ -1268,6 +1367,7 @@ namespace FUI::LootBarter
                         SKSE::log::info("[PICK] Poisoned perk: applied to mark");
                     }
                 }
+                ClearIn(r.obj, r.uid, r.sig, r.count);   // the engine caught up
                 itemSound(r.obj, false);
                 break;
             }
@@ -1511,8 +1611,9 @@ namespace FUI::LootBarter
                 // F7: a stack dropped on an empty container cell carried its
                 // drop spot through the slider — apply it on confirm
                 if (g_storeHint.obj == g_slider.obj && g_storeHint.col >= 0) {
-                    NoteStoreSpot(g_storeHint.obj, g_storeHint.col, g_storeHint.row,
-                                  g_storeHint.sig, g_storeHint.rot);
+                    PlaceStoredCell(g_storeHint.obj, g_slider.value,
+                                    g_storeHint.col, g_storeHint.row,
+                                    g_storeHint.rot, g_slider.uid, g_storeHint.sig);
                 }
                 g_storeHint = {};   // GI18: the pending claim stays — the
                                     // item has not reached the container yet
@@ -1647,8 +1748,8 @@ namespace
         if (!p) return 0;
         const auto ci = g_contLayouts.find(p->GetFormID());
         if (ci == g_contLayouts.end()) return 0;
-        const auto si = ci->second.spots.find(a_spotKey);
-        return si == ci->second.spots.end() ? 0 : si->second.gold;
+        const auto si = ci->second.cells.find(a_spotKey);
+        return si == ci->second.cells.end() ? 0 : si->second.gold;
     }
 }
 
@@ -1690,8 +1791,8 @@ namespace
         g_bundleCarry.active = false;
         const auto ci = g_contLayouts.find(g_bundleCarry.cont);
         if (ci == g_contLayouts.end()) return true;
-        const auto si = ci->second.spots.find(g_bundleCarry.spot);
-        if (si == ci->second.spots.end()) return true;
+        const auto si = ci->second.cells.find(g_bundleCarry.spot);
+        if (si == ci->second.cells.end()) return true;
         auto& bundle = si->second.bundle;
         // the anchor names the exact entry; fall back to (form, sig)
         auto it = std::find_if(bundle.begin(), bundle.end(), [&](const BundleItem& b) {
@@ -1725,8 +1826,8 @@ namespace
         bool DrawOneShelfBag(RE::TESObjectREFR* p, ContLayout& a_cl,
                              const ShelfBagWin& a_w, int a_ord)
         {
-        const auto si = a_cl.spots.find(a_w.spot);
-        if (si == a_cl.spots.end()) return false;   // the bag left the shelf
+        const auto si = a_cl.cells.find(a_w.spot);
+        if (si == a_cl.cells.end()) return false;   // the bag left the shelf
         auto& bundle = si->second.bundle;
         auto* bagObj = RE::TESForm::LookupByID<RE::TESBoundObject>(a_w.form);
         if (!bagObj) return false;
@@ -1864,7 +1965,7 @@ namespace
                 // already-bundled counts across THIS container hide cells;
                 // collect only what is still loose
                 std::map<RE::FormID, int> taken;
-                for (const auto& [k2, s2] : a_cl.spots) {
+                for (const auto& [k2, s2] : a_cl.cells) {
                     for (const auto& b2 : s2.bundle) taken[b2.form] += b2.count;
                 }
                 int swept = 0;
@@ -2116,8 +2217,8 @@ namespace
                             if (const auto sci = g_contLayouts.find(g_bundleCarry.cont);
                                 sci != g_contLayouts.end()) {
                                 if (const auto ssi =
-                                        sci->second.spots.find(g_bundleCarry.spot);
-                                    ssi != sci->second.spots.end()) {
+                                        sci->second.cells.find(g_bundleCarry.spot);
+                                    ssi != sci->second.cells.end()) {
                                     auto& srcB = ssi->second.bundle;
                                     const auto bit = std::find_if(srcB.begin(),
                                         srcB.end(), [&](const BundleItem& b) {
@@ -2142,7 +2243,7 @@ namespace
                             // off the shelf, into the bag: retire its slot --
                             // the engine item never moves, the entry hides it
                             if (!g_actingSpot.empty()) {
-                                a_cl.spots.erase(g_actingSpot);
+                                a_cl.cells.erase(g_actingSpot);
                                 g_actingSpot.clear();
                             }
                             // off a shelf cell: the container's own ownership
@@ -2218,8 +2319,8 @@ namespace
         if (!p) { g_shelfPouchSpot.clear(); return; }
         const auto ci = g_contLayouts.find(p->GetFormID());
         if (ci == g_contLayouts.end()) { g_shelfPouchSpot.clear(); return; }
-        const auto si = ci->second.spots.find(g_shelfPouchSpot);
-        if (si == ci->second.spots.end()) {   // the pouch left the shelf
+        const auto si = ci->second.cells.find(g_shelfPouchSpot);
+        if (si == ci->second.cells.end()) {   // the pouch left the shelf
             g_shelfPouchSpot.clear();
             return;
         }
@@ -2321,8 +2422,8 @@ namespace
         if (!p) return 0;
         const auto ci = g_contLayouts.find(p->GetFormID());
         if (ci == g_contLayouts.end()) return 0;
-        const auto si = ci->second.spots.find(sd.occSpotKey);
-        if (si == ci->second.spots.end()) return 0;
+        const auto si = ci->second.cells.find(sd.occSpotKey);
+        if (si == ci->second.cells.end()) return 0;
         const int room = GoldCoins::PouchCap() - si->second.gold;
         const int moved = (std::min)(a_value, room);
         if (moved <= 0) return 0;   // full: the coin keeps riding
@@ -2591,10 +2692,304 @@ namespace
         }
 
         // stage 1: collect partner items (worn included, for corpses)
+        // The engine's own snapshot type. Taken once per frame and passed
+        // around: GetInventory allocates every entry it returns, so asking
+        // twice would be two walks and two sets of pointers.
+        using InvMap = RE::TESObjectREFR::InventoryItemMap;
+
+        // ---- POOL IDENTITY --------------------------------------------------
+        //
+        // What makes two units interchangeable: the same form, the same naming
+        // handle, the same worn-ness. Cells of one pool differ only in HOW MANY
+        // they hold, which is exactly why the reconcile below may move units
+        // between them freely and must never move them across.
+        std::string PoolOf(RE::FormID a_form, std::uint16_t a_uid,
+                           std::uint16_t a_sig, bool a_worn)
+        {
+            char buf[48];
+            std::snprintf(buf, sizeof(buf), "%08X@%04X~%04X%c",
+                          a_form, a_uid, a_sig, a_worn ? 'W' : '.');
+            return buf;
+        }
+        std::string PoolOf(const ContCell& a_c)
+        {
+            return PoolOf(a_c.form, a_c.uid, a_c.sig, a_c.worn);
+        }
+
+        // A fresh opaque id for a new cell in this container. It reads like a
+        // form key because that is pleasant in a log; nothing parses it.
+        std::string MintCellKey(ContLayout& a_cl, RE::TESBoundObject* a_obj)
+        {
+            const std::string base = PartnerKey(a_obj, 0, 0, 0);
+            for (int n = 0;; ++n) {
+                std::string k = n == 0 ? base : base + "#" + std::to_string(n);
+                if (!a_cl.cells.contains(k)) return k;
+            }
+        }
+
+        // ★Is this cell the one riding the cursor? It used to be asked as "is
+        // this UNIT held", matched by a per-form ordinal computed while cells
+        // were being derived -- which could name a different cell, or none, the
+        // moment a form owned more than one. A carry names a cell.
+        bool HeldCell(const std::string& a_key)
+        {
+            return !a_key.empty() && a_key == g_actingSpot &&
+                   Grid::HeldPartnerObject() != nullptr;
+        }
+
+        ContLayout* BoardFor()
+        {
+            auto* p = Partner();
+            if (!p) return nullptr;
+            if (SpotMemoryOn()) return &g_contLayouts[p->GetFormID()];
+            return &g_barterBoard;
+        }
+
+        // ---- RECONCILE ------------------------------------------------------
+        //
+        // ★★★THE ONE PLACE THE ENGINE TOUCHES THIS BOARD, and it touches it as a
+        // CORRECTION rather than as a source. Everything the player does writes
+        // to the cells directly -- move is col/row, merge is count, take is
+        // count, store is a new cell -- and this pass exists only to answer the
+        // question those writes cannot: what changed underneath us. A script
+        // emptied the barrel, a follower ate something, a transfer we queued
+        // finally landed.
+        //
+        // It is the player board's ACQUIRE/RELEASE, said on this side:
+        //   want > have -> fill partial cells in position order, then add
+        //                  cap-sized cells
+        //   want < have -> shrink from the back, delete what empties
+        //   no engine presence at all -> the cells of that pool die (and their
+        //                  pouch gold goes home, exactly as before)
+        //
+        // ★DELETION COMES LAST, and that ordering is the whole migration. A save
+        // written before cells owned a count reads back count 0 -- which means
+        // "unspecified", not "empty" -- and the fill phase pours the container's
+        // real contents into those cells in the positions they were left in. Had
+        // the empty check run first, every shelf in every save would have been
+        // swept and re-first-fitted once.
+        struct SeenPool
+        {
+            RE::TESBoundObject* obj = nullptr;
+            std::uint16_t       uid = 0;
+            std::uint16_t       sig = 0;
+            int                 xlIdx = -1;
+            bool                worn = false;
+            int                 count = 0;
+            int                 w = 1;
+            int                 h = 1;
+        };
+
+        void ReconcileContainer(ContLayout& a_cl, RE::TESObjectREFR* a_source,
+                                const InvMap& a_inv)
+        {
+            // ---- 1. what the engine says is in here ----
+            // working copies: units already committed to the player leave this
+            // board NOW, not one Tick later (see g_outPool), and units riding
+            // inside a shelved bag are the bag's, not the shelf's.
+            auto outPool = g_outPool;
+            auto outForm = g_outForm;
+            std::map<RE::FormID, int> bundled;
+            for (const auto& [k, c] : a_cl.cells) {
+                for (const auto& b : c.bundle) bundled[b.form] += b.count;
+            }
+            if (auto* pref = Partner()) {
+                for (const auto& pb : g_pendingBundles) {
+                    if (pb.cont != pref->GetFormID()) continue;
+                    for (const auto& b : pb.items) bundled[b.form] += b.count;
+                }
+            }
+
+            std::map<std::string, SeenPool> seen;
+            for (auto& [obj, data] : a_inv) {
+                const int count = data.first;
+                if (!obj || count <= 0) continue;
+                // barter: the merchant's gold is BOOKKEEPING (shown in the
+                // bottom bar), not a purchasable ware
+                if (g_mode == Mode::kBarter && obj->IsGold()) continue;
+                const char* name = obj->GetName();
+                if (!name || !*name) continue;       // unnamed (our coins) skipped
+                if (!obj->GetPlayable()) continue;   // vanilla parity: hidden forms
+                auto*      entry = data.second.get();
+                const auto def = Grid::ResolveDef(obj);
+                const int  dw = (std::max)(1, def.w);
+                const int  dh = (std::max)(1, def.h);
+
+                // GI13: gear (cap 1) is enumerated per UNIT, matching the player
+                // grid -- a tempered dagger and a plain one are never one cell.
+                // Stackables stay one pool: their units really are
+                // interchangeable, and one pool per arrow would be absurd.
+                // Worn units are KEPT (a_skipWorn=false): on a corpse or a
+                // pickpocket target, what the NPC is wearing is the point.
+                const bool perUnit = Grid::StackCap(obj) <= 1;
+                std::vector<Grid::UnitRef> units;
+                if (perUnit) Grid::EnumerateUnits(entry, count, units, false);
+                if (units.empty()) units.push_back({ 0, 0, -1 });
+
+                for (const auto& u : units) {
+                    int have = perUnit ? 1 : count;
+                    {   // already promised to the player
+                        auto pi = outPool.find(OutKey(obj->GetFormID(), u.uid, u.sig));
+                        auto fi = outForm.find(obj->GetFormID());
+                        int  owed = 0;
+                        if (pi != outPool.end() && pi->second > 0)      owed = pi->second;
+                        else if (fi != outForm.end() && fi->second > 0) owed = fi->second;
+                        if (owed > 0) {
+                            // both counters track the same units, so they have
+                            // to fall together or a later cell is hidden twice
+                            const int take = (std::min)(owed, have);
+                            if (pi != outPool.end()) pi->second = (std::max)(0, pi->second - take);
+                            if (fi != outForm.end()) fi->second = (std::max)(0, fi->second - take);
+                            have -= take;
+                        }
+                    }
+                    if (auto bi = bundled.find(obj->GetFormID());
+                        bi != bundled.end() && bi->second > 0 && have > 0) {
+                        const int hide = (std::min)(bi->second, have);
+                        bi->second -= hide;
+                        have -= hide;
+                    }
+                    if (have <= 0) continue;
+
+                    bool worn = u.worn;
+                    // A STACKABLE's placeholder unit resolves to no list at all,
+                    // so an equipped torch on a mark reported "not worn": no
+                    // tint, and no pickpocket lock. Ask the entry instead.
+                    if (!perUnit && !worn && entry && entry->extraLists) {
+                        for (auto* x2 : *entry->extraLists) {
+                            if (x2 && (x2->HasType<RE::ExtraWorn>() ||
+                                       x2->HasType<RE::ExtraWornLeft>())) {
+                                worn = true;
+                                break;
+                            }
+                        }
+                    }
+                    auto& sp = seen[PoolOf(obj->GetFormID(), u.uid, u.sig, worn)];
+                    sp.obj = obj;
+                    sp.uid = u.uid;
+                    sp.sig = u.sig;
+                    sp.xlIdx = u.xlIdx;
+                    sp.worn = worn;
+                    sp.w = dw;
+                    sp.h = dh;
+                    sp.count += have;
+                }
+            }
+
+            // ★Units we have promised this container but the engine has not
+            // moved yet count as PRESENT. See g_in: the cell for them already
+            // exists, because the drop is what made it.
+            for (const auto& [k, e] : g_in) {
+                auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(e.form);
+                if (!obj || e.count <= 0) continue;
+                auto&      sp = seen[PoolOf(e.form, e.uid, e.sig, false)];
+                const auto def = Grid::ResolveDef(obj);
+                sp.obj = obj;
+                sp.uid = e.uid;
+                sp.sig = e.sig;
+                sp.worn = false;
+                sp.w = (std::max)(1, def.w);
+                sp.h = (std::max)(1, def.h);
+                sp.count += e.count;
+            }
+
+            // ---- 2. bring the cells into line, pool by pool ----
+            std::map<std::string, std::vector<std::string>> byPool;
+            for (const auto& [k, c] : a_cl.cells) byPool[PoolOf(c)].push_back(k);
+            const auto inOrder = [&](std::vector<std::string>& a_keys) {
+                std::sort(a_keys.begin(), a_keys.end(),
+                    [&](const std::string& x, const std::string& y) {
+                        const auto& cx = a_cl.cells[x];
+                        const auto& cy = a_cl.cells[y];
+                        if (cx.row != cy.row) return cx.row < cy.row;
+                        if (cx.col != cy.col) return cx.col < cy.col;
+                        return x < y;
+                    });
+            };
+
+            for (auto& [pool, sp] : seen) {
+                const int cap = (std::max)(1, Grid::StackCap(sp.obj));
+                auto&     mine = byPool[pool];
+                inOrder(mine);
+                int have = 0;
+                for (const auto& k : mine) have += (std::max)(0, a_cl.cells[k].count);
+                int diff = sp.count - have;
+
+                if (diff > 0) {
+                    // fill what is already on the shelf, front first...
+                    for (const auto& k : mine) {
+                        if (diff <= 0) break;
+                        auto&     c = a_cl.cells[k];
+                        const int room = cap - (std::max)(0, c.count);
+                        if (room <= 0) continue;
+                        const int add = (std::min)(room, diff);
+                        c.count = (std::max)(0, c.count) + add;
+                        diff -= add;
+                    }
+                    // ...then lay out new cells for the rest
+                    while (diff > 0) {
+                        const int take = (std::min)(cap, diff);
+                        ContCell  nc;
+                        nc.form = sp.obj->GetFormID();
+                        nc.uid = sp.uid;
+                        nc.sig = sp.sig;
+                        nc.xlIdx = sp.xlIdx;
+                        nc.worn = sp.worn;
+                        nc.count = take;
+                        nc.w = sp.w;
+                        nc.h = sp.h;
+                        // col/row left at -1: the placement pass first-fits it
+                        const std::string k = MintCellKey(a_cl, sp.obj);
+                        // ★A bag arriving on the shelf claims the bundle its
+                        // store queued, and a pouch claims the gold that walked
+                        // out with it. This is where a cell is BORN now -- there
+                        // used to be three such doors and they disagreed.
+                        nc.bundle = TakePendingBundle(nc.form);
+                        if (GoldCoins::IsPouch(nc.form)) {
+                            nc.gold = GoldCoins::TakeAwayGold();
+                            if (nc.gold > 0) {
+                                SKSE::log::info("[LOOT] pouch shelved with {} G ('{}')",
+                                                nc.gold, k);
+                            }
+                        }
+                        a_cl.cells[k] = std::move(nc);
+                        mine.push_back(k);
+                        diff -= take;
+                    }
+                } else if (diff < 0) {
+                    // shrink from the back, so what the player put in front
+                    // stays where they put it
+                    int owe = -diff;
+                    for (auto it = mine.rbegin(); it != mine.rend() && owe > 0; ++it) {
+                        auto&     c = a_cl.cells[*it];
+                        const int cut = (std::min)(owe, (std::max)(0, c.count));
+                        c.count -= cut;
+                        owe -= cut;
+                    }
+                }
+            }
+
+            // ---- 3. and only now, what is gone is gone ----
+            // A cell whose pool the engine no longer reports, or that ended this
+            // pass holding nothing. ★Same death rites as before: a pouch's money
+            // goes home rather than dying with its cell, and a bag's bundle is
+            // handed back the same way.
+            for (auto it = a_cl.cells.begin(); it != a_cl.cells.end();) {
+                const bool poolGone = !seen.contains(PoolOf(it->second));
+                if (!poolGone && it->second.count > 0) { ++it; continue; }
+                if (it->second.gold > 0) {
+                    SKSE::log::info("[LOOT] shelf cell dropped, {} G goes home ('{}')",
+                                    it->second.gold, it->first);
+                    GoldCoins::GiveAwayGold(it->second.gold);
+                }
+                it = a_cl.cells.erase(it);
+            }
+        }
+
         std::vector<PartnerCell> CollectPartnerCells(RE::TESObjectREFR* source)
         {
             std::vector<PartnerCell> cells;
-            // GI20: the acting slot only lives as long as the interaction that
+            // GI20: the acting cell only lives as long as the interaction that
             // named it. A carry that gets cancelled, or a quantity slider that
             // gets closed, must not leave it primed for the NEXT take.
             if (!Grid::IsHolding() && !g_slider.active && !g_confirm.active) {
@@ -2606,203 +3001,72 @@ namespace
                                                 // its bag -- nothing to undo
             }
             SweepOut();
-            // working copy: units already committed to the player leave this
-            // board NOW, not one Tick later (see g_outPool)
-            auto outPool = g_outPool;
-            auto outForm = g_outForm;
-            // ★(1.3.0-D) how many of each form ride inside stored bags HERE:
-            // spot bundles of this container, plus bundles still waiting for
-            // their bag's spot to be born (so nothing flashes for a frame).
-            // Rebuilt per pass -- dropping a bundle un-hides by itself.
-            std::map<RE::FormID, int> bundled;
-            if (auto* pref = Partner()) {
-                if (const auto ci = g_contLayouts.find(pref->GetFormID());
-                    ci != g_contLayouts.end()) {
-                    for (const auto& [k, s] : ci->second.spots) {
-                        for (const auto& b : s.bundle) bundled[b.form] += b.count;
-                    }
-                }
-                for (const auto& pb : g_pendingBundles) {
-                    if (pb.cont != pref->GetFormID()) continue;
-                    for (const auto& b : pb.items) bundled[b.form] += b.count;
-                }
-            }
-            // Vanilla-style: one cell per item form with a stack-count badge (no
-            // Mabinogi split on the partner side, per spec). Read-only in Phase 2.
-            for (auto& [obj, data] : source->GetInventory()) {
-                const int count = data.first;
-                if (!obj || count <= 0) continue;
-                // barter: the merchant's gold is BOOKKEEPING (shown in the bottom
-                // bar), not a purchasable ware — hide the raw Gold001 cell
-                if (g_mode == Mode::kBarter && obj->IsGold()) continue;
-                // F7: while a spot-memory grid item rides the cursor its cell
-                // FREES UP (the remembered spot in `spots` restores it on a
-                // cancel) — required so a swap can seat the incoming item on
-                // the occupant's anchor. Barter keeps the old reserve-the-slot
-                // behaviour (DrawPartnerCells hides it instead).
-                // (the carried-unit skip is per UNIT now -- see the loop below)
-                const char* name = obj->GetName();
-                if (!name || !*name) continue;   // unnamed (e.g. our coins) skipped
-                if (!obj->GetPlayable()) continue;   // vanilla parity: hidden forms
-                const int value = data.second ? data.second->GetValue() : 0;
-                const auto def = Grid::ResolveDef(obj);   // real footprint (sword 1x3 etc.)
-                auto* entry = data.second.get();
-                const int dw = (std::max)(1, def.w);
-                const int dh = (std::max)(1, def.h);
+            SweepIn();
+            auto* cl = BoardFor();
+            if (!cl) return cells;
 
-                // GI13: gear (cap 1) is enumerated per UNIT, matching the player
-                // grid. Before this a tempered dagger and a plain one collapsed
-                // into ONE cell with a "x2" badge, so there was no way to see --
-                // let alone take -- a specific one. Stackables stay aggregate:
-                // their units really are interchangeable, and one cell per arrow
-                // would be absurd.
-                //
-                // Worn units are KEPT (a_skipWorn=false): on a corpse or a
-                // pickpocket target, what the NPC is wearing is the point.
-                std::vector<Grid::UnitRef> units;
-                if (Grid::StackCap(obj) <= 1) {
-                    Grid::EnumerateUnits(entry, count, units, false);
-                }
-                if (units.empty()) units.push_back({ 0, 0, -1 });   // aggregate cell
+            const auto inv = source->GetInventory();
+            ReconcileContainer(*cl, source, inv);
 
+            // ---- the VIEW ----
+            // One PartnerCell per ContCell, carrying the things only the draw
+            // needs: price, markers, pickpocket odds, locks. Nothing here
+            // decides what exists or how much of it -- that was settled above.
+            const bool carrying = Grid::HeldPartnerObject() != nullptr;
+            std::map<std::string, int> ordOf;   // nth cell of its pool
+            for (const auto& [key, c] : cl->cells) {
+                // ★THE CELL IN HAND IS NOT ON THE SHELF, and that is the whole
+                // of it now. This used to be a per-unit test against an ordinal
+                // computed while deriving cells (IsHeldPartnerUnit), which meant
+                // it could name the wrong cell -- or, once a form owned several,
+                // none at all. A carry names a cell; the shelf skips that cell.
+                if (carrying && key == g_actingSpot) continue;
+                auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(c.form);
+                if (!obj || c.count <= 0) continue;
+
+                RE::InventoryEntryData* entry = nullptr;
+                int                     unitValue = 0;
+                if (const auto ii = inv.find(obj); ii != inv.end()) {
+                    entry = ii->second.second.get();
+                    unitValue = entry ? entry->GetValue() : 0;
+                }
+                const auto def = Grid::ResolveDef(obj);
                 const bool perUnit = Grid::StackCap(obj) <= 1;
-                int plainOrd = 0;             // ordinal among listless units
-                int wornOrd = 0;              // GI41: worn units count separately
-                int idRun = 0;                // ordinal within one identity's run
-                std::uint32_t prevId = 0;
-                for (const auto& u : units) {
-                    int cellCount = perUnit ? 1 : count;
-                    // already promised to the player: drop the unit (gear) or
-                    // shave the badge (stack) so the board never shows it twice
-                    {
-                        auto pi = outPool.find(OutKey(obj->GetFormID(), u.uid, u.sig));
-                        auto fi = outForm.find(obj->GetFormID());
-                        int  owed = 0;
-                        if (pi != outPool.end() && pi->second > 0)      owed = pi->second;
-                        else if (fi != outForm.end() && fi->second > 0) owed = fi->second;
-                        if (owed > 0) {
-                            // both counters track the same units, so they have to
-                            // fall together or a later cell gets hidden twice
-                            const int take = (std::min)(owed, cellCount);
-                            if (pi != outPool.end()) pi->second = (std::max)(0, pi->second - take);
-                            if (fi != outForm.end()) fi->second = (std::max)(0, fi->second - take);
-                            cellCount -= take;
-                            if (cellCount <= 0) continue;   // whole cell is gone
-                        }
-                    }
-                    // ★(1.3.0-D) contents riding inside a stored bag are the
-                    // bag's, not the shelf's: hidden while the bundle holds
-                    // them ("the chest remembers the bundle, no opening").
-                    if (auto bi = bundled.find(obj->GetFormID());
-                        bi != bundled.end() && bi->second > 0) {
-                        const int hide = (std::min)(bi->second, cellCount);
-                        bi->second -= hide;
-                        cellCount -= hide;
-                        if (cellCount <= 0) continue;
-                    }
-                    auto* xl = Grid::ExtraForInstance(entry, u.uid, u.xlIdx);
-                    // GI43: a per-unit cell is priced from ITS list -- a
-                    // tempered unit buys/sells at the vanilla tempered value.
-                    const int cellValue = perUnit ? Grid::UnitValueWith(obj, xl)
-                                                  : value;
-                    PartnerCell pc{ obj, cellCount, cellValue, dw, dh, -1, -1,
-                                    Grid::GlowBits(obj, entry, xl) };
-                    pc.uid = u.uid;
-                    pc.sig = u.sig;
-                    pc.xlIdx = u.xlIdx;
-                    pc.perUnit = perUnit;
-                    // GI41: the walk knew this; do not re-derive it from xlIdx.
-                    pc.worn = u.worn;
-                    // spot key ordinal: restarts per uid so a uid-keyed cell is
-                    // "@A31F", not "@A31F#3" just because plain siblings exist
-                    const std::uint32_t id = u.uid != 0 ? (0x10000u | u.uid)
-                                           : u.sig != 0 ? u.sig
-                                                        : 0;
-                    if (id != 0) {
-                        idRun = (id == prevId) ? idRun + 1 : 0;
-                        prevId = id;
-                        pc.ord = idRun;
-                    } else {
-                        prevId = 0;
-                        // GI41: a worn unit counts on its own. Sharing the plain
-                        // run meant planting a spare shifted the worn cell's
-                        // ordinal, and with it the slot it had been sitting in.
-                        pc.ord = pc.worn ? wornOrd++ : plainOrd++;
-                    }
-                    // F7: while a spot-memory grid item rides the cursor its cell
-                    // FREES UP (the remembered spot restores it on a cancel).
-                    // GI17: only THAT unit's cell, not every cell of the form.
-                    if (SpotMemoryOn() && Grid::IsHeldPartnerUnit(obj, u.uid, u.xlIdx, pc.ord)) {
-                        continue;
-                    }
-                    // A STACKABLE gets one aggregate cell, and its placeholder
-                    // unit (uid 0, xlIdx -1) resolves to no list at all -- so an
-                    // equipped torch on a mark reported "not worn": no worn tint,
-                    // and no pickpocket lock, which let it be lifted without the
-                    // Perfect Touch perk that vanilla requires. Ask the entry
-                    // instead: if any unit of the stack is on the body, the cell
-                    // counts as worn.
-                    if (!perUnit && !pc.worn && entry && entry->extraLists) {
-                        for (auto* x2 : *entry->extraLists) {
-                            if (x2 && (x2->HasType<RE::ExtraWorn>() ||
-                                       x2->HasType<RE::ExtraWornLeft>())) {
-                                pc.worn = true;
-                                break;
-                            }
-                        }
-                    }
-                    // GI42: the lock's resolution must MATCH the naming
-                    // resolution. Locking only the worn cell while a spare cell
-                    // could still pull the worn unit out through the engine was
-                    // the bypass.
-                    pc.unnameable = Grid::PoolChoice(entry, pc.uid, pc.sig, pc.worn,
-                                        WornExportLegal()).kind ==
-                                    Grid::PickKind::kUnresolved;
-                    // F6b: success % (engine formula) + worn lock
-                    if (g_mode == Mode::kPickpocket) {
-                        pc.chance = PickpocketChance(obj, cellCount, entry);
-                        pc.locked = (pc.worn && !HasPerfectTouch()) || pc.unnameable;
-                    } else {
-                        pc.locked = pc.unnameable;
-                    }
-                    // ★★P2/3-5b: GOLD BANDS ON THIS SIDE TOO.
-                    //
-                    // Every other cell here is one cell per form, count in the
-                    // badge -- fine for ingots, wrong for money. A chest with
-                    // twelve thousand septims drew a single cell reading 12000,
-                    // while the player's own board has never let more than
-                    // kCoinCap sit in one square. Storing gold in a chest
-                    // (P2/3-5) is what made the two sides look at each other,
-                    // and this is the side that had no rule.
-                    //
-                    // Split into cap-sized cells, each with its own ordinal so
-                    // the spot memory can tell them apart and each can be taken
-                    // on its own. Deliberately gold-only: an ingot stack in one
-                    // cell is not a bug, and banding everything would rearrange
-                    // every container in the game for no one's benefit.
-                    if (obj->IsGold() && pc.count > GoldCoins::kCoinCap) {
-                        int left = pc.count;
-                        while (left > 0) {
-                            const int take = (std::min)(left, GoldCoins::kCoinCap);
-                            PartnerCell band = pc;
-                            band.count = take;
-                            band.value = take;
-                            // ★Ordinal only -- NO hand-rolled spot key. Giving
-                            // the bands keys of my own invention was the bug the
-                            // report described: a cell with a key already on it
-                            // skips the spot-assignment pass, which is the very
-                            // thing that remembers where a cell sat. So every
-                            // deposit re-first-fitted the whole pile. The bands
-                            // are ordinary cells; the pass gives each one a
-                            // remembered slot exactly as it does for an ingot.
-                            band.ord = plainOrd++;
-                            cells.push_back(std::move(band));
-                            left -= take;
-                        }
-                        continue;
-                    }
-                    cells.push_back(std::move(pc));
+                auto*      xl = Grid::ExtraForInstance(entry, c.uid, c.xlIdx);
+                // GI43: a per-unit cell is priced from ITS list -- a tempered
+                // unit buys/sells at the vanilla tempered value.
+                int value = perUnit ? Grid::UnitValueWith(obj, xl) : unitValue;
+                // ★Gold is the exception, and only because `value` is a
+                // PER-UNIT price everywhere else: a purse is worth its coins.
+                if (obj->IsGold()) value = c.count;
+
+                PartnerCell pc{ obj, c.count, value,
+                                (std::max)(1, def.w), (std::max)(1, def.h), -1, -1,
+                                Grid::GlowBits(obj, entry, xl) };
+                pc.uid = c.uid;
+                pc.sig = c.sig;
+                pc.xlIdx = c.xlIdx;
+                pc.perUnit = perUnit;
+                pc.worn = c.worn;
+                pc.gold = c.gold;
+                pc.spotKey = key;
+                pc.ord = ordOf[PoolOf(c)]++;
+                pc.col = c.col;
+                pc.row = c.row;
+                pc.SetRot(c.rot);
+                // GI42: the lock's resolution must MATCH the naming resolution.
+                // Locking only the worn cell while a spare cell could still pull
+                // the worn unit out through the engine was the bypass.
+                pc.unnameable = Grid::PoolChoice(entry, pc.uid, pc.sig, pc.worn,
+                                    WornExportLegal()).kind ==
+                                Grid::PickKind::kUnresolved;
+                if (g_mode == Mode::kPickpocket) {
+                    pc.chance = PickpocketChance(obj, pc.count, entry);
+                    pc.locked = (pc.worn && !HasPerfectTouch()) || pc.unnameable;
+                } else {
+                    pc.locked = pc.unnameable;
                 }
+                cells.push_back(std::move(pc));
             }
             // ---- self-check: THE PARTNER BOARD ------------------------------
             // The player board has had [FLICK] since P1; this side had nothing,
@@ -2836,6 +3100,18 @@ namespace
         // (fixed), the rest first-fits, and the result is recorded back —
         // the very first look auto-packs and immediately becomes the saved
         // arrangement. Returns the furthest occupied/remembered row.
+        // ---- PLACEMENT ------------------------------------------------------
+        //
+        // ★★What is left of a pass that used to be three hundred lines. It was
+        // long because it had to GUESS: cells were derived fresh every frame, so
+        // something had to decide which of them inherited which remembered
+        // position, and the answer was a three-tier matcher over pools, worn-ness
+        // and signatures, plus a prune for positions nothing claimed.
+        //
+        // Cells are state now. A cell already knows where it is, because the
+        // move that put it there wrote it down. All that remains is the honest
+        // remainder of the job: give a cell that has never been placed a home,
+        // and hand the drawn list its positions.
         int PlacePartnerCells(std::vector<PartnerCell>& cells)
         {
             const int cols = Grid::kCols;
@@ -2861,271 +3137,23 @@ namespace
                 }
             };
 
-            ContLayout* cl = nullptr;
-            if (SpotMemoryOn()) {
-                if (auto* p = Partner()) cl = &g_contLayouts[p->GetFormID()];
-            }
+            ContLayout* cl = BoardFor();
 
-            // ---- GI20: pools, exactly like the player grid ------------------
-            //
-            // A POOL is the set of cells that are interchangeable with each
-            // other: one uid, or one content signature, or "no extras at all".
-            // Inside a pool "which one" has no answer, so the only rules that
-            // matter are (a) the pool has as many slots as cells and (b) taking
-            // a cell frees THAT cell's slot.
-            //
-            // Cells are therefore matched to their pool's slots IN POSITION
-            // ORDER. Nothing is ever renumbered, so nothing can jump -- which is
-            // what the old exact-key lookup could not promise, because the key
-            // carried an ordinal that shifted whenever the set changed.
-            // The FORM part of a spot key: everything before the first @ ~ or #
-            // that FOLLOWS the '|' (a plugin filename may legitimately contain
-            // those characters). Handles keys from before 1.3.2, which still
-            // carry a signature in the name, and new ones, which do not.
-            auto baseOfSpotKey = [](const std::string& k) {
-                const auto bar = k.find('|');
-                const auto cut = k.find_first_of("@~#!",
-                                                 bar == std::string::npos ? 0 : bar + 1);
-                return cut == std::string::npos ? k : k.substr(0, cut);
-            };
-            auto baseOf = [](const PartnerCell& c) {
-                return PartnerKey(c.obj, 0, 0, 0);
-            };
-            // ★Minted from the FORM, never from the pool: an ordinal is a spot
-            // NAME now, and a name that never changes is the whole point.
-            auto freshSpot = [&](const PartnerCell& c) {
-                const std::string base = PartnerKey(c.obj, 0, 0, 0);
-                for (int n = 0;; ++n) {
-                    std::string k = n == 0 ? base : base + "#" + std::to_string(n);
-                    if (!cl->spots.contains(k)) return k;
-                }
-            };
-
-            if (cl) {
-                // GI18: a pending drop position becomes a NEW slot in its pool,
-                // and position order hands it to one of that pool's cells.
-                // Recording it as a slot (rather than binding it to a cell) is
-                // what lets it survive the frames between "player let go" and
-                // "engine actually moved the item".
-                for (auto ps = g_pendingSpots.begin(); ps != g_pendingSpots.end();) {
-                    const PartnerCell* match = nullptr;
-                    for (const auto& it : cells) {
-                        if (it.obj->GetFormID() == ps->form && it.sig == ps->sig) { match = &it; break; }
-                    }
-                    if (!match) { ++ps; continue; }   // not here yet: keep waiting
-
-                    // GI23: a REARRANGE names the slot it is moving; a STORE has
-                    // none here yet and takes a fresh one. The old code guessed
-                    // ("if the pool is already full, reuse its first slot"),
-                    // which moved a SIBLING and left the dragged unit to inherit
-                    // the vacated cell -- the two appeared to swap.
-                    const bool reused =
-                        !ps->slotKey.empty() && cl->spots.contains(ps->slotKey);
-                    const std::string key = reused ? ps->slotKey : freshSpot(*match);
-                    // GI62: the hint's angle defines the new slot's footprint --
-                    // match->w/h is the upright pair, so swap it when the drop
-                    // was made on its side.
-                    const bool turned = (ps->rot & 1) != 0;
-                    // ★A POUCH LANDING HERE CLAIMS ITS GOLD. The amount was
-                    // parked in g_awayGold by OnPouchLeftPlayer as the item
-                    // left the player; taking it now is what makes the shelf
-                    // -- rather than a player-wide variable -- the thing that
-                    // holds it, so the icon is right and the trip home works.
-                    // ★(1.3.0-A) ...but only a NEW slot claims. A REARRANGE
-                    // reuses its slot, whose gold is already ON it -- claiming
-                    // here rewrote that slot at zero (nothing was away), and
-                    // could even steal gold travelling with a DIFFERENT pouch.
-                    const int prev = reused ? cl->spots[key].gold : 0;
-                    const int carried =
-                        (!reused && GoldCoins::IsPouch(match->obj->GetFormID()))
-                            ? GoldCoins::TakeAwayGold() : 0;
-                    // ★(1.3.0-D) field-wise on purpose: a REUSED slot keeps its
-                    // bundle (rearranging a stored bag must not spill it), and
-                    // a fresh one claims the bundle its store queued.
-                    {
-                        auto& sp = cl->spots[key];
-                        sp.col = ps->col;
-                        sp.row = ps->row;
-                        sp.w = turned ? match->h : match->w;
-                        sp.h = turned ? match->w : match->h;
-                        sp.rot = ps->rot & 3;
-                        sp.gold = prev + carried;
-                        // ★Stamp the binding AT BIRTH. Pass 1 would stamp it a
-                        // few lines later anyway, but only after choosing which
-                        // cell this spot belongs to -- and with two identical
-                        // items in the chest, an unstamped spot is exactly the
-                        // ambiguity that makes it choose the other one.
-                        sp.uid  = match->uid;
-                        sp.sig  = match->sig;
-                        sp.worn = match->worn;
-                        if (!reused) {
-                            sp.bundle = TakePendingBundle(match->obj->GetFormID());
-                        }
-                    }
-                    if (carried > 0) {
-                        SKSE::log::info("[LOOT] pouch shelved with {} G ('{}')",
-                            carried, key);
-                    }
-                    ps = g_pendingSpots.erase(ps);
-                }
-
-                // ★The "drop slots of pools that are not here any more" sweep
-                // that used to sit here is GONE, subsumed by the matcher's own
-                // prune below -- which asks the better question. This one asked
-                // whether a spot's POOL was still present, so a signature that
-                // merely moved read as "that pool left the chest" and the spot
-                // was destroyed with the pouch's gold inside it (handed home,
-                // but the position and any bundle died). The matcher prunes
-                // what NOTHING CLAIMED, which is what a dead spot actually is.
-
-                // pass 1: bind each live cell to the shelf spot that was showing
-                // it, then place it where that spot says.
-                //
-                // This used to group cells into POOLS and look each pool's spots
-                // up BY NAME -- and a spot's name carried the item's signature,
-                // so a stored item whose signature moved (ownership cleared by a
-                // sale, a quest flag landing, a charge spent on a companion's
-                // weapon) belonged to a pool with no spots at all. It got a fresh
-                // spot: a new position, and -- because a pouch's gold and a bag's
-                // contents hang off the SPOT -- a lost amount and a spilled bag.
-                //
-                // Matching instead asks: of the spots this FORM already owns in
-                // this container, which was showing this cell? The tiers are
-                // evidence, strongest first, and the last accepts any leftover,
-                // so a signature that moved costs a weaker match rather than a
-                // lost spot. Mirrors Grid::EnumerateUnitTiles exactly, on
-                // purpose: two boards, one rule.
-                //
-                // WORN is a hard partition rather than a tier (GI41): a worn cell
-                // is locked and a spare is not, so they are never interchangeable
-                // and must never trade spots. Plant a spare on a pickpocket mark
-                // and the worn cell stays exactly where it is.
-                // a carried cell takes its spot with it. Excluding BOTH (the
-                // cell is already absent from `cells`) is what keeps the
-                // survivors where they are -- otherwise one cell faces two
-                // spots, and position order hands the back dagger the front
-                // spot the moment the front one is lifted.
-                const bool carrying = Grid::HeldPartnerObject() != nullptr;
-                std::vector<PartnerCell*> live;
-                for (auto& it : cells) live.push_back(&it);
-
-                std::vector<std::pair<std::string, ContSpot>> slots;
-                for (const auto& [k, s] : cl->spots) {
-                    if (carrying && k == g_actingSpot) continue;   // reserved
-                    slots.push_back({ k, s });
-                }
-                std::sort(slots.begin(), slots.end(), [](const auto& x, const auto& y) {
-                    if (x.second.row != y.second.row) return x.second.row < y.second.row;
-                    return x.second.col < y.second.col;
-                });
-
-                std::vector<int>  spotOf(live.size(), -1);
-                std::vector<char> claimed(slots.size(), 0);
-                const auto bind = [&](auto&& a_ok) {
-                    for (std::size_t u = 0; u < live.size(); ++u) {
-                        if (spotOf[u] >= 0) continue;
-                        for (std::size_t s = 0; s < slots.size(); ++s) {
-                            if (claimed[s]) continue;
-                            // form and worn-ness are absolute: never crossed
-                            if (baseOfSpotKey(slots[s].first) != baseOf(*live[u])) continue;
-                            if (slots[s].second.worn != live[u]->worn) continue;
-                            if (!a_ok(*live[u], slots[s].second)) continue;
-                            spotOf[u] = static_cast<int>(s);
-                            claimed[s] = 1;
-                            break;
-                        }
-                    }
-                };
-                bind([](const PartnerCell& c, const ContSpot& s) {
-                    return c.uid != 0 && s.uid == c.uid; });
-                bind([](const PartnerCell& c, const ContSpot& s) {
-                    return c.uid == 0 && s.uid == 0 && s.sig == c.sig; });
-                bind([](const PartnerCell&, const ContSpot&) { return true; });
-
-                for (std::size_t u = 0; u < live.size(); ++u) {
-                    PartnerCell* m = live[u];
-                    if (spotOf[u] >= 0) {
-                        m->spotKey = slots[spotOf[u]].first;
-                        const auto& s = slots[spotOf[u]].second;
-                        m->gold = s.gold;
-                        // GI62: the slot remembers the angle -- adopt it BEFORE
-                        // the fit test, which reads w/h.
-                        m->SetRot(s.rot);
-                        // (1.3.3) a COMPANION's board is 10 x 8, and a remembered
-                        // spot from before that cap (or from the +2 spare rows
-                        // every other container still gets) would hold the board
-                        // open past it -- the pack drew nine rows for an item
-                        // nobody could see down there. Out-of-cap spots are
-                        // refused here and first-fit back inside by pass 2.
-                        const bool inCap =
-                            !companionBoard || s.row + m->h <= kCompanionRows;
-                        if (inCap && fits(s.col, s.row, m->w, m->h)) {
-                            m->col = s.col;
-                            m->row = s.row;
-                            mark(s.col, s.row, m->w, m->h);
-                        } else if (m->rot != 0) {
-                            m->SetRot(0);   // stand it up rather than lose it
-                        }
-                    } else {
-                        m->spotKey = freshSpot(*m);
-                        // THE OTHER DOOR. A shelf slot is born in two places:
-                        // there (a drop the player aimed at a cell) and here
-                        // (everything else -- a store with no aimed cell, an item
-                        // that simply appeared). Only the first claimed the
-                        // pouch's gold, so storing a full pouch any other way
-                        // shelved it as EMPTY and left the amount stranded in
-                        // g_awayGold. Both doors take it now.
-                        m->gold = GoldCoins::IsPouch(m->obj->GetFormID())
-                                      ? GoldCoins::TakeAwayGold() : 0;
-                        if (m->gold > 0) {
-                            SKSE::log::info("[LOOT] pouch shelved with {} G ('{}', fresh slot)",
-                                            m->gold, m->spotKey);
-                        }
-                        // NEVER CLOBBER AN AMOUNT ALREADY ON THIS SHELF. This
-                        // branch re-writes the whole slot, and it runs LATER IN
-                        // THE SAME FRAME than the drop that shelved the pouch --
-                        // so a pouch stored with 6,943 G had its slot rebuilt at
-                        // zero a few lines further down, and drew empty. The
-                        // position may be rewritten; the gold may not.
-                        auto& sp = cl->spots[m->spotKey];
-                        const int keep = sp.gold > 0 ? sp.gold : m->gold;
-                        sp.col = -1;
-                        sp.row = -1;
-                        sp.w = m->w;
-                        sp.h = m->h;
-                        sp.rot = m->rot;
-                        sp.gold = keep;
-                        if (sp.bundle.empty()) {
-                            // (1.3.0-D) the OTHER door a stored bag's spot can be
-                            // born through -- its bundle rides too
-                            sp.bundle = TakePendingBundle(m->obj->GetFormID());
-                        }
-                    }
-                    // the spot records WHICH unit it is showing. A hint for the
-                    // next rebuild, never a name: writing it cannot move a cell.
-                    auto& sp = cl->spots[m->spotKey];
-                    sp.uid  = m->uid;
-                    sp.sig  = m->sig;
-                    sp.worn = m->worn;
-                }
-
-                // spots nothing claimed: the shelf shrank
-                if (!Grid::HeldPartnerObject()) {
-                    for (std::size_t s = 0; s < slots.size(); ++s) {
-                        if (claimed[s]) continue;
-                        // (1.3.0-B) same rule as every other spot death: the gold
-                        // goes home instead of dying with the slot. (Two pouches
-                        // stored in one chest merge into ONE shelf cell -- the
-                        // second slot lands here the very frame it was made.)
-                        if (const auto si = cl->spots.find(slots[s].first);
-                            si != cl->spots.end() && si->second.gold > 0) {
-                            SKSE::log::info(
-                                "[LOOT] shelf slot dropped, {} G goes home ('{}')",
-                                si->second.gold, slots[s].first);
-                            GoldCoins::GiveAwayGold(si->second.gold);
-                        }
-                        cl->spots.erase(slots[s].first);
-                    }
+            // pass 1: everything that already has a home keeps it.
+            // ★(1.3.3) a COMPANION's board is 10 x 8, and a position from before
+            // that cap (or from the +2 spare rows every other container gets)
+            // would hold the board open past it -- the pack drew nine rows for an
+            // item nobody could see down there. Out-of-cap cells are refused here
+            // and first-fit back inside by pass 2.
+            for (auto& it : cells) {
+                if (it.col < 0 || it.row < 0) continue;
+                const bool inCap = !companionBoard || it.row + it.h <= kCompanionRows;
+                if (inCap && fits(it.col, it.row, it.w, it.h)) {
+                    mark(it.col, it.row, it.w, it.h);
+                } else {
+                    it.col = -1;
+                    it.row = -1;
+                    if (it.rot != 0) it.SetRot(0);   // stand it up rather than lose it
                 }
             }
 
@@ -3159,31 +3187,24 @@ namespace
                 }
             }
 
-            // pass 3 (F7): record the result under the ASSIGNED slot key —
-            // idempotent per frame
+            // pass 3: hand the first-fit results back to the cells that were
+            // placed this frame. ★Field-wise, never a whole-struct init: the
+            // position is this pass's to write, and the count, the pouch's gold
+            // and the bag's bundle are the cell's own and must survive it.
             if (cl) {
                 for (const auto& it : cells) {
-                    if (!it.spotKey.empty()) {
-                        // ★★(1.3.0-A) THE THIRD DOOR WAS THE OVERWRITER. This
-                        // rewrite runs every frame, AFTER both shelving doors,
-                        // and its braced init left `gold` value-initialised --
-                        // so the amount either door had just recorded was
-                        // zeroed in the SAME frame (the diag pair: col/row
-                        // alive, gold 0). Position is this pass's to write;
-                        // the gold (and D: the bundle) is the layout's and
-                        // stays -- hence field-wise, never a whole-struct init.
-                        auto& sp = cl->spots[it.spotKey];
-                        sp.col = it.col;
-                        sp.row = it.row;
-                        sp.w = it.w;
-                        sp.h = it.h;
-                        sp.rot = it.rot;
-                    }
+                    const auto ci = cl->cells.find(it.spotKey);
+                    if (ci == cl->cells.end()) continue;
+                    ci->second.col = it.col;
+                    ci->second.row = it.row;
+                    ci->second.w = it.w;
+                    ci->second.h = it.h;
+                    ci->second.rot = it.rot;
                 }
             }
 
             // actual height = furthest occupied row. GI15: absent items no
-            // longer hold a shelf open -- their spots were just pruned.
+            // longer hold a shelf open -- their cells were reconciled away.
             int placedRows = 0;
             for (auto& it : cells) placedRows = (std::max)(placedRows, it.row + it.h);
             return placedRows;
@@ -3240,7 +3261,7 @@ namespace
                             : Theme::InkChrome() ? 0.0f
                                                  : 1.0f;
             for (const auto& it : cells) {
-                if (Grid::IsHeldPartnerUnit(it.obj, it.uid, it.xlIdx, it.ord)) continue;
+                if (HeldCell(it.spotKey)) continue;
                 for (int y = 0; y < it.h; ++y) {
                     for (int x = 0; x < it.w; ++x) {
                         const int cc = it.col + x, rr = it.row + y;
@@ -3268,7 +3289,7 @@ namespace
                 // carried FROM here: keep the slot reserved (placement above still
                 // counted it, so neighbours don't shift), just don't draw it — the
                 // cell reads empty until the trade actually completes.
-                if (Grid::IsHeldPartnerUnit(it.obj, it.uid, it.xlIdx, it.ord)) continue;
+                if (HeldCell(it.spotKey)) continue;
                 const ImVec2 p0(base.x + it.col * cell, base.y + it.row * cell);
                 const float bw = it.w * cell, bh = it.h * cell;   // footprint box
 
@@ -3731,7 +3752,7 @@ namespace
                     int blockers = 0;
                     for (const auto& pc : cells) {
                         if (pc.col < 0 ||
-                            Grid::IsHeldPartnerUnit(pc.obj, pc.uid, pc.xlIdx, pc.ord)) {
+                            HeldCell(pc.spotKey)) {
                             continue;
                         }
                         if (gc < pc.col + pc.w && gc + hw > pc.col &&
@@ -4192,7 +4213,7 @@ namespace
         // none = free spot, exactly one = swap partner, 2+ = invalid
         int blockers = 0;
         for (const auto& pc : g_lastCells) {
-            if (pc.col < 0 || Grid::IsHeldPartnerUnit(pc.obj, pc.uid, pc.xlIdx, pc.ord)) continue;
+            if (pc.col < 0 || HeldCell(pc.spotKey)) continue;
             if (c < pc.col + pc.w && c + hw > pc.col &&
                 r < pc.row + pc.h && r + hh > pc.row) {
                 if (++blockers == 1) {
@@ -4217,36 +4238,104 @@ namespace
         return d;
     }
 
-    void NoteStoreSpot(RE::TESBoundObject* a_obj, int a_col, int a_row,
-                       std::uint16_t a_sig, int a_rot)
-    {
-        if (!a_obj || !SpotMemoryOn() || !Partner()) return;
-        const RE::FormID form = a_obj->GetFormID();
-        // one claim per (form, sig): a second drop of the same thing replaces
-        // the first rather than queueing behind it
-        for (auto& ps : g_pendingSpots) {
-            if (ps.form == form && ps.sig == a_sig) {
-                ps.col = a_col;
-                ps.row = a_row;
-                ps.slotKey = g_actingSpot;
-                ps.rot = a_rot & 3;
-                return;
-            }
-        }
-        // GI23: g_actingSpot is still set here — the carry has not ended yet, so
-        // this records exactly which slot is being moved (empty = a new arrival)
-        g_pendingSpots.push_back({ form, a_sig, a_col, a_row, g_actingSpot, a_rot & 3 });
-    }
-
     void NoteCarriedSpot(const std::string& a_spotKey)
     {
         g_actingSpot = a_spotKey;   // GI24: a swap starts a carry we did not click
     }
 
-    void SetStoreSpotHint(RE::TESBoundObject* a_obj, int a_col, int a_row,
-                          std::uint16_t a_sig, int a_rot)
+    // ---- THE WRITES -------------------------------------------------------
+    //
+    // ★★★Everything here used to be a NOTE: a claim pushed onto a pending
+    // queue, describing where an item ought to end up once the engine got round
+    // to moving it, for a matcher to try to honour some frames later. The
+    // container owns its cells now, so a move is a move.
+
+    bool MoveHeldCell(int a_col, int a_row, int a_rot)
+    {
+        auto* cl = BoardFor();
+        if (!cl || g_actingSpot.empty()) return false;
+        const auto it = cl->cells.find(g_actingSpot);
+        if (it == cl->cells.end()) return false;
+        if (((a_rot ^ it->second.rot) & 1) != 0) std::swap(it->second.w, it->second.h);
+        it->second.col = a_col;
+        it->second.row = a_row;
+        it->second.rot = a_rot & 3;
+        g_actingSpot.clear();
+        return true;
+    }
+
+    bool SwapHeldCellWith(const std::string& a_otherKey)
+    {
+        auto* cl = BoardFor();
+        if (!cl || g_actingSpot.empty() || a_otherKey == g_actingSpot) return false;
+        const auto mine = cl->cells.find(g_actingSpot);
+        const auto other = cl->cells.find(a_otherKey);
+        if (mine == cl->cells.end() || other == cl->cells.end()) return false;
+        std::swap(mine->second.col, other->second.col);
+        std::swap(mine->second.row, other->second.row);
+        g_actingSpot.clear();
+        return true;
+    }
+
+    int MergeHeldCellInto(const std::string& a_otherKey)
+    {
+        auto* cl = BoardFor();
+        if (!cl || g_actingSpot.empty() || a_otherKey == g_actingSpot) return -1;
+        const auto mine = cl->cells.find(g_actingSpot);
+        const auto other = cl->cells.find(a_otherKey);
+        if (mine == cl->cells.end() || other == cl->cells.end()) return -1;
+        if (PoolOf(mine->second) != PoolOf(other->second)) return -1;
+        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(mine->second.form);
+        const int cap = obj ? (std::max)(1, Grid::StackCap(obj)) : 1;
+        const int room = cap - other->second.count;
+        if (room <= 0) return -1;
+        const int moved = (std::min)(room, mine->second.count);
+        other->second.count += moved;
+        mine->second.count -= moved;
+        const int left = mine->second.count;
+        if (left <= 0) {
+            cl->cells.erase(mine);
+            g_actingSpot.clear();
+        }
+        return left;
+    }
+
+    void NoteStoredUnits(RE::TESBoundObject* a_obj, int a_count,
+                         std::uint16_t a_uid, std::uint16_t a_sig)
+    {
+        NoteIn(a_obj, a_uid, a_sig, a_count);
+    }
+
+    void AimStoreAt(RE::TESBoundObject* a_obj, int a_col, int a_row,
+                    std::uint16_t a_sig, int a_rot)
     {
         g_storeHint = { a_obj, a_col, a_row, a_sig, a_rot & 3 };
+    }
+
+    void PlaceStoredCell(RE::TESBoundObject* a_obj, int a_count,
+                         int a_col, int a_row, int a_rot,
+                         std::uint16_t a_uid, std::uint16_t a_sig)
+    {
+        auto* cl = BoardFor();
+        if (!cl || !a_obj || a_count <= 0) return;
+        const auto def = Grid::ResolveDef(a_obj);
+        const bool turned = (a_rot & 1) != 0;
+        ContCell c;
+        c.form = a_obj->GetFormID();
+        c.uid = a_uid;
+        c.sig = a_sig;
+        c.count = a_count;
+        c.col = a_col;
+        c.row = a_row;
+        c.rot = a_rot & 3;
+        c.w = turned ? (std::max)(1, def.h) : (std::max)(1, def.w);
+        c.h = turned ? (std::max)(1, def.w) : (std::max)(1, def.h);
+        // ★A bag brings its bundle and a pouch its gold, at the one door a
+        // shelf cell is born through now. There used to be three doors and they
+        // disagreed about which of them claimed the amount.
+        c.bundle = TakePendingBundle(c.form);
+        if (GoldCoins::IsPouch(c.form)) c.gold = GoldCoins::TakeAwayGold();
+        cl->cells[MintCellKey(*cl, a_obj)] = std::move(c);
     }
 
     // ---- F7: cosave 'GCLY' v1 ----
@@ -4256,7 +4345,7 @@ namespace
     {
         constexpr std::uint32_t kContMaxStr = 512;
         constexpr std::uint32_t kContMaxEntries = 65536;
-        constexpr std::uint32_t kContCosaveVersion = 9;   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints
+        constexpr std::uint32_t kContCosaveVersion = 10;   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints  v10: the cell owns form + count + xlIdx
 
         // ★v9 migration: before this, a spot's binding lived inside its KEY
         // ("form~B825!worn#1"). Read it back out and put it where it belongs.
@@ -4279,6 +4368,30 @@ namespace
                 a_sig = static_cast<std::uint16_t>(
                     std::strtoul(a_key.c_str() + tilde + 1, nullptr, 16));
             }
+        }
+
+        // ★★v<=9 MIGRATION, the other half. A cell's FORM used to live inside
+        // its key ("Skyrim.esm|0x01397D#2") because the key was the cell's
+        // identity; it is a field now, and this is the one place that still
+        // reads the old spelling. Nothing else parses a key any more.
+        RE::FormID FormFromSpotKey(const std::string& a_key)
+        {
+            const auto bar = a_key.find('|');
+            if (bar == std::string::npos) return 0;
+            const std::string file = a_key.substr(0, bar);
+            const auto cut = a_key.find_first_of("@~#!", bar + 1);
+            const std::string idPart = cut == std::string::npos
+                                           ? a_key.substr(bar + 1)
+                                           : a_key.substr(bar + 1, cut - bar - 1);
+            const auto local = static_cast<RE::FormID>(
+                std::strtoul(idPart.c_str(), nullptr, 16));
+            if (file == "Dynamic") {
+                // a runtime form: the whole id was written, and it is not stable
+                // across a load -- the cell simply dies on the next reconcile
+                return 0;
+            }
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            return dh ? dh->LookupFormID(local, file) : 0;
         }
 
         bool ContWriteStr(SKSE::SerializationInterface* a_intfc, const std::string& a_s)
@@ -4307,8 +4420,8 @@ namespace
         for (const auto& [refID, cl] : g_contLayouts) {
             a_intfc->WriteRecordData(refID);
             a_intfc->WriteRecordData(cl.stamp);
-            a_intfc->WriteRecordData(static_cast<std::uint32_t>(cl.spots.size()));
-            for (const auto& [key, s] : cl.spots) {
+            a_intfc->WriteRecordData(static_cast<std::uint32_t>(cl.cells.size()));
+            for (const auto& [key, s] : cl.cells) {
                 ContWriteStr(a_intfc, key);
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.col));
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.row));
@@ -4338,6 +4451,12 @@ namespace
                 a_intfc->WriteRecordData(static_cast<std::uint32_t>(s.uid));
                 a_intfc->WriteRecordData(static_cast<std::uint32_t>(s.sig));
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.worn ? 1 : 0));
+                // ★v10: WHAT the cell is, no longer inferable from its key.
+                // The form is written raw and resolved on load like any other,
+                // and the count is the field the whole board turns on.
+                a_intfc->WriteRecordData(s.form);
+                a_intfc->WriteRecordData(static_cast<std::int32_t>(s.count));
+                a_intfc->WriteRecordData(static_cast<std::int32_t>(s.xlIdx));
             }
         }
         SKSE::log::info("[LOOT] cosave: saved {} container layouts", g_contLayouts.size());
@@ -4423,7 +4542,14 @@ namespace
                         }
                     }
                 }
-                ContSpot sp{ col, row, w, h, rot & 3, gold, std::move(bundle) };
+                ContCell sp{};
+                sp.col = col;
+                sp.row = row;
+                sp.w = w;
+                sp.h = h;
+                sp.rot = rot & 3;
+                sp.gold = gold;
+                sp.bundle = std::move(bundle);
                 if (a_version >= 9) {
                     std::uint32_t su = 0, ss = 0;
                     std::int32_t  sw = 0;
@@ -4437,7 +4563,28 @@ namespace
                 } else {
                     SpotHintsFromKey(key, sp.uid, sp.sig, sp.worn);
                 }
-                cl.spots[std::move(key)] = std::move(sp);
+                if (a_version >= 10) {
+                    RE::FormID   rawForm = 0;
+                    std::int32_t sc = 0, sx = -1;
+                    if (!a_intfc->ReadRecordData(rawForm) ||
+                        !a_intfc->ReadRecordData(sc) || !a_intfc->ReadRecordData(sx)) {
+                        return;
+                    }
+                    RE::FormID rf = 0;
+                    if (a_intfc->ResolveFormID(rawForm, rf)) sp.form = rf;
+                    sp.count = sc > 0 ? sc : 0;
+                    sp.xlIdx = sx;
+                } else {
+                    // ★★v<=9 MIGRATION. The form used to live inside the key and
+                    // the count did not exist anywhere. Parse the one, leave the
+                    // other at 0 -- which reads as UNSPECIFIED, not empty, and
+                    // the first reconcile pours the container's real contents
+                    // into these cells in the positions the player left them.
+                    // (See ReconcileContainer: deletion runs after the fill, and
+                    // that ordering is the entire migration.)
+                    sp.form = FormFromSpotKey(key);
+                }
+                cl.cells[std::move(key)] = std::move(sp);
             }
             if (ok && resolved != 0) {
                 maxStamp = (std::max)(maxStamp, stamp);
@@ -4452,9 +4599,10 @@ namespace
     void RevertGame()
     {
         g_contLayouts.clear();
+        g_barterBoard.cells.clear();   // a shop shelf never outlives its visit
+        g_in.clear();                  // promises from the previous save
         g_contStamp = 0;
         g_storeHint = {};
-        g_pendingSpots.clear();   // GI18
         g_pendingBundles.clear();   // (1.3.0-D) bundles from the previous save
         g_incomingBundles.clear();
         g_partnerGridLive = false;
