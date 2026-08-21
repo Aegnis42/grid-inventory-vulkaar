@@ -2233,6 +2233,28 @@ namespace
         // draws as one cell. Opening it from inside a chest is deliberately not
         // offered yet; the requirement was that a nesting survives the trip
         // intact, and it does.
+        // ⑰b PROBE: the bundle as it stands, printed only when it CHANGES, so
+        // the log shows the moment a lift rearranges something rather than one
+        // line per frame. Reported: lifting a plain item out of a level makes a
+        // sibling BAG vanish from that level, while the bag is demonstrably
+        // still in the bundle (taking the outer bag home brings it back). That
+        // is a seating problem or a parent problem, and those two look identical from
+        // outside -- this tells them apart.
+        {
+            std::string now = fmt::format("root={} carry={}", root,
+                                          carryOut ? g_bundleCarry.root : -99);
+            for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
+                const auto& b = bundle[i];
+                now += fmt::format(" #{}:{:06X}x{}@{},{}^{}", i, b.form & 0xFFFFFF,
+                                   b.count, b.col, b.row, b.parentIdx);
+            }
+            static std::map<std::string, std::string> s_last;
+            auto& prev = s_last[a_w.spot];
+            if (prev != now) {
+                prev = now;
+                SKSE::log::info("[BUNDLE] {}", now);
+            }
+        }
         auto atThisLevel = [&](const BundleItem& a_b) { return a_b.parentIdx == root; };
         for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
             if (isCarried(bundle[i]) || !atThisLevel(bundle[i])) continue;
