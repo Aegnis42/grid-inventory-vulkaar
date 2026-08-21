@@ -42,6 +42,7 @@
 namespace
 {
     bool g_planBPendingOpen = false;   // open our menu once InventoryMenu fully closed
+    bool g_invEchoOwed = false;        // ⑫ — see InventoryCloseEchoTick
     bool g_pendingPartnerOpen = false; // open our grid once Container/BarterMenu fully closed (loot/barter)
     bool g_movementOff = false;        // we disabled the movement handler (text input)
     bool g_reopenAfterMsg = false;     // we stepped aside for a MessageBox (poison confirm)
@@ -67,7 +68,8 @@ namespace
             pc->movementHandler->inputEventHandlingEnabled = a_enable;
         }
     }
-    void LockpickReopenTick();   // defined below (lockpick auto-open fallback)
+    void LockpickReopenTick();      // defined below (lockpick auto-open fallback)
+    void InventoryCloseEchoTick();   // defined below (⑫ — the close nobody heard)
 
     // ---- PlayerCharacter::Update vtable hook (index 0xAD) ----
     struct UpdateHook
@@ -91,7 +93,8 @@ namespace
             // after the hotkey is already released, and it is what finally takes
             // the overlay menu down.
             FUI::Wheeler::Tick();
-            LockpickReopenTick();   // lockpick auto-open fallback
+            LockpickReopenTick();      // lockpick auto-open fallback
+            InventoryCloseEchoTick();   // ⑫ — the inventory close, when it is true
         }
         static inline REL::Relocation<decltype(thunk)> func;
 
@@ -1466,9 +1469,67 @@ namespace
                 }
             }
             g_planBPendingOpen = true;
+            g_invEchoOwed = true;   // ⑫ — see InventoryCloseEchoTick
             logger::info("[INV] intercepted InventoryMenu -> deferring GridInventoryMenu open");
         }
         return false;   // opening intercept falls through (matches old flow)
+    }
+
+    // ★★★⑫ THE CLOSE NOBODY HEARD.
+    //
+    // Measured, not guessed: TK Dodge's `aaaTKDodgeScript.pex` decompiles to
+    //
+    //     Event OnMenuOpen(String menuName)
+    //         GotoState("Busy")            ; where OnKeyDown is an EMPTY function
+    //     EndEvent
+    //     Event OnMenuClose(String menuName)
+    //         If !Utility.IsInMenuMode()   ; <-- the whole bug lives on this line
+    //             GotoState("")
+    //         EndIf
+    //     EndEvent
+    //
+    // and the chain it meets on our side is:
+    //
+    //   1. the vanilla InventoryMenu opens        -> TK goes Busy
+    //   2. we kHide it in that same event         -> a close is announced
+    //   3. we open OUR menu inside that handler   -> kPausesGame, so menu mode
+    //                                                is ON again
+    //   4. Papyrus delivers the close (later)     -> IsInMenuMode() is true, so
+    //                                                TK never leaves Busy
+    //   5. our grid closes                        -> we are not a menu TK
+    //                                                registered for: silence
+    //
+    // Dodge stays dead until some OTHER registered menu closes with nothing
+    // open -- which is exactly the report: "press ESC and come back and it
+    // works, open the inventory again and it stops."
+    //
+    // TK's guard is right (do not go idle while a menu is still up). What is
+    // wrong is OUR story: we let the engine announce an inventory that opened,
+    // then announce it closed a frame later while the inventory is in fact
+    // still on screen, and we say nothing at all when it really ends. Every
+    // Papyrus mod listening for "the inventory closed" hears it at the wrong
+    // moment. This says it at the right one -- once, on the first unpaused
+    // frame after our grid is gone, and only for an open the engine itself
+    // announced.
+    //
+    // Mods that act on the early close will now see two; that is strictly
+    // better than the one they see being a lie.
+    void InventoryCloseEchoTick()
+    {
+        if (!g_invEchoOwed) return;
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui) return;
+        // This tick only runs unpaused (kPausesGame stops the Update hook), so
+        // both tests are belt and braces -- and both are the condition TK is
+        // about to evaluate for itself.
+        if (ui->IsMenuOpen("GridInventoryMenu"sv) || ui->GameIsPaused()) return;
+        g_invEchoOwed = false;
+        RE::MenuOpenCloseEvent e{};
+        e.menuName = RE::InventoryMenu::MENU_NAME;
+        e.opening = false;
+        // UI is three event sources at once; name the one we mean
+        static_cast<RE::BSTEventSource<RE::MenuOpenCloseEvent>*>(ui)->SendEvent(&e);
+        logger::info("[INV] inventory session over -> announcing InventoryMenu close");
     }
 
     // ---- lockpick auto-open fallback ----
