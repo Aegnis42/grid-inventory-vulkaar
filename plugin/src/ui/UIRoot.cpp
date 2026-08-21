@@ -627,6 +627,13 @@ namespace FUI::UIRoot
             kActNudgeR    = 1u << 7,
             kActNudgeU    = 1u << 8,
             kActNudgeD    = 1u << 9,
+            // ★⑩: rotation, the one thing on this board a pad could not do.
+            // Everything else here already answers to a VANILLA binding -- the
+            // engine names the button and the player's own remap decides it --
+            // but turning an item is ours alone, so there is no game action to
+            // inherit and these two are pinned to physical buttons.
+            kActRotL      = 1u << 10,
+            kActRotR      = 1u << 11,
         };
 
         std::atomic<std::uint32_t> g_padRaw{ 0 };       // physical buttons held
@@ -686,6 +693,8 @@ namespace FUI::UIRoot
             if (edge(kActDrop))      io.AddKeyEvent(ImGuiKey_R, down(kActDrop));
             if (edge(kActFavorite))  io.AddKeyEvent(ImGuiKey_F, down(kActFavorite));
             if (edge(kActInspect))   io.AddKeyEvent(ImGuiKey_C, down(kActInspect));
+            if (edge(kActRotL))      io.AddKeyEvent(ImGuiKey_A, down(kActRotL));
+            if (edge(kActRotR))      io.AddKeyEvent(ImGuiKey_D, down(kActRotR));
             if (edge(kActSplit)) {
                 io.AddKeyEvent(ImGuiMod_Shift, down(kActSplit));
                 io.AddKeyEvent(ImGuiKey_LeftShift, down(kActSplit));
@@ -754,6 +763,13 @@ namespace FUI::UIRoot
             case K::kRightShoulder: return kActInspect;
             case K::kLeftTrigger:
             case K::kRightTrigger:  return kActSplit;
+            // ★The stick BUTTONS were the only ones this menu left unclaimed,
+            // and rotation is the only action left without a button. They are
+            // deliberately not looked up in ControlMap above: there is no game
+            // action called "rotate the item you are holding", so there would
+            // be nothing to ask for.
+            case K::kLeftThumb:     return kActRotL;
+            case K::kRightThumb:    return kActRotR;
             case K::kLeft:          return kActNudgeL;
             case K::kRight:         return kActNudgeR;
             case K::kUp:            return kActNudgeU;
@@ -786,10 +802,9 @@ namespace FUI::UIRoot
             static constexpr std::uint32_t kWanted[] = {
                 kActPrimary, kActSecondary, kActDrop,
                 kActFavorite, kActInspect, kActSplit,
-                // GI63 rotate: no game action, so nothing can ever match these
-                // (ActionForButton never returns 0) and they stay nullptr --
-                // which is exactly right, the keys really are keyboard-only.
-                0, 0,
+                // ★⑩: rotate has buttons now -- the stick presses -- so the
+                // prompts can name them instead of falling back to A / D.
+                kActRotL, kActRotR,
             };
             static_assert(std::size(kWanted) == std::size(g_padLabel));
 
@@ -881,6 +896,36 @@ namespace FUI::UIRoot
                         g_padCursorMode = PadCursorMode::kOwn;
                         SKSE::log::info("[PAD] engine cursor did not follow — drawing our own");
                     }
+                }
+
+                // ★★★A WRONG VERDICT USED TO LAST THE WHOLE SESSION, and that
+                // is the "the pad cursor is invisible" report -- which has kept
+                // coming in from players while it works here, because whether
+                // the engine drives its own arrow depends on the setup, not on
+                // us. Latching once was right for the flicker it fixed; making
+                // the latch PERMANENT was the part that could only ever fail
+                // silently.
+                //
+                // The evidence is weak on purpose: "the engine's cursor moved"
+                // is measured a frame at a time, and this menu runs while the
+                // game parks that cursor at screen centre and warps it back --
+                // a warp is movement. So kEngine can be entered by a cursor
+                // that is not following the stick at all, and once entered we
+                // draw nothing and follow it. No pointer, for the session.
+                //
+                // So the latch keeps a way out: if the stick is deflected and
+                // the engine's arrow does not answer for a stretch, the verdict
+                // was wrong and we take the pointer back. Drawing our own is
+                // always safe -- the branch below parks the game's arrow on top
+                // of ours, so there is never a second one.
+                if (g_padCursorMode == PadCursorMode::kEngine && wanted &&
+                    !engineMoved && ++g_engineStillFrames > 30) {
+                    g_padCursorMode = PadCursorMode::kOwn;
+                    g_engineStillFrames = 0;
+                    SKSE::log::warn("[PAD] the engine's cursor stopped following "
+                                    "-- taking the pointer back");
+                } else if (g_padCursorMode == PadCursorMode::kEngine && engineMoved) {
+                    g_engineStillFrames = 0;
                 }
 
                 if (g_padCursorMode == PadCursorMode::kEngine) {
