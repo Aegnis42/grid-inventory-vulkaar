@@ -1322,7 +1322,12 @@ namespace FUI::Equip
                                               ? act.count >= act.tileCount
                                               : cnt <= 0))
                                       : Grid::StackCap(obj) <= 1 || cnt <= 1);
-            if (IsWearOrConsume(obj) && emptied) {
+            // ★P2/3-1: a BAG is the exception rule 13 now needs. The rule is
+            // "leaving the board forgets the cell", and a worn bag never left
+            // -- so forgetting its cell moved it to the first free space the
+            // moment it was put on (user report). Everything else that gets
+            // equipped genuinely does leave, and keeps the rule.
+            if (IsWearOrConsume(obj) && emptied && !Grid::IsBagForm(obj)) {
                 Grid::ForgetTile(act.srcKey);
             }
             // ★Equipping is the strongest "I have seen this" there is -- the

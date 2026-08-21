@@ -6121,6 +6121,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // so they reflow to main only on a real drop/sell, not while
                     // the bag rides the cursor.
                     if (!(g_held && g_held->key == it.inBag)) {
+                        // ★P2/3-1 instrumentation: THE moment contents spill.
+                        // "The bag closed and everything fell out" has several
+                        // possible causes -- the tile was re-keyed, the carry
+                        // guard did not match, the bag really did leave -- and
+                        // they are indistinguishable from outside. This names
+                        // the bag key that went missing and what the cursor was
+                        // holding at the time, which separates all three.
+                        SKSE::log::info("[BAG] '{}' left the board -- '{}' reflows "
+                                        "to main (held '{}')",
+                            it.inBag, it.key,
+                            g_held ? g_held->key : std::string("-"));
                         it.inBag.clear();   // bag truly gone: contents reflow (E4)
                     }
                 }
@@ -8743,6 +8754,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     std::uint16_t InstanceSigOf(RE::ExtraDataList* a_xl) { return InstanceSig(a_xl); }
+
+    bool IsBagForm(RE::TESBoundObject* a_obj)
+    {
+        return a_obj && g_resolver && g_resolver(a_obj).bag != 0;
+    }
 
     int StackCap(RE::TESBoundObject* a_obj)
     {

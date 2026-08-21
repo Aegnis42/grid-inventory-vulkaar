@@ -609,6 +609,12 @@ namespace FUI::Grid
     // category cap (with the editor's per-item stack:N override applied).
     [[nodiscard]] int StackCap(RE::TESBoundObject* a_obj);
 
+    // ★P2/3-1: is this form a BAG? Asked from outside the grid because a bag is
+    // now the one worn thing that keeps its tile, so rule 13 ("equipping forgets
+    // the cell") has to make an exception for it -- a bag that never left the
+    // board never left its cell either.
+    [[nodiscard]] bool IsBagForm(RE::TESBoundObject* a_obj);
+
     // The worn sub-stack of an entry (equipment doll: the unit on the body).
     // a_hand: 0 = either, 1 = RIGHT (ExtraWorn), 2 = LEFT (ExtraWornLeft). The
     // hand is what separates two copies of one form worn at the same time.
