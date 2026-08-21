@@ -9558,6 +9558,24 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (const std::string slot = Equip::SlotLabel(a_obj); !slot.empty()) {
             ImGui::TextColored(Theme::TipSub(), "%s", slot.c_str());
         }
+        // ★The armour CLASS reads as a second qualifier of the same kind as the
+        // slot -- "Body", then "Heavy Armor" -- so it belongs on its own line
+        // directly under it, not appended to the rating below (user's layout
+        // call, and it is the better one: the rating is a measurement, the
+        // class is what the thing IS).
+        if (const auto* armoCls = a_obj->As<RE::TESObjectARMO>()) {
+            switch (armoCls->GetArmorType()) {
+            case RE::BIPED_MODEL::ArmorType::kLightArmor:
+                ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::ArmorLight));
+                break;
+            case RE::BIPED_MODEL::ArmorType::kHeavyArmor:
+                ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::ArmorHeavy));
+                break;
+            default:
+                ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::ArmorClothing));
+                break;
+            }
+        }
         const bool isPouch = GoldCoins::IsPouch(a_obj->GetFormID());
         if (a_coinValue >= 0) {   // G2: represented / stored gold
             // GI64: the pouch prints "stored / cap". Without the cap there was
@@ -9774,27 +9792,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     break;
                 }
             }
-            // ★The CLASS, beside the rating (user report ⑪: vanilla's card
-            // says light/heavy/clothing and ours did not -- the one stat that
-            // decides which perk tree an armour belongs to). GetArmorType is
-            // the engine's own answer, so a modded piece is classed by the
-            // same rule as a vanilla one. Shields and jewellery answer
-            // clothing/light like any other ARMO; the label is the record's,
-            // not a guess from the slot.
-            const char* cls = nullptr;
-            switch (armo->GetArmorType()) {
-            case RE::BIPED_MODEL::ArmorType::kLightArmor:
-                cls = Lang::T(Lang::Str::ArmorLight);
-                break;
-            case RE::BIPED_MODEL::ArmorType::kHeavyArmor:
-                cls = Lang::T(Lang::Str::ArmorHeavy);
-                break;
-            default:
-                cls = Lang::T(Lang::Str::ArmorClothing);
-                break;
-            }
-            ImGui::TextColored(Theme::TipSub(), "%s %d  %s",
-                Lang::T(Lang::Str::Armor), arm, cls);
+            // (the CLASS is printed up beside the slot, where it reads as what
+            // the piece IS rather than as part of its measurement)
+            ImGui::TextColored(Theme::TipSub(), "%s %d", Lang::T(Lang::Str::Armor), arm);
             diffText(arm);
         } else {
             RE::MagicItem* magic = a_obj->As<RE::AlchemyItem>();
@@ -9815,7 +9815,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (magic) {
                 std::uint16_t bit = 1;
                 for (auto* e : magic->effects) {
-                    if (known & bit) effectLine(e, Theme::TipSub());
+                    if (known & bit) {
+                        effectLine(e, Theme::TipSub());
+                    } else {
+                        // ★An unknown effect keeps its PLACE. Vanilla's item
+                        // card simply omits it, which left a freshly picked
+                        // flower with a blank card -- indistinguishable from
+                        // an item we failed to read (user call, and the right
+                        // one). The alchemy menu's own grammar is a row of
+                        // question marks, so the card borrows it: four lines
+                        // that fill in one at a time as the ingredient is
+                        // learned, and the count itself tells you how much of
+                        // this plant you have left to discover.
+                        ImGui::TextColored(Theme::TipSub(), "???");
+                    }
                     bit = static_cast<std::uint16_t>(bit << 1);
                 }
             }
@@ -10660,22 +10673,45 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // The old approximation survives only as the fallback for a record
         // with no AVSK block at all, where there is nothing to read.
         {
-            const float mag = static_cast<float>(SoulChargePoints(pick.soul));
-            float       xp = mag * 0.05f;
-            const char* how = "fallback 5%";
-            if (auto* avl = RE::ActorValueList::GetSingleton()) {
-                if (auto* info = avl->GetActorValue(RE::ActorValue::kEnchanting);
-                    info && info->skill) {
-                    xp = info->skill->useMult * mag + info->skill->offsetMult;
-                    how = "AVSK";
-                }
-            }
-            // A negative or absurd record must not hand out (or take away) a
-            // level: clamp to the sane band the old constant lived in.
-            xp = std::clamp(xp, 0.0f, mag * 0.05f);
-            p->AddSkillExperience(RE::ActorValue::kEnchanting, xp);
-            SKSE::log::info("[RECHARGE] enchanting xp {:.2f} ({}, soul mag {:.0f})",
-                xp, how, mag);
+            // ★★What AddSkillExperience actually wants was the whole question,
+            // and the ESM answered it: Enchanting's AVSK carries useMult 900,
+            // offsetMult 0 (read straight out of Skyrim.esm; Alchemy is 0.75,
+            // Smithing 160). A skill "use" is useMult * MAGNITUDE, so the
+            // number this call takes is a magnitude on that scale -- NOT a
+            // finished XP figure. 1.3.x passed 12.5 for a petty soul and 150
+            // for a grand one, which on that scale is thousands of points:
+            // one recharge of a barely-drained weapon levelled Enchanting on
+            // the spot (measured in game, 12.50 -> a level).
+            //
+            // So: pass a magnitude. One full ENCHANTMENT is the anchor the
+            // record is calibrated for (magnitude 1.0 = 900 xp). A recharge is
+            // a fraction of that, scaled by the soul spent -- a grand soul is
+            // a tenth of an enchantment, a petty soul a twelfth of that again.
+            // The ratio is ours; the scale it rides on is the game's, so a
+            // rebalance mod that edits the Enchanting AVIF moves this with it.
+            constexpr float kRechargeShareOfAnEnchant = 0.10f;
+            const float grand = static_cast<float>(
+                (std::max)(1, SoulChargePoints(RE::SOUL_LEVEL::kGrand)));
+            const float soul = static_cast<float>(SoulChargePoints(pick.soul));
+            const float mag = kRechargeShareOfAnEnchant *
+                              std::clamp(soul / grand, 0.0f, 1.0f);
+
+            // ★Before/after, because this is the one number in the plugin we
+            // cannot read off a record: whether the engine scales what we hand
+            // it. The delta says so outright, and one recharge settles it.
+            const auto readXp = [&]() -> float {
+                auto* sk = p->GetInfoRuntimeData().skills;
+                return (sk && sk->data)
+                    ? sk->data->skills[RE::PlayerCharacter::PlayerSkills::Data::
+                                           Skills::kEnchanting].xp
+                    : -1.0f;
+            };
+            const float before = readXp();
+            p->AddSkillExperience(RE::ActorValue::kEnchanting, mag);
+            const float after = readXp();
+            SKSE::log::info("[RECHARGE] enchanting mag {:.4f} -> xp {:.2f} -> {:.2f} "
+                            "(delta {:.2f}, soul {:.0f}/{:.0f})",
+                mag, before, after, after - before, soul, grand);
         }
         p->PlayPickUpSound(gemObj, false, false);
         SKSE::log::info("[RECHARGE] '{}' {:.0f} -> {:.0f} (+{:.0f}, soul {})",

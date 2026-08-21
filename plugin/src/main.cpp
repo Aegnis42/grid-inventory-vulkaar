@@ -1416,6 +1416,13 @@ namespace
         // the wheel would have left the menu suppressed with nothing put in
         // its place -- the favourites key would simply have stopped working.
         if (!FUI::Wheeler::Enabled()) return false;
+        // ★...and the same stand-down the hotkey makes. In beast form the wheel
+        // passes the key through, the engine opens its own menu -- and this
+        // line used to shut it again a frame later, so the player saw NOTHING
+        // open and stayed locked in the form (measured: the yield fired on
+        // every press, no menu). The takeover has two halves and both have to
+        // let go.
+        if (FUI::Wheeler::YieldingToVanilla()) return false;
         if (!a_event.opening) return false;
         if (auto* mq = RE::UIMessageQueue::GetSingleton()) {
             mq->AddMessage(RE::FavoritesMenu::MENU_NAME,

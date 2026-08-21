@@ -2794,6 +2794,13 @@ namespace FUI::Wheeler
     // three -- so eating the key offered nothing and locked the player in the
     // form (user report ⑬). The test is the RACE being unplayable, which is
     // what a transformation IS, so modded forms ride the same answer.
+    bool YieldingToVanilla()
+    {
+        auto* p = RE::PlayerCharacter::GetSingleton();
+        auto* race = p ? p->GetRace() : nullptr;
+        return race && !race->GetPlayable();
+    }
+
     bool SomethingElseOwnsTheKey()
     {
         if (auto* ui = RE::UI::GetSingleton()) {
@@ -2804,15 +2811,14 @@ namespace FUI::Wheeler
                 }
             }
         }
-        if (auto* p = RE::PlayerCharacter::GetSingleton()) {
-            if (auto* race = p->GetRace(); race && !race->GetPlayable()) {
-                // Rare and worth measuring: which races actually land here
-                // (the plan asks whether modded transformations do).
-                SKSE::log::info("[WHEEL] yielding the favourites key -- "
-                                "transformed into '{}' (unplayable race)",
-                    race->GetName() ? race->GetName() : "?");
-                return true;
-            }
+        if (YieldingToVanilla()) {
+            // Rare and worth measuring: which races actually land here
+            // (the plan asks whether modded transformations do).
+            auto* race = RE::PlayerCharacter::GetSingleton()->GetRace();
+            SKSE::log::info("[WHEEL] yielding the favourites key -- "
+                            "transformed into '{}' (unplayable race)",
+                race->GetName() ? race->GetName() : "?");
+            return true;
         }
         return false;
     }

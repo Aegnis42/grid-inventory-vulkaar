@@ -197,6 +197,16 @@ namespace FUI::Wheeler
     // ★It is NOT save state. Which UI you prefer is a property of the install,
     // like the skin and the language, so it lives in the ui ini beside them.
     [[nodiscard]] bool Enabled();
+
+    // ★The wheel stands down entirely while the player is TRANSFORMED (an
+    // unplayable race -- werewolf, vampire lord, whatever a mod adds): a beast
+    // has no stars, no worn gear and no presets, and reverting runs through the
+    // vanilla favourites menu. Both halves of the takeover have to ask this --
+    // the hotkey (so the press passes through) AND the menu intercept in
+    // main.cpp (so what the press opens is allowed to stay open). Gating only
+    // the first leaves the key working and the menu closing on sight, which is
+    // the same locked-in-beast-form the report described.
+    [[nodiscard]] bool YieldingToVanilla();
     void SetEnabled(bool a_on);
 
     // ★★A star has just been taken off this form, so it gives up its place on
