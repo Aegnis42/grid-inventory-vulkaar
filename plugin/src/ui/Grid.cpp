@@ -12786,43 +12786,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             { DropWhere::kVoid, WholeToVoid },
         };
 
-        // ★S-0b: WHY A GOLD DROP WENT WHERE IT WENT.
-        //
-        // Reported: storing gold in a chest by drag sometimes does not store,
-        // and the tile lands in an empty inventory cell instead -- seemingly
-        // after the gold had been repositioned on the board first. Reading did
-        // not settle it. The obvious suspect was the table order (kCellArea
-        // sits above kPartnerLoot, so a board match wins), but the two hover
-        // flags cannot both be true in one frame: ImGui resolves z-order and
-        // names exactly one hovered window, and each flag is computed from
-        // INSIDE the window claiming it.
-        //
-        // So this says what actually happened instead of guessing again. Coins
-        // only, and only while something is being dropped, so it stays quiet.
-        const char* DropWhereName(DropWhere a_w)
-        {
-            switch (a_w) {
-            case DropWhere::kEquipSlot:         return "equipSlot";
-            case DropWhere::kTrashArea:         return "trash";
-            case DropWhere::kEmptyCell:         return "emptyCell";
-            case DropWhere::kBlockerSingle:     return "blocker1";
-            case DropWhere::kCellArea:          return "cellArea";
-            case DropWhere::kPartnerLoot:       return "partnerLoot";
-            case DropWhere::kPartnerBarter:     return "partnerBarter";
-            case DropWhere::kPartnerPickpocket: return "partnerPick";
-            case DropWhere::kVoid:              return "void";
-            case DropWhere::kAlways:            return "always";
-            }
-            return "?";
-        }
-
-        bool HeldIsCoinish(const Held& a_held)
-        {
-            if (!a_held.obj) return false;
-            const RE::FormID f = a_held.obj->GetFormID();
-            return a_held.obj->IsGold() || GoldCoins::IsCoinForm(f);
-        }
-
         void ResolveDrop(Held& a_held)
         {
             const DropRoute* rows = nullptr;
@@ -12843,40 +12806,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 rows = kWholeTileRoutes;
                 n = std::size(kWholeTileRoutes);
             }
-            const bool trace = HeldIsCoinish(a_held);
-            if (trace) {
-                const bool cellOk = g_target.has &&
-                                    g_target.view < static_cast<int>(g_views.size());
-                SKSE::log::info(
-                    "[GOLDDROP] key '{}' value {} preSplit {} fromPartner {} | "
-                    "partnerHovered {} mode {} | target has {} valid {} view {} "
-                    "bag '{}' blockers {} | slot '{}'",
-                    a_held.key, a_held.coinValue, a_held.preSplit, a_held.fromPartner,
-                    LootBarter::IsPartnerHovered(),
-                    static_cast<int>(LootBarter::CurrentMode()),
-                    g_target.has, g_target.valid, g_target.view,
-                    cellOk ? g_views[g_target.view].bagKey : std::string{"<none>"},
-                    g_target.blockers.size(), g_slotTarget);
-            }
-            bool consumed = false;
             for (size_t i = 0; i < n; ++i) {
                 if (!DropWhereMatches(rows[i].where)) continue;
-                if (trace) {
-                    SKSE::log::info("[GOLDDROP]   row {} '{}' matched",
-                                    i, DropWhereName(rows[i].where));
-                }
-                if (rows[i].handler(a_held)) {
-                    if (trace) {
-                        SKSE::log::info("[GOLDDROP]   -> consumed by '{}'",
-                                        DropWhereName(rows[i].where));
-                    }
-                    consumed = true;
-                    break;
-                }
-                if (trace) SKSE::log::info("[GOLDDROP]   -> declined, next row");
-            }
-            if (trace && !consumed) {
-                SKSE::log::info("[GOLDDROP]   -> no route consumed it (still carried)");
+                if (rows[i].handler(a_held)) break;
             }
             // no consuming route: keep carrying (window chrome etc.)
             if (alwaysRebuild) RequestRebuild();
