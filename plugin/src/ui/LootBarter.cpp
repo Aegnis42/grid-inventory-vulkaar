@@ -1061,46 +1061,6 @@ namespace FUI::LootBarter
             return nullptr;
         }
 
-        // ⑰ MEASUREMENT: name every ownership source, and describe the lists a
-        // reference is holding for one form. Two takes of this -- the shelf
-        // before, the player after -- is the whole picture the guessing has
-        // been standing in for.
-        std::string OwnerReport(RE::TESObjectREFR* a_ref)
-        {
-            if (!a_ref) return "(null ref)";
-            const auto nm = [](RE::TESForm* f) {
-                return f ? std::string(f->GetName() ? f->GetName() : "?") +
-                               fmt::format("[{:08X}]", f->GetFormID())
-                         : std::string("-");
-            };
-            auto* cell = a_ref->GetParentCell();
-            return fmt::format(
-                "ref own={} actor={} fac={} | cell own={} actor={} fac={} | offLimits={}",
-                nm(a_ref->GetOwner()), nm(a_ref->GetActorOwner()),
-                nm(a_ref->GetFactionOwner()),
-                cell ? nm(cell->GetOwner()) : "-",
-                cell ? nm(cell->GetActorOwner()) : "-",
-                cell ? nm(cell->GetFactionOwner()) : "-",
-                a_ref->IsOffLimits() ? "y" : "n");
-        }
-
-        std::string ListReport(RE::TESObjectREFR* a_ref, RE::TESBoundObject* a_obj)
-        {
-            auto* e = Grid::LiveEntryOf(a_ref, a_obj);
-            if (!e) return "(no entry)";
-            std::string out = fmt::format("delta={}", e->countDelta);
-            if (!e->extraLists) return out + " lists=(none)";
-            int n = 0;
-            for (auto* l : *e->extraLists) {
-                if (!l) continue;
-                ++n;
-                auto* own = l->GetOwner();
-                out += fmt::format(" [{}x own={}]", (std::max)(1, l->GetCount()),
-                                   own ? (own->GetName() ? own->GetName() : "?") : "-");
-            }
-            return out + fmt::format(" lists={}", n);
-        }
-
         Grid::UnitChoice SourceUnit(RE::TESObjectREFR* a_source, const XferReq& a_r)
         {
             auto* entry = Grid::LiveEntryOf(a_source, a_r.obj);
@@ -1223,51 +1183,6 @@ namespace FUI::LootBarter
                 if (g_mode == Mode::kSteal) {
                     player->StealAlarm(source, r.obj, r.count,
                         r.obj->GetGoldValue() * r.count, ContainerOwner(source), true);
-                    // ★★⑰ MEASUREMENT, not a fix. Reported: a five-stack taken
-                    // out of an owned container arrives as four clean items and
-                    // one stolen. Reading got as far as a hypothesis -- that
-                    // naming a sub-stack (pick.xl, there for GI42) splits the
-                    // engine's removal, stamping only the named part -- and no
-                    // further, because an owned chest usually carries ownership
-                    // on the CONTAINER rather than on each item, in which case
-                    // there is no list to name and the split comes from
-                    // somewhere else entirely.
-                    //
-                    // So this prints the two things that tell those apart: what
-                    // we named, and what the entry actually holds. Whichever
-                    // way it reads, the next step stops being a guess.
-                    {
-                        auto* e = Grid::LiveEntryOf(source, r.obj);
-                        std::string lists;
-                        int nl = 0;
-                        if (e && e->extraLists) {
-                            for (auto* xl : *e->extraLists) {
-                                if (!xl) continue;
-                                ++nl;
-                                lists += fmt::format(
-                                    " [{}x own={} uid={:04X} sig={:04X}]",
-                                    (std::max)(1, xl->GetCount()),
-                                    xl->GetByType<RE::ExtraOwnership>() ? "y" : "n",
-                                    xl->GetByType<RE::ExtraUniqueID>()
-                                        ? xl->GetByType<RE::ExtraUniqueID>()->uniqueID : 0,
-                                    Grid::InstanceSigOf(xl));
-                            }
-                        }
-                        SKSE::log::info(
-                            "[STEAL] '{}' want {} | pick kind={} xl={} xlCount={} | "
-                            "entry total={} lists={}{}",
-                            r.obj->GetName() ? r.obj->GetName() : "?", r.count,
-                            static_cast<int>(pick.kind),
-                            pick.xl ? "named" : "null",
-                            pick.xl ? (std::max)(1, pick.xl->GetCount()) : -1,
-                            e ? e->countDelta : -1, nl,
-                            lists.empty() ? " (none)" : lists);
-                        SKSE::log::info("[STEAL]   owners: {}", OwnerReport(source));
-                        SKSE::log::info("[STEAL]   shelf before: {}",
-                                        ListReport(source, r.obj));
-                        SKSE::log::info("[STEAL]   player before: {}",
-                                        ListReport(player, r.obj));
-                    }
                 }
                 // ★★⑰ NAMING A LIST COSTS THE STEAL STAMP.
                 //
@@ -1391,12 +1306,12 @@ namespace FUI::LootBarter
                             }
                         }
                     }
-                    SKSE::log::info("[STEAL] '{}' x{}: {} arriving list(s) stamped "
-                                    "(owner {:08X}) | {}",
-                                    r.obj->GetName() ? r.obj->GetName() : "?",
-                                    r.count, marked,
-                                    owner ? owner->GetFormID() : 0,
-                                    ListReport(player, r.obj));
+                    if (marked > 0) {
+                        SKSE::log::info("[STEAL] '{}' x{}: {} list(s) stamped for {:08X}",
+                                        r.obj->GetName() ? r.obj->GetName() : "?",
+                                        r.count, marked,
+                                        owner ? owner->GetFormID() : 0);
+                    }
                 }
                 ClearOut(r.obj, r.uid, r.sig, r.count);   // engine moved it
                 itemSound(r.obj, true);
