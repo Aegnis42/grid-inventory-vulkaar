@@ -18,7 +18,7 @@ TAB)은 바닐라/SkyUI 그대로입니다.
 |------|------|
 | 게임 | Skyrim Special Edition / Anniversary Edition (1.5.x ~ 1.6.x 전 버전) |
 | 필수 | [SKSE64](https://skse.silverlock.org/) |
-| 필수 | [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444) |
+| 필수 | [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444) — 구매 여부가 아니라 **exe 버전**에 맞는 파일을 받으세요: 1.6.x는 *All in one (AE)*, 1.5.97은 *(SE)*. 반대로 받으면 실행 시 `failed to open address library file`로 멈춥니다. |
 
 CommonLibSSE-NG 기반으로 SE/AE 전 런타임을 단일 DLL로 지원합니다.
 **SkyUI · MCM은 지원 대상이 아닙니다.**

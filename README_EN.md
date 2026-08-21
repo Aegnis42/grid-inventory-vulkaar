@@ -18,7 +18,7 @@ pack, and any modded item is supported automatically with no patches.
 |------|------|
 | Game | Skyrim Special Edition / Anniversary Edition (all of 1.5.x – 1.6.x) |
 | Required | [SKSE64](https://skse.silverlock.org/) |
-| Required | [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444) |
+| Required | [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444) — take the download that matches your **exe version**, not what you bought: *All in one (AE)* for 1.6.x, *(SE)* for 1.5.97. The wrong one fails at launch with `failed to open address library file`. |
 
 Built on CommonLibSSE-NG; one DLL covers every SE/AE runtime.
 **No SkyUI, no MCM.**

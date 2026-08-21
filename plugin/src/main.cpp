@@ -1664,13 +1664,37 @@ namespace
         }
         if (a_event.opening) {
             // BarterMenu::GetTargetRefHandle returns the PLAYER, not the
-            // merchant — the merchant is the dialogue partner. Use the
-            // MenuTopicManager speaker (falls back to the handle if null).
+            // merchant — the merchant is the dialogue partner.
             RE::TESObjectREFR* ref = nullptr;
             if (auto* mtm = RE::MenuTopicManager::GetSingleton()) {
                 if (auto sp = mtm->speaker.get()) ref = sp.get();
+                // ★the dialogue may have closed a frame before the shop opened;
+                // the engine keeps the partner here for exactly that window
+                // ("the dialogue menu was closed but the NPC is still talking")
+                if (!ref) {
+                    if (auto sp = mtm->lastSpeaker.get()) ref = sp.get();
+                }
             }
-            if (!ref) ref = HandleToRef(RE::BarterMenu::GetTargetRefHandle());
+            // ★★★AND IF WE STILL DO NOT KNOW WHO THE MERCHANT IS, WE STAND
+            // DOWN. This used to fall back to GetTargetRefHandle -- which the
+            // comment above already says is the PLAYER -- so a shop we could
+            // not identify was rendered with the player seated as the
+            // merchant: your own inventory on both sides of the window.
+            //
+            // Reported against Faction Camps, and the shape fits: a camp opens
+            // its shop from a script when you activate a tent, with no
+            // conversation at all, so there is no speaker to find. Vanilla
+            // merchants are always reached through dialogue, which is why this
+            // never showed up in testing.
+            //
+            // Standing down is the honest answer -- we cannot draw a shelf for
+            // a shop we cannot name. The vanilla barter screen opens instead
+            // and the trade works; only our grid is missing.
+            if (!ref || ref == RE::PlayerCharacter::GetSingleton()) {
+                logger::warn("[BARTER] no merchant identified (a script-opened "
+                             "shop?) -> leaving the vanilla menu up");
+                return false;
+            }
             FUI::LootBarter::Enter(FUI::LootBarter::Mode::kBarter, ref);
             if (auto* mq = RE::UIMessageQueue::GetSingleton()) {
                 mq->AddMessage(RE::BarterMenu::MENU_NAME,
@@ -2123,7 +2147,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 4, 0, 0 },
+    .Version              = { 1, 4, 1, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)
