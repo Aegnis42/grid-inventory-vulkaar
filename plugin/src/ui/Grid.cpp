@@ -1404,6 +1404,17 @@ namespace FUI::Grid
         };
         std::optional<ClickRemove> g_clickRemove;
 
+        // ★ONE PATH / O-1: the right-clicked tile, waiting for FinishFrame.
+        //
+        // A drag never mutates the board from inside the tile loop either --
+        // the pickup only names what is held, and ResolveDrop runs later, in
+        // FinishFrame, where erasing items is safe. A click that wants the same
+        // road has to wait in the same queue, so this holds the key until then.
+        // (That deferral is why the old click-remove slot existed at all; this
+        // is the same idea with the whole action in it rather than its
+        // aftermath.)
+        std::optional<std::string> g_useClick;
+
         // B2: one-shot placement hint for the next ACQUIRE that creates a new
         // tile of this form (partner-drop lands at the drop cell without a
         // premature layout entry). col<0 = no hint.
@@ -3382,76 +3393,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     GoldCoins::PinAmount(it.key, v);
                                 }
                             }
-                        } else if (it.quest && ConsumingWouldEatIt(it.obj)) {
-                            // ★Vanilla refuses this in so many words -- "You
-                            // can not eat quest items." is a string in the
-                            // game's own interface archive -- and we had no
-                            // guard at all: a quest potion or a quest spell
-                            // tome was drunk or read away on one right-click.
-                            // Found while checking the ⑤⑭ policy against the
-                            // engine's strings rather than against memory.
-                            // WEARING a quest item stays allowed (vanilla arms
-                            // you with quest weapons); only being CONSUMED is
-                            // an exit the item does not come back from.
-                            Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
-                        } else {   // D3: right-click = use, the vanilla click
-                            if (g_poolTrace) {
-                                const auto le = g_layout.count(it.key) ? g_layout[it.key]
-                                                                      : LayoutEntry{};
-                                SKSE::log::info("[ACT] rclick-equip '{}' key '{}' at [{},{}]",
-                                    it.obj->GetName(), it.key, le.col, le.row);
-                            }
-                            // The engine equips on the next Tick, so the unit
-                            // spends a frame "in the pack, not carried" and
-                            // flickers back into its old cell. Suppress it for
-                            // those frames -- but NOT via NotePendingRemove:
-                            // that mechanism resolves when the engine's stock
-                            // COUNT drops, and equipping never drops it, so the
-                            // entry never cleared and repeated equips hid one
-                            // more spare each time until the pool went blank.
-                            // ★★UseItem, not EquipItem: a click is not a
-                            // request to WEAR. The old call went through the
-                            // doll's type gate, so anything outside
-                            // WEAP/ARMO/AMMO/LIGH/ALCH/SCRL was refused before
-                            // the engine ever saw it -- which is why mod items
-                            // whose whole purpose is "click me in the
-                            // inventory" did nothing at all (AddItemMenu).
-                            // it.count: what THIS tile holds. Ammo goes on by
-                            // the tileful (Equip::EquipCountFor); everything
-                            // else ignores it and takes one.
-                            Equip::UseItem(it.obj, it.uid, it.xlIdx, it.sig, it.key,
-                                           it.count);
-                            // ...and the board bookkeeping below runs only for
-                            // a unit that is actually LEAVING. A scripted item
-                            // stays put; vacating its cell would make it hop.
-                            if (Equip::IsWearOrConsume(it.obj)) {
-                                // right-click: weapons go to the right hand,
-                                // armour has only one place to go -- and a LIGHT
-                                // (torch) goes to the LEFT. Recording it as right
-                                // meant the "has it landed?" test looked for a
-                                // worn list in the wrong hand, never found one,
-                                // and the tile flickered until the entry expired.
-                                // [DOLL] shieldL='Torch'(h2) is the proof.
-                                int hand = 0;
-                                if (it.obj->Is(RE::FormType::Weapon)) hand = 1;
-                                else if (it.obj->Is(RE::FormType::Light)) hand = 2;
-                                NotePendingEquip(it.obj, it.uid, it.sig, hand, it.key,
-                                                 Equip::EquipCountFor(it.obj, it.count),
-                                                 it.xlIdx);
-                                // stackables: name the tile that gives one up
-                                g_drainHint = { FormKey(it.obj), it.key };
-                                // ★B3 (§3-6 interrogation): this branch's only
-                                // full-rebuild job was drawing the optimistic
-                                // exit -- deferred partial remove does exactly
-                                // that at FinishFrame, mirroring the unequip's
-                                // partial ADD. Everything else the tail rebuild
-                                // maintained (trash restore, bag wiring) keeps
-                                // its rebuild below.
-                                g_clickRemove =
-                                    ClickRemove{ it.key, it.obj->GetFormID() };
-                            }
+                        } else {
+                            // ★ONE PATH / O-1: D3's right-click -- use, or put
+                            // on -- is now a TRANSFER like any other, and it
+                            // travels the road a drag travels. All this branch
+                            // does is name the tile; FinishFrame lifts it into
+                            // a carry and hands it to the USE route, where the
+                            // guards and the bookkeeping live (see WholeUse).
+                            //
+                            // The quest-consume refusal moved there with it:
+                            // a guard belongs beside the destination it is
+                            // guarding, not beside the click that aimed at it.
+                            g_useClick = it.key;
                         }
-                        if (!g_clickRemove) RequestRebuild();
+                        if (!g_clickRemove && !g_useClick) RequestRebuild();
                     }
                 }
             }
@@ -7584,6 +7539,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // same lifetime: a click queued in the frame the menu closed has no
         // board to act on any more
         g_clickRemove.reset();
+        g_useClick.reset();   // ONE PATH: same lifetime
     }
 
     void ReleaseAppliedPendingEquip(std::uint32_t a_form)
@@ -11780,6 +11736,96 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return true;
         }
 
+        // ---- ★ONE PATH / O-1: USE, as a route -----------------------------
+        //
+        // The one destination a drag cannot reach -- the player's own mouth, or
+        // the reading of a book -- and until now the only transfer that never
+        // left the draw pass. The right-click branch called the engine from
+        // inside the tile loop and left three notes to itself about what the
+        // board should look like afterwards; this is that branch, moved whole
+        // into the shape every other destination already has.
+        //
+        // What the move actually buys, stated honestly:
+        //   - The board changes at the CLICK'S OWN MOMENT, in the same place a
+        //     drag's drop changes it. The ring router's reach-backs into the
+        //     board from the engine tick (ForgetTile + DropTileDisplay, one or
+        //     more frames later) stop being necessary -- that is O-1b.
+        //   - A refusal comes back INSTANTLY. It used to be a two-second ghost:
+        //     nothing put the tile back, so the pending-equip TTL did, long
+        //     after the player had stopped believing the click worked.
+        //   - The guards sit with the destination instead of beside the click.
+        //
+        // What it does NOT buy, and the plan claimed it would: NotePendingEquip,
+        // the drain hint and the partial removal all survive. They are not
+        // stand-ins for a cursor -- they bridge the ENGINE'S LATENCY, which no
+        // amount of restructuring on our side shortens. The carry ends at the
+        // click; the engine equips or drinks a frame or more later; something
+        // has to hold the unit off the board in between, and these are it.
+        bool WholeUse(Held& a_held)
+        {
+            if (!a_held.obj) return false;
+            if (g_poolTrace) {
+                const auto le = g_layout.count(a_held.key) ? g_layout[a_held.key]
+                                                           : LayoutEntry{};
+                SKSE::log::info("[ACT] rclick-equip '{}' key '{}' at [{},{}]",
+                    a_held.obj->GetName(), a_held.key, le.col, le.row);
+            }
+            // ★Guard first, and it is the DESTINATION'S guard now: vanilla
+            // refuses this in so many words ("You can not eat quest items."),
+            // and wearing a quest item stays allowed. Declining here returns
+            // the tile to its cell -- see RunSyntheticRoute.
+            if (a_held.quest && ConsumingWouldEatIt(a_held.obj)) {
+                Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
+                return false;
+            }
+            // ★★UseItem, not EquipItem: a click is not a request to WEAR. The
+            // old call went through the doll's type gate, so anything outside
+            // WEAP/ARMO/AMMO/LIGH/ALCH/SCRL was refused before the engine ever
+            // saw it -- which is why mod items whose whole purpose is "click me
+            // in the inventory" did nothing at all (AddItemMenu).
+            // count: what THIS tile holds. Ammo goes on by the tileful
+            // (EquipCountFor); everything else ignores it and takes one.
+            if (!Equip::UseItem(a_held.obj, a_held.uid, a_held.xlIdx, a_held.sig,
+                                a_held.key, a_held.count)) {
+                return false;   // refused at our own gate: straight back
+            }
+            RE::TESBoundObject* const obj = a_held.obj;
+            const std::string         key = a_held.key;
+            const std::uint16_t       uid = a_held.uid;
+            const std::uint16_t       sig = a_held.sig;
+            const int                 xl = a_held.xlIdx;
+            const int                 count = a_held.count;
+            g_held.reset();   // the carry is spent
+
+            // ...and the board bookkeeping runs only for a unit that is
+            // actually LEAVING. A scripted item stays put; vacating its cell
+            // would make it hop.
+            if (!Equip::IsWearOrConsume(obj)) {
+                RequestRebuild();
+                return true;
+            }
+            // right-click: weapons go to the right hand, armour has only one
+            // place to go -- and a LIGHT (torch) goes to the LEFT. Recording it
+            // as right made the "has it landed?" test look for a worn list in
+            // the wrong hand, never find one, and the tile flickered until the
+            // entry expired. [DOLL] shieldL='Torch'(h2) is the proof.
+            int hand = 0;
+            if (obj->Is(RE::FormType::Weapon)) hand = 1;
+            else if (obj->Is(RE::FormType::Light)) hand = 2;
+            NotePendingEquip(obj, uid, sig, hand, key,
+                             Equip::EquipCountFor(obj, count), xl);
+            g_drainHint = { FormKey(obj), key };   // stackables: who gives one up
+            // The optimistic exit, drawn without a full rebuild -- the same
+            // partial the deferred click-remove used to run, called straight
+            // out because this already runs outside the draw pass.
+            if (!TryUseClickPartialRemove(key, obj, /*take=*/0, /*drained=*/false)) {
+                SKSE::log::info("[ONEPATH] use partial declined ('{}') -- full rebuild",
+                    key);
+                RequestRebuild();
+            }
+            return true;
+        }
+
         bool WholeStore(Held& a_held)
         {
             // dropped on the container window = STORE (coins excluded —
@@ -12384,8 +12430,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         {
             if (!g_held || !g_held->transient) return false;
             const bool consumed = a_route(*g_held);
-            if (g_held) {
-                // still held: the route declined. Put it back.
+            // ★TEST THE FLAG, not merely "is something held". A route is
+            // allowed to consume our carry and start a REAL one in its place --
+            // a drop onto an occupied slot hands the displaced item to the
+            // cursor, and that carry is the player's to put down. Asking only
+            // "is g_held set" would call that success story a decline and tear
+            // the new carry back off the cursor.
+            if (g_held && g_held->transient) {
+                // still ours: the route declined. Put it back.
                 const std::string key = g_held->key;
                 g_held.reset();
                 RequestRebuild();
@@ -12477,6 +12529,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // ★B3: the use/equip click's deferred board-side work, BEFORE the
         // rebuild gate -- a failed partial (tile already gone, shapes moved)
         // downgrades to the flag and the very next line runs the rebuild.
+        // ★ONE PATH / O-1: the right-click's transfer, run where a drag's is.
+        // Lift the named tile into a carry the player never sees and hand it to
+        // the USE route; a decline puts it straight back (RunSyntheticRoute).
+        // The tile is looked up FRESH -- anything between the click and here
+        // (an engine event, a partner transfer) may have taken it, and a click
+        // on a tile that no longer exists is simply a click on nothing.
+        if (g_useClick) {
+            const std::string key = *g_useClick;
+            g_useClick.reset();
+            const Item* tile = nullptr;
+            for (const auto& it : g_items) {
+                if (it.key == key) { tile = &it; break; }
+            }
+            if (tile && BeginSyntheticCarry(*tile)) {
+                RunSyntheticRoute(WholeUse);
+            } else {
+                SKSE::log::info("[ONEPATH] use click '{}' -- tile gone, nothing to do",
+                    key);
+            }
+        }
         if (g_clickRemove) {
             const ClickRemove cr = *g_clickRemove;
             g_clickRemove.reset();
