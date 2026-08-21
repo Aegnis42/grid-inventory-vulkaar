@@ -9309,6 +9309,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             std::uint16_t sig = 0;
         };
         std::optional<PendingRead> g_pendingRead;
+        // ⓔⓖ PROBE: the book the page was raised for, so the CLOSE can report
+        // whether anything actually registered as a read.
+        RE::FormID g_probeBook = 0;
     }
 
     void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig)
@@ -9341,7 +9344,44 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         book->GetDescription(desc, book);
         RE::BookMenu::OpenBookMenu(desc, xl, nullptr, book,
                                    RE::NiPoint3{}, RE::NiMatrix3{}, 1.0f, true);
-        SKSE::log::info("[BOOK] open '{}' ({:08X})", DisplayNameOf(book, xl), req.form);
+        // ⓔⓖ PROBE. Two reports say our reading is not the game's reading: the
+        // Dawnguard Elder Scroll does nothing at all, and a spell tome skips
+        // the "you lack the skill" gate. Both would follow if OpenBookMenu
+        // merely DRAWS THE PAGE while the engine's own door -- the one quest
+        // fragments and third-party gates hang off -- is never opened.
+        //
+        // The engine offers two doors we do not use, TESObjectBOOK::Read and
+        // ::Activate, and nothing local says which one raises the page. So
+        // this measures the current path instead of guessing at theirs: if
+        // IsRead() is still false after the page closes, our reading never
+        // counted as one, and that is the whole bug.
+        g_probeBook = req.form;
+        SKSE::log::info("[BOOK] open '{}' ({:08X}) type={} spell={} skill={} read={}",
+            DisplayNameOf(book, xl), req.form,
+            book->IsNoteScroll() ? "note/scroll" : "tome",
+            book->TeachesSpell() ? 1 : 0, book->TeachesSkill() ? 1 : 0,
+            book->IsRead() ? 1 : 0);
+    }
+
+    // ⓔⓖ PROBE: called when the Book Menu closes (main.cpp's menu sink).
+    void ProbeBookClosed()
+    {
+        if (g_probeBook == 0) return;
+        const RE::FormID form = g_probeBook;
+        g_probeBook = 0;
+        auto* book = RE::TESForm::LookupByID<RE::TESObjectBOOK>(form);
+        if (!book) {
+            SKSE::log::info("[BOOK] closed ({:08X}) -- the form is gone", form);
+            return;
+        }
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        int held = 0;
+        if (player) {
+            if (auto* e = LiveEntryOf(player, book)) held = e->countDelta;
+        }
+        SKSE::log::info("[BOOK] closed '{}' ({:08X}) read={} held={}",
+            book->GetName() ? book->GetName() : "?", form,
+            book->IsRead() ? 1 : 0, held);
     }
 
     std::string DefKeyOf(RE::TESForm* a_form)

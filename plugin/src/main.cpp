@@ -1738,6 +1738,12 @@ namespace
                 }
                 // one handler per menu concern; true = event fully handled
                 HandleLockpickAutoReopen(*a_event);   // observation only
+                // ⓔⓖ PROBE: the Book Menu closing is where "was it read?"
+                // becomes answerable -- observation only, no branch taken.
+                if (!a_event->opening &&
+                    a_event->menuName == RE::BookMenu::MENU_NAME) {
+                    FUI::Grid::ProbeBookClosed();
+                }
                 HandleMessageBoxAside(*a_event) ||
                     HandleTextInputHotkeyBlock(*a_event) ||
                     HandleFavoritesMenuIntercept(*a_event) ||

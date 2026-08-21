@@ -246,6 +246,8 @@ namespace FUI::Grid
     // (no draw, no input) so the book is visible and closable.
     void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig);
     void ProcessBookRead();   // UIRoot::Tick
+    // ⓔⓖ PROBE: report what the engine thinks happened once the page closes.
+    void ProbeBookClosed();   // main.cpp menu sink
 
     // GI32: apply queued favourite toggles. MUST run on the game thread --
     // the native SetFavorite refuses to add a second favourite from inside the
