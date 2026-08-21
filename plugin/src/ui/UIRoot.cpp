@@ -627,7 +627,7 @@ namespace FUI::UIRoot
             kActNudgeR    = 1u << 7,
             kActNudgeU    = 1u << 8,
             kActNudgeD    = 1u << 9,
-            // ★⑩: rotation, the one thing on this board a pad could not do.
+            // ★②: rotation, the one thing on this board a pad could not do.
             // Everything else here already answers to a VANILLA binding -- the
             // engine names the button and the player's own remap decides it --
             // but turning an item is ours alone, so there is no game action to
@@ -652,29 +652,18 @@ namespace FUI::UIRoot
         std::atomic<bool> g_padSeed{ false };   // park the cursor mid-screen once
         std::atomic<bool> g_padSuppressed{ false };   // the mouse took over
 
-        // ★★★ON A PAD WE DRAW THE POINTER. FULL STOP.
-        //
-        // There used to be a probe here: offer the stick to the engine, watch
-        // whether its own arrow followed, and if it did, draw nothing and ride
-        // along. It worked on this machine and kept failing on other people's
-        // -- "the pad cursor is invisible" is the most repeated report this mod
-        // has, and it could never be reproduced here, because whether the
-        // engine drives that arrow depends on the setup.
-        //
-        // The evidence the probe rested on was never strong enough to carry a
-        // decision. This menu runs while the game parks its cursor at screen
-        // centre and warps it back, and a warp is movement -- so "the engine's
-        // cursor moved" could be true of an arrow that was not following the
-        // stick at all. Latch that once and there is no pointer for the rest of
-        // the session, silently, on a machine we cannot see. A report we cannot
-        // reproduce and cannot get a log for is not a thing to detect better.
-        //
-        // Drawing our own has no such dependency: GridMenu stops asking for the
-        // vanilla arrow while a pad is driving (WantsGameCursor), so there is
-        // exactly one pointer on screen and it is the one we put there. That was
-        // already the branch every working setup ran, this one included. Making
-        // it the only branch does not fix the report -- it removes the thing
-        // that produced it.
+        // Who owns the pointer on a pad — decided ONCE by observation, never
+        // per frame (a per-frame verdict is what made it blink).
+        enum class PadCursorMode : std::uint8_t
+        {
+            kProbing = 0,   // offering the stick to the engine, watching
+            kEngine,        // the game's own arrow follows: use it, draw nothing
+            kOwn            // it does not: integrate and draw our own
+        };
+        PadCursorMode g_padCursorMode = PadCursorMode::kProbing;
+        float         g_engineLastX = 0.0f;
+        float         g_engineLastY = 0.0f;
+        int           g_engineStillFrames = 0;
         bool              g_bookWasOpen = false;   // Book Menu edge (see Render)
 
         // Called from the input sink (game thread, but not the render pass) —
@@ -788,8 +777,7 @@ namespace FUI::UIRoot
             //
             // ★Rotation is deliberately not looked up in ControlMap above:
             // there is no game action called "turn the thing you are holding",
-            // so there would be nothing to ask for. It is ours, and it is
-            // pinned to physical buttons.
+            // so there would be nothing to ask for.
             case K::kLeftTrigger:
                 return Grid::IsHolding() ? kActRotL : kActSplit;
             case K::kRightTrigger:
@@ -826,8 +814,8 @@ namespace FUI::UIRoot
             static constexpr std::uint32_t kWanted[] = {
                 kActPrimary, kActSecondary, kActDrop,
                 kActFavorite, kActInspect, kActSplit,
-                // ★⑩: rotate has buttons now -- the stick presses -- so the
-                // prompts can name them instead of falling back to A / D.
+                // ★②: rotate has buttons now -- the triggers, while something
+                // is on the cursor -- so the prompts can name them.
                 kActRotL, kActRotR,
             };
             static_assert(std::size(kWanted) == std::size(g_padLabel));
@@ -841,12 +829,12 @@ namespace FUI::UIRoot
                     if ((act & kWanted[i]) != 0 && !g_padLabel[i]) g_padLabel[i] = b.name;
                 }
             }
-            // ★The triggers answer differently depending on whether something
-            // is on the cursor, and this runs once, at menu open, with an empty
-            // one -- so the loop above can only ever have seen them as the split
+            // ★The triggers answer differently depending on whether something is
+            // on the cursor, and this runs once, at menu open, with an empty one
+            // -- so the loop above can only ever have seen them as the split
             // modifier. Name their other meaning outright rather than resolving
-            // a state-dependent binding at a moment whose state we know is the
-            // wrong one.
+            // a state-dependent binding at a moment whose state is known to be
+            // the wrong one.
             for (std::size_t i = 0; i < std::size(kWanted); ++i) {
                 if (kWanted[i] == kActRotL) g_padLabel[i] = "LT";
                 if (kWanted[i] == kActRotR) g_padLabel[i] = "RT";
@@ -886,6 +874,9 @@ namespace FUI::UIRoot
 
             if (g_padActive.load()) {
                 auto* mc = RE::MenuCursor::GetSingleton();
+                auto* uiS = RE::UI::GetSingleton();
+                const bool cursorUp =
+                    mc && uiS && uiS->IsMenuOpen(RE::CursorMenu::MENU_NAME);
 
                 const bool justSeeded = g_padSeed.exchange(false);
                 if (justSeeded) {
@@ -900,20 +891,51 @@ namespace FUI::UIRoot
 
                 const float mx = g_padMoveX.load();
                 const float my = g_padMoveY.load();
+                const bool  wanted = (mx != 0.0f || my != 0.0f);
 
+                // ★Did the ENGINE advance its own cursor? That is the whole
+                //  question, and it is cheaper to observe than to predict:
+                //  FeedEngineCursor hands CursorMenu the real stick event, and
+                //  if its own handler acts on it, cursorPos* moves by itself.
+                //  Latch the answer once — deciding per frame is what made the
+                //  pointer blink, since the verdict flipped with the Cursor
+                //  Menu's own open/close.
+                bool engineMoved = false;
+                if (cursorUp && !justSeeded) {
+                    engineMoved = (mc->cursorPosX != g_engineLastX ||
+                                   mc->cursorPosY != g_engineLastY);
+                }
+                if (cursorUp) {
+                    g_engineLastX = mc->cursorPosX;
+                    g_engineLastY = mc->cursorPosY;
+                }
 
-                {
+                if (g_padCursorMode == PadCursorMode::kProbing && wanted) {
+                    if (engineMoved) {
+                        g_padCursorMode = PadCursorMode::kEngine;
+                        SKSE::log::info("[PAD] the engine drives its own cursor — using it");
+                    } else if (++g_engineStillFrames > 20) {
+                        g_padCursorMode = PadCursorMode::kOwn;
+                        SKSE::log::info("[PAD] engine cursor did not follow — drawing our own");
+                    }
+                }
+
+                if (g_padCursorMode == PadCursorMode::kEngine) {
+                    // The game's arrow IS the pointer; just follow it.
+                    g_padCursor = ImVec2(mc->cursorPosX, mc->cursorPosY);
+                    io.MouseDrawCursor = false;
+                } else {
                     const float dt = std::clamp(io.DeltaTime, 1.0f / 240.0f, 1.0f / 20.0f);
                     g_padCursor.x += mx * kPadCursorSpeed * dt;
                     g_padCursor.y += my * kPadCursorSpeed * dt;
                     g_padCursor.x = std::clamp(g_padCursor.x, 0.0f, io.DisplaySize.x - 1.0f);
                     g_padCursor.y = std::clamp(g_padCursor.y, 0.0f, io.DisplaySize.y - 1.0f);
                     io.MouseDrawCursor = true;
-                    // Keep the game's own arrow parked on top of ours. It is not
-                    // drawn while a pad is driving, but the engine still syncs
-                    // from it on a button press -- and that sync has to land
-                    // where the player is pointing, not where the arrow froze.
-                    if (mc) {
+                    // Keep the game's frozen arrow parked on top of ours, so the
+                    // sync it does perform (on a button press) lands HERE rather
+                    // than leaving a second arrow stranded mid-screen. Not done
+                    // while probing: it would forge the very signal we measure.
+                    if (g_padCursorMode == PadCursorMode::kOwn && mc) {
                         mc->cursorPosX = g_padCursor.x;
                         mc->cursorPosY = g_padCursor.y;
                     }
@@ -3762,10 +3784,34 @@ namespace FUI::UIRoot
 
     bool WantsGameCursor()
     {
-        // Mouse mode wants the vanilla arrow. A pad never does: we draw the
-        // pointer ourselves, and asking for the game's as well would strand a
-        // second one on screen.
-        return !g_padActive.load();
+        // Mouse mode always wants the vanilla arrow. On a pad we want it too —
+        // unless we have concluded it will not follow and are drawing our own,
+        // in which case asking for it just strands a second arrow on screen.
+        return !g_padActive.load() || g_padCursorMode != PadCursorMode::kOwn;
+    }
+
+    void FeedEngineCursor(RE::ThumbstickEvent* a_event)
+    {
+        if (!a_event) return;
+        if (g_padCursorMode == PadCursorMode::kOwn) return;   // settled: don't poke it
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui || !ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)) return;
+        const auto menu = ui->GetMenu(RE::CursorMenu::MENU_NAME);
+        if (!menu) return;
+        auto* handler = static_cast<RE::CursorMenu*>(menu.get())->AsMenuEventHandler();
+        if (!handler) return;
+
+        // CanProcess is the engine's own gate. We log its first verdict — a
+        // refusal is the single most useful thing to know if this path stays
+        // dead — but still offer the event: we are deliberately driving a
+        // cursor the engine has concluded nobody is driving.
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            SKSE::log::info("[PAD] CursorMenu handler reached (CanProcess={})",
+                            handler->CanProcess(a_event) ? "yes" : "no");
+        }
+        handler->ProcessThumbstick(a_event);
     }
 
     void NotePadStick(bool a_right, float a_x, float a_y)

@@ -39,10 +39,6 @@ namespace FUI
         static void OnKeyEvent(RE::GFxEvent* a_event, bool a_down);
         static void OnCharEvent(RE::GFxEvent* a_event);
         static void ForceCursor();
-        // show / hide the vanilla Cursor Menu. Both directions, because a pad
-        // session draws its own pointer and has to put the engine's away --
-        // and hand it back when the menu closes.
-        static void SetGameCursor(bool a_want);
 
         static ImGuiKey GFxKeyToImGuiKey(RE::GFxKey::Code a_keyCode);
     };

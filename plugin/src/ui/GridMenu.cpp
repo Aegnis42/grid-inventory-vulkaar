@@ -106,33 +106,19 @@ namespace FUI
         }
     }
 
-    // ★★HIDE IT TOO, not just show it.
-    //
-    // This only ever ASKED for the vanilla arrow, never asked it to go away --
-    // which was invisible while every path wanted it up. On a pad we now draw
-    // the pointer ourselves, and an arrow that is already open simply stayed
-    // open: frozen where it was, on top of ours, and jumping to our position on
-    // a button press. (The jump is not a coincidence -- MenuCursor only re-reads
-    // cursorPos* when an input event arrives, so writing that pair moves the
-    // arrow at the next press and not before. Two cursors, one of them lying.)
-    //
-    // Show and hide are the same decision, so they belong in one place.
-    void GridInventoryMenu::SetGameCursor(bool a_want)
-    {
-        auto* ui = RE::UI::GetSingleton();
-        if (!ui) return;
-        if (ui->IsMenuOpen(RE::CursorMenu::MENU_NAME) == a_want) return;
-        const auto type = a_want ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide;
-        SKSE::GetTaskInterface()->AddUITask([type]() {
-            if (const auto mq = RE::UIMessageQueue::GetSingleton()) {
-                mq->AddMessage(RE::CursorMenu::MENU_NAME, type, nullptr);
-            }
-        });
-    }
-
     void GridInventoryMenu::ForceCursor()
     {
-        SetGameCursor(UIRoot::WantsGameCursor());
+        // Keep asking UNLESS we have taken the pointer over ourselves — the
+        // engine's arrow is what a pad should be moving, so it has to stay up
+        // for that path to work at all.
+        if (!UIRoot::WantsGameCursor()) return;
+        if (auto* ui = RE::UI::GetSingleton(); ui && !ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)) {
+            SKSE::GetTaskInterface()->AddUITask([]() {
+                if (const auto mq = RE::UIMessageQueue::GetSingleton()) {
+                    mq->AddMessage(RE::CursorMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kShow, nullptr);
+                }
+            });
+        }
     }
 
     void GridInventoryMenu::AdvanceMovie(float a_interval, std::uint32_t a_currentTime)
@@ -221,12 +207,6 @@ namespace FUI
         FUI::WornLedger::Audit("menu-close");
         ItemPreview::GetSingleton()->End();
         UIRoot::OnClose();
-        // ★★AND GIVE IT BACK ON THE WAY OUT. Nothing else manages the vanilla
-        // cursor -- ForceCursor runs from OUR AdvanceMovie -- so a pad session
-        // that hid it and then closed would leave the rest of the game without
-        // a pointer. Unconditional on purpose: asking for a cursor that is
-        // already up costs a comparison.
-        SetGameCursor(true);
     }
 
     RE::UI_MESSAGE_RESULTS GridInventoryMenu::ProcessMessage(RE::UIMessage& a_message)
