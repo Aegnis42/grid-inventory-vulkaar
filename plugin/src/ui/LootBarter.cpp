@@ -2335,10 +2335,11 @@ namespace
                         g_carryStolen = b.stolen;
                         Grid::BeginPartnerCarry(s.obj, b.count, 0,
                                                 -1.0f, -1.0f, 0, -1, 0, s.rot);
-                    } else if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                        // ★★AND RIGHT-CLICK TAKES IT, like every other cell on
-                        // this side of the window. Only the lift was ever wired
-                        // up here, so an item inside a shelved bag was the one
+                    } else if (ImGui::IsItemClicked(ImGuiMouseButton_Right) &&
+                               Grid::ResolveDef(s.obj).bag == 0) {
+                        // ★★RIGHT-CLICK TAKES IT, like every other cell on this
+                        // side of the window. Only the lift was ever wired up
+                        // here, so an item inside a shelved bag was the one
                         // thing in a container that could not be taken the
                         // ordinary way -- it had to be dragged out by hand.
                         //
@@ -2348,6 +2349,15 @@ namespace
                         // request any visible cell would make. No acting cell:
                         // this take retires no cell, because the bundle entry
                         // was never one.
+                        //
+                        // ★★A BAG IS EXCLUDED, and that is this board's rule
+                        // rather than an exception to it: right-click on a bag
+                        // is ALWAYS the window toggle, and a bag changes
+                        // containers by DRAG only. The shelf's own top-level
+                        // bags have worked that way since 1.3.1; letting a
+                        // nested one be taken by right-click made this the one
+                        // place the rule did not hold. Dragging it out still
+                        // brings its whole branch.
                         if (Grid::CanFitNewItem(s.obj)) {
                             // ★NOTED, NOT DONE. This loop draws as well as
                             // listens, and mutating the bundle inside it meant
