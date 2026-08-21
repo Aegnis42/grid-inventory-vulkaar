@@ -67,7 +67,13 @@ namespace FUI::LootBarter
     // then used exactly as a right-click on the player's own board would use it
     // -- the engine can only consume from the player's inventory, so passing
     // through it is not a shortcut but the only road there is.
-    void RequestTake(RE::TESBoundObject* a_obj, int a_count,
+    // ★S-0: returns whether the transfer was actually QUEUED. Almost every
+    // caller ignores it and always could -- the request is fire-and-forget by
+    // design. It exists for the one caller that has to arrange something else
+    // around the arrival (announcing incoming gold, see GoldCoins::
+    // ExpectIncoming): a promise made for a transfer that was refused up front
+    // is a lie, and the refusal is invisible from outside without this.
+    bool RequestTake(RE::TESBoundObject* a_obj, int a_count,
                      std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
                      bool a_fromWorn = false, bool a_useAfter = false);
     // a_xlIdx: where the outgoing unit sits, so the sink removes THAT one

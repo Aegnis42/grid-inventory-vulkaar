@@ -118,6 +118,34 @@ namespace FUI::GoldCoins
     // parking) -- the shelf spot is the book, these settle the engine gold.
     void CreditLedger(int a_amount);
     void DebitLedger(int a_amount);
+
+    // ★★S-0: GOLD WE ASKED FOR, STILL IN TRANSIT.
+    //
+    // Taking gold out of a container moves engine coins through LootBarter's
+    // request queue, not through this book -- so this book has no way to tell
+    // it apart from a purse the player stepped on in a cave. That mattered
+    // twice, and both were reported as bugs:
+    //
+    //   - The auto-store (Tick STEP 2) exists to sweep exactly that kind of
+    //     outside income into a held pouch, so a DRAGGED amount was swallowed
+    //     by the pouch on arrival while the pinned purse on the cursor drew
+    //     its value out of walking gold -- the coins the player had laid out
+    //     shrank by what they had just dragged in (measured: 663 G).
+    //   - Walking gold is (ledger + pending) - pouch - pinned, and the pin
+    //     lands the instant the drop does while the ledger moves a tick later.
+    //     One frame of a smaller total is one frame of a smaller coin tile:
+    //     the blink.
+    //
+    // Announcing the transfer answers both from one place. The amount counts
+    // toward walking gold THIS frame (so a pin against it nets to zero), and
+    // the sweep knows to leave that much alone. Self-cancelling: whatever has
+    // not arrived within a short grace is forgotten, so a refused or lost
+    // request cannot inflate the total for the rest of the session.
+    //
+    // ★Announce only for a transfer that PLACES the gold (a drag, which
+    // promises this many coins in that square). A right-click take is loot,
+    // and loot going into a held pouch is the auto-store working.
+    void ExpectIncoming(int a_value);
     int  StoreToPouch(const std::string& a_tileKey, int a_value);   // amount actually stored
     int  StoreToPouch(int a_value);   // no pouch named -> the fullest with room
     void WithdrawFrom(const std::string& a_tileKey, int a_value, bool a_sound = true);

@@ -11153,12 +11153,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // that purse is handed straight to those routes -- the same
                 // ones a shift-split fragment uses. No new grammar, and the
                 // slider is skipped: a drag has already said how much.
+                //
+                // ★★S-0: AND THE LEDGER IS TOLD FIRST. The take moves engine
+                // coins through LootBarter's queue, which the gold book cannot
+                // see, so without the announcement below it read this arrival
+                // as loot off the floor. Two reports came out of that: the
+                // pouch's auto-store swallowed the dragged amount while the pin
+                // drew its value from the coins already laid out, and the pin
+                // landing a tick before the credit blinked a tile.
+                // GoldCoins::ExpectIncoming says both of those out of one line
+                // -- and it is said ONLY on a queued request, because a promise
+                // made for a refused transfer is a lie the ledger would carry.
                 if (a_held.obj->IsGold() &&
                     LootBarter::IsLootMode(LootBarter::CurrentMode())) {
-                    LootBarter::RequestTake(a_held.obj, cnt, a_held.uid, a_held.sig);
-                    g_held.reset();
-                    CarryWithdrawnGold(cnt);   // credit is queued by the take
-                    if (g_held) ResolveDrop(*g_held);
+                    if (LootBarter::RequestTake(a_held.obj, cnt, a_held.uid, a_held.sig)) {
+                        GoldCoins::ExpectIncoming(cnt);
+                        g_held.reset();
+                        CarryWithdrawnGold(cnt);   // nets to zero against the above
+                        if (g_held) ResolveDrop(*g_held);
+                    } else {
+                        g_held.reset();   // refused: the carry goes home
+                    }
                     RequestRebuild();
                     return true;
                 }

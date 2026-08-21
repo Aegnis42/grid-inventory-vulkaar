@@ -135,6 +135,15 @@ namespace FUI::GoldCoins
         // so the starting gold is NOT mistaken for a fresh pickup).
         int g_lastLedger = -1;
 
+        // ★S-0: gold a transfer WE started is bringing in, not yet arrived.
+        // See ExpectIncoming in the header for why this exists. The age is a
+        // tick budget: the request lands a frame or two later, so anything
+        // still outstanding well past that is never coming and is dropped
+        // rather than left inflating walking gold forever.
+        int g_expected = 0;
+        int g_expectedAge = 0;
+        constexpr int kExpectGrace = 120;   // ~2 s of ticks; the gap is 1-2
+
         // ---- single deferred-ledger queue ----------------------------------
         // Every engine gold mutation triggered from the RENDER pass or an
         // event sink is deferred to Tick (game thread). One queue replaces the
@@ -158,9 +167,13 @@ namespace FUI::GoldCoins
         std::vector<LedgerOp> g_pending;
 
         // net change the pending ops will make to the ledger (+ credit, - debit)
+        // ★S-0: an announced incoming transfer counts too. It is not one of OUR
+        // ops -- LootBarter moves those coins -- but from walking gold's point
+        // of view the two are the same statement: this much is on its way, so
+        // stop drawing the board as if it were not.
         int PendingLedgerDelta()
         {
-            int d = 0;
+            int d = g_expected;
             for (const auto& op : g_pending) {
                 d += (op.kind == LedgerOp::kPouchReturn) ? op.value : -op.value;
             }
@@ -375,6 +388,16 @@ namespace FUI::GoldCoins
         if (a_amount <= 0) return;
         g_pending.push_back({ LedgerOp::kDebit, a_amount });
         g_dirty = true;
+    }
+
+    void ExpectIncoming(int a_value)
+    {
+        if (a_value <= 0) return;
+        g_expected += a_value;
+        g_expectedAge = 0;   // a fresh announcement renews the whole budget
+        g_dirty = true;
+        SKSE::log::info("[GOLD] expecting {} G ({} announced, not yet arrived)",
+                        a_value, g_expected);
     }
 
     int PouchStoredOf(const std::string& a_tileKey)
@@ -1039,12 +1062,26 @@ namespace FUI::GoldCoins
         // (g_lastLedger < 0) so starting gold isn't swept in.
         {
             const int pre = CountOf(p, gold);
-            if (g_lastLedger >= 0 && pre > g_lastLedger && CountOf(p, g_pouch) > 0) {
+            int gain = (g_lastLedger >= 0) ? (std::max)(0, pre - g_lastLedger) : 0;
+            // ★S-0: OUR OWN ARRIVALS ARE CLAIMED FIRST, and never swept.
+            // An announced transfer is gold the player placed by hand; the
+            // sweep is for gold that turned up. Settling the announcement here
+            // rather than in a step of its own is deliberate -- this is the
+            // only place that knows how much actually landed, so it is the
+            // only place that can retire the promise honestly.
+            if (g_expected > 0 && gain > 0) {
+                const int ours = (std::min)(g_expected, gain);
+                g_expected -= ours;
+                gain -= ours;
+                SKSE::log::info("[GOLD] {} G of the announced amount arrived "
+                                "({} still expected)", ours, g_expected);
+            }
+            if (gain > 0 && CountOf(p, g_pouch) > 0) {
                 const std::string key = FullestPouch();
                 if (!key.empty()) {
                     int& held = g_pouchStored[key];
                     const int room = kPouchCap - held;
-                    const int store = (std::min)(pre - g_lastLedger, room);
+                    const int store = (std::min)(gain, room);
                     if (store > 0) {
                         held += store;
                         SKSE::log::info("[GOLD] auto-stored {} G into '{}' -> {}",
@@ -1052,11 +1089,42 @@ namespace FUI::GoldCoins
                     }
                 }
             }
+            // ★The promise expires. A request that was refused downstream, or
+            // a transfer that simply never landed, must not leave walking gold
+            // permanently inflated -- the board would show coins that are not
+            // there, and every later reconcile would trust the lie.
+            if (g_expected > 0) {
+                if (++g_expectedAge > kExpectGrace) {
+                    SKSE::log::warn("[GOLD] {} G was announced but never arrived "
+                                    "-- forgetting it", g_expected);
+                    g_expected = 0;
+                    g_expectedAge = 0;
+                } else {
+                    g_dirty = true;   // keep ticking until it settles or expires
+                }
+            } else {
+                g_expectedAge = 0;
+            }
         }
 
         // STEP 3 — baseline snapshot + mirror the walking gold into coins.
-        const int total = CountOf(p, gold);   // the LEDGER (authoritative)
-        g_lastLedger = total;                 // auto-store baseline for next tick
+        const int onHand = CountOf(p, gold);   // coins actually in the inventory
+        g_lastLedger = onHand;                 // auto-store baseline: ALWAYS the
+                                               // real count, or the arrival that
+                                               // settles the promise above could
+                                               // never be seen to arrive.
+        // ★★S-0: EVERY CLAIM BELOW IS MEASURED AGAINST THE LEDGER THE BOARD IS
+        // DRAWING, which is the on-hand count plus whatever transfer has been
+        // announced -- exactly the total WalkingGold() reports (g_pending was
+        // applied and cleared in STEP 1, so the announcement is all that is
+        // left of the delta).
+        //
+        // Using the raw count here would undo the announcement one line after
+        // making it, and worse than that: the trims below would see a pinned
+        // purse worth gold that has not landed yet and TRIM THE PURSE AWAY.
+        // The player would watch the amount they just dragged out of a chest
+        // shrink on the cursor.
+        const int total = onHand + g_expected;
 
         // the pouch can never hold more than you own (shops spend the ledger)
         // ★Each pouch is capped on its own (kPouchCap is PER POUCH), and the
@@ -1263,6 +1331,10 @@ namespace FUI::GoldCoins
         g_reseeded.clear();
         g_pending.clear();
         g_lastLedger = -1;   // skip auto-store on the first tick after load
+        // ★S-0: a promise about a transfer in the PREVIOUS save describes gold
+        // this one has never seen. Same reason g_leavingHint is cleared above.
+        g_expected = 0;
+        g_expectedAge = 0;
         g_dirty = true;
     }
 }

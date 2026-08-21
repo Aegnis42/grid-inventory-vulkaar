@@ -772,7 +772,7 @@ namespace FUI::LootBarter
         }
     }
 
-    void RequestTake(RE::TESBoundObject* a_obj, int a_count,
+    bool RequestTake(RE::TESBoundObject* a_obj, int a_count,
                      std::uint16_t a_uid, std::uint16_t a_sig, bool a_fromWorn,
                      bool a_useAfter)
     {
@@ -781,7 +781,7 @@ namespace FUI::LootBarter
             // not run must not leave the board and the engine disagreeing.
             if (!ResolveSource(a_obj, a_uid, a_sig, a_fromWorn).ok()) {
                 Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
-                return;
+                return false;
             }
             XferReq req;
             req.dir      = XferReq::kTake;
@@ -795,7 +795,9 @@ namespace FUI::LootBarter
             NoteOut(a_obj, a_uid, a_sig, a_count);
             ConsumeActingSpot(a_obj);   // GI20: the hovered cell's slot, not the last one
             ConsumeBundleCarry(a_obj, a_count);   // (1.3.1) a shelf-bag carry taken home
+            return true;
         }
+        return false;
     }
 
     void RequestStore(RE::TESBoundObject* a_obj, int a_count,
