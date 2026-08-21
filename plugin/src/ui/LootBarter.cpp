@@ -2097,6 +2097,13 @@ namespace
         }
         Grid::DrawInkLattice(dl, base, cols, rows);
 
+        // a right-click take, applied AFTER the loop below has finished
+        // drawing -- see the note at the click
+        int                 takeIdx = -1;
+        RE::TESBoundObject* takeObj = nullptr;
+        int                 takeCount = 0;
+        std::uint16_t       takeSig = 0;
+
         auto* cache = IconCache::GetSingleton();
         for (const auto& s : seats) {
             const auto& b = bundle[s.idx];
@@ -2187,19 +2194,40 @@ namespace
                         // this take retires no cell, because the bundle entry
                         // was never one.
                         if (Grid::CanFitNewItem(s.obj)) {
-                            const int  cnt = b.count;
-                            auto*      obj = s.obj;
-                            const auto sig = b.sig;
-                            bundle.erase(bundle.begin() + s.idx);
-                            g_actingSpot.clear();
-                            RequestTake(obj, cnt, 0, sig);
+                            // ★NOTED, NOT DONE. This loop draws as well as
+                            // listens, and mutating the bundle inside it meant
+                            // leaving early -- which skipped drawing every seat
+                            // after the clicked one for that frame. They came
+                            // back the next, which is exactly the "some cells
+                            // blink when I take another item" report, and why it
+                            // looked like a property of the CELL rather than of
+                            // the item: it was the ones later in seat order.
+                            takeIdx = s.idx;
+                            takeObj = s.obj;
+                            takeCount = b.count;
+                            takeSig = b.sig;
                         } else {
                             Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
                         }
-                        break;   // `bundle` and `seats` just moved under us
                     }
                 }
             }
+        }
+
+        // ★The deferred right-click take. Every seat has been drawn by now, so
+        // the bundle may safely move under `seats`: nothing reads it again this
+        // frame, and the next pass re-seats from the shortened list.
+        //
+        // The units are already IN the container -- the bundle only hides them
+        // -- so dropping the entry is what makes them the shelf's again, and
+        // the take is then the same request any visible cell would make. No
+        // acting cell is named: this take retires no cell, because the bundle
+        // entry never was one.
+        if (takeIdx >= 0 && takeObj &&
+            takeIdx < static_cast<int>(bundle.size())) {
+            bundle.erase(bundle.begin() + takeIdx);
+            g_actingSpot.clear();
+            RequestTake(takeObj, takeCount, 0, takeSig);
         }
 
         // ★(1.3.2) drop ghost, the same one both boards draw: green = the
