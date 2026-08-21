@@ -874,6 +874,22 @@ namespace FUI::Grid
             });
         }
 
+        // Does USING this destroy it? Potions, food and ingredients are eaten;
+        // a spell tome is consumed by the reading, while a quest journal or a
+        // note is a BOOK that survives being opened -- so the tome test is the
+        // spell, not the form type. Everything else is worn, wielded or poked
+        // by a script and is still there afterwards.
+        bool ConsumingWouldEatIt(RE::TESBoundObject* a_obj)
+        {
+            if (!a_obj) return false;
+            if (a_obj->Is(RE::FormType::AlchemyItem) ||
+                a_obj->Is(RE::FormType::Ingredient)) {
+                return true;
+            }
+            const auto* book = a_obj->As<RE::TESObjectBOOK>();
+            return book && book->TeachesSpell();
+        }
+
         // GI25: resolve by POOL -- uid first, then content signature. Unlike
         // ExtraForTile this never falls back to a list POSITION, so it stays
         // correct across the frames between queueing a transfer and the engine
@@ -3358,6 +3374,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     GoldCoins::PinAmount(it.key, v);
                                 }
                             }
+                        } else if (it.quest && ConsumingWouldEatIt(it.obj)) {
+                            // ★Vanilla refuses this in so many words -- "You
+                            // can not eat quest items." is a string in the
+                            // game's own interface archive -- and we had no
+                            // guard at all: a quest potion or a quest spell
+                            // tome was drunk or read away on one right-click.
+                            // Found while checking the ⑤⑭ policy against the
+                            // engine's strings rather than against memory.
+                            // WEARING a quest item stays allowed (vanilla arms
+                            // you with quest weapons); only being CONSUMED is
+                            // an exit the item does not come back from.
+                            Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
                         } else {   // D3: right-click = use, the vanilla click
                             if (g_poolTrace) {
                                 const auto le = g_layout.count(it.key) ? g_layout[it.key]
