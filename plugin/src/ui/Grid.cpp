@@ -11063,6 +11063,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // a blocked cell, the partner window, or outside cancels (nothing
         // moved). Bag intake: dropping onto a bag's free cell routes the item
         // into that bag. Buys still gold-check.
+        // P2/3-5d: both defined further down; the partner-drop route needs
+        // them before either exists.
+        void ResolveDrop(Held& a_held);
+
         bool DropPartnerHeld(Held& a_held)
         {
             // F7 (kLoot/kSteal): dropping a partner-carried item back ON the
@@ -11133,6 +11137,31 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     return true;
                 }
                 const int cnt = a_held.count;
+                // ★★P2/3-5d: GOLD LANDS WHERE IT WAS DROPPED, at its own amount.
+                //
+                // Right-clicking a chest's gold pours it into the purse and lets
+                // the mirror sort out the tiles -- correct, and unchanged. A
+                // DRAG is a different promise: this many coins, in that square.
+                // Everything needed for it already exists on this side, because
+                // a withdrawn pouch amount has always ridden the cursor as a
+                // pinned purse and the gold-fragment routes already say what
+                // happens when one lands: an empty cell takes it, a coin or a
+                // pouch merges with it, and whatever will not fit stays on the
+                // cursor.
+                //
+                // So the take happens, the amount becomes a pinned purse, and
+                // that purse is handed straight to those routes -- the same
+                // ones a shift-split fragment uses. No new grammar, and the
+                // slider is skipped: a drag has already said how much.
+                if (a_held.obj->IsGold() &&
+                    LootBarter::IsLootMode(LootBarter::CurrentMode())) {
+                    LootBarter::RequestTake(a_held.obj, cnt, a_held.uid, a_held.sig);
+                    g_held.reset();
+                    CarryWithdrawnGold(cnt);   // credit is queued by the take
+                    if (g_held) ResolveDrop(*g_held);
+                    RequestRebuild();
+                    return true;
+                }
                 bool ok = true;
                 if (LootBarter::CurrentMode() == LootBarter::Mode::kBarter && cnt <= 1) {
                     const int total = LootBarter::BuyPrice(a_held.obj, a_held.partnerValue);
