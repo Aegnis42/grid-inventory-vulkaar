@@ -202,18 +202,21 @@ namespace FUI::GoldCoins
             return cnt;
         }
 
-        // walking gold -> per-tier item counts. One 04 per full 1000; the
-        // remainder becomes ONE coin of its band (1~4 / 5~9 / 10~99 / 100+).
+        // ★Walking gold -> how many TILES, and that is now the whole rule:
+        // one per capful, plus one for the remainder. The old version banded
+        // the leftover into 1~4 / 5~9 / 10~99 / 100+ because each band had its
+        // own picture; with one coin (see CoinForTier) those bands only ever
+        // split a purse that could have been one tile -- 663 G came out as two
+        // (measured in the mirror log: "663 G walking -> 1/0/0/1").
+        //
+        // Everything still lands in slot [0], because slot = tier and there is
+        // one tier left. The array shape stays so the mirror's diff, its log
+        // line and its callers are untouched.
         void Desired(int a_gold, int a_out[4])
         {
             a_out[0] = a_out[1] = a_out[2] = a_out[3] = 0;
             if (a_gold <= 0) return;
-            a_out[3] = a_gold / 1000;
-            const int r = a_gold % 1000;
-            if (r >= 100)     a_out[3] += 1;
-            else if (r >= 10) a_out[2] += 1;
-            else if (r >= 5)  a_out[1] += 1;
-            else if (r >= 1)  a_out[0] += 1;
+            a_out[0] = (a_gold + kCoinCap - 1) / kCoinCap;
         }
     }
 
@@ -691,6 +694,11 @@ namespace FUI::GoldCoins
     RE::TESBoundObject* CoinForTier(int)
     {
         return g_coins[0];   // the one coin
+    }
+
+    RE::TESBoundObject* VanillaGold()
+    {
+        return RE::TESForm::LookupByID<RE::TESBoundObject>(kGold001);
     }
 
     int PinnedValue(const std::string& a_tileKey)

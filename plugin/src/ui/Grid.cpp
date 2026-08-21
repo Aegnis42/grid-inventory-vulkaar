@@ -11875,6 +11875,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return true;
         }
 
+        void NoteGoldStoreSpot();   // P2/3-5, defined with the gold routes
+
         bool WholeStore(Held& a_held)
         {
             // dropped on the container window = STORE (coins excluded —
@@ -11897,6 +11899,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (moved > 0) {
                         GoldCoins::DebitLedger(moved);
                     } else {
+                        NoteGoldStoreSpot();   // P2/3-5
                         GoldCoins::StoreToContainer(dst, a_held.coinValue);
                     }
                     if (GoldCoins::PinnedValue(a_held.key) >= 0) {
@@ -12414,6 +12417,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // The pin's value re-enters walking first (unpin), the ledger then
         // pays the banked amount; any excess over the pouch cap stays as
         // walking gold. False = not over a pouch (the next route decides).
+        // ★P2/3-5: the cell the gold was DROPPED on, remembered for the
+        // stored coins the same way a stored item's is. The note has to name
+        // VANILLA gold: our coin form is a tile identity on this side of the
+        // window, and the thing about to appear on the other side is Gold001.
+        void NoteGoldStoreSpot()
+        {
+            const auto sd = LootBarter::QueryStoreDrop();
+            if (!sd.onCell || !sd.freeSpot) return;
+            if (auto* g = GoldCoins::VanillaGold()) {
+                LootBarter::NoteStoreSpot(g, sd.col, sd.row, 0, 0);
+            }
+        }
+
         // ★P2/3-5: gold dropped on a partner window. Two destinations, in
         // order: a POUCH cell under the cursor takes it into that pouch's slot
         // (the older grammar), and anything else hands it to the CONTAINER
@@ -12429,6 +12445,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
             if (moved <= 0) {
                 if (auto* dst = LootBarter::Partner()) {
+                    NoteGoldStoreSpot();   // P2/3-5: land on the dropped cell
                     GoldCoins::StoreToContainer(dst, a_held.coinValue);
                     moved = a_held.coinValue;
                 } else {

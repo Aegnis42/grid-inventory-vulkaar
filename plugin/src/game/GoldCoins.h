@@ -80,6 +80,12 @@ namespace FUI::GoldCoins
     [[nodiscard]] int PinnedTotal();                               // Σ pinned values
     [[nodiscard]] int BandTier(int a_value);                       // value -> coin tier 0..3
     [[nodiscard]] RE::TESBoundObject* CoinForTier(int a_tier);     // 0x800..0x803
+
+    // ★P2/3-5: the VANILLA gold, which is what actually sits in a container.
+    // Our coin form is a tile identity on the player's board; the thing a chest
+    // holds is Gold001, and anything that has to name the stored gold to the
+    // partner side (a drop-cell note, for one) needs that form rather than ours.
+    [[nodiscard]] RE::TESBoundObject* VanillaGold();
     void PinAmount(const std::string& a_tileKey, int a_value);     // create/replace a purse
     void UnpinTile(const std::string& a_tileKey);                  // merged / dropped / cancelled
 
