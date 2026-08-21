@@ -1404,7 +1404,8 @@ namespace FUI::Grid
         };
         std::optional<ClickRemove> g_clickRemove;
 
-        // ★ONE PATH / O-1: the right-clicked tile, waiting for FinishFrame.
+        // ★ONE PATH: the right-clicked tile and where it is bound, waiting for
+        // FinishFrame.
         //
         // A drag never mutates the board from inside the tile loop either --
         // the pickup only names what is held, and ResolveDrop runs later, in
@@ -1413,7 +1414,18 @@ namespace FUI::Grid
         // (That deferral is why the old click-remove slot existed at all; this
         // is the same idea with the whole action in it rather than its
         // aftermath.)
-        std::optional<std::string> g_useClick;
+        //
+        // ★The DESTINATION travels with it as a small enum rather than as a
+        // route pointer: the click site sits a few thousand lines above the
+        // handlers, and naming the road it wants is clearer than reaching for
+        // a function it cannot see yet.
+        enum class ClickRoute : std::uint8_t { kUse, kStore };
+        struct ClickAction
+        {
+            std::string key;
+            ClickRoute  route = ClickRoute::kUse;
+        };
+        std::optional<ClickAction> g_clickAction;
 
         // B2: one-shot placement hint for the next ACQUIRE that creates a new
         // tile of this form (partner-drop lands at the drop cell without a
@@ -3248,34 +3260,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // slider first. Coins are mirror artefacts
                             // (excluded); the pouch stores fine (gold travels
                             // via the container sink).
+                            // ★ONE PATH / O-2: the whole branch is now one
+                            // line and a road name. Everything it used to do --
+                            // the room check, the slider for a stack, the store
+                            // request, the pending remove, the display's exit --
+                            // already existed in WholeStore, written once for
+                            // the drag. This was the second copy.
+                            // (bags never reach here: their right-click is the
+                            // window toggle above, and their storage is
+                            // DRAG-only -- that path bundles the contents.)
                             const RE::FormID fid = it.obj->GetFormID();
                             if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
-                                // (no quest guard: storing CHANGES CONTAINERS,
-                                // which the policy at PoolIsQuest allows)
-                                if (!LootBarter::PartnerHasRoomFor(it.obj, it.count)) {
-                                    Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));   // (1.3.3)
-                                } else if (it.count > 1) {
-                                    LootBarter::OpenSlider(it.obj, it.count,
-                                        LootBarter::XferDir::kStore, it.key, 0, it.uid, it.sig,
-                                        false, it.fav, it.xlIdx);
-                                } else {
-                                    // (bags never reach this branch: their
-                                    // right-click is the window toggle above,
-                                    // and their storage is DRAG-only -- the
-                                    // drop path (WholeStore) bundles contents)
-                                    LootBarter::RequestStore(it.obj, it.count,
-                                                             it.uid, it.sig, it.fav,
-                                                             it.xlIdx, it.key);
-                                    NotePendingRemove(it.obj, it.key, it.count, it.xlIdx);
-                                    // ★1.4: the whole tile leaves NOW, by the
-                                    // same deferred partial the use click
-                                    // takes -- the layout is already drained
-                                    // (NotePendingRemove above), so only the
-                                    // display follows.
-                                    g_clickRemove = ClickRemove{
-                                        it.key, it.obj->GetFormID(),
-                                        it.count, /*drained=*/true };
-                                }
+                                g_clickAction =
+                                    ClickAction{ it.key, ClickRoute::kStore };
                             }
                         } else if (LootBarter::CurrentMode() ==
                                    LootBarter::Mode::kPickpocket) {
@@ -3404,9 +3401,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // The quest-consume refusal moved there with it:
                             // a guard belongs beside the destination it is
                             // guarding, not beside the click that aimed at it.
-                            g_useClick = it.key;
+                            g_clickAction =
+                                ClickAction{ it.key, ClickRoute::kUse };
                         }
-                        if (!g_clickRemove && !g_useClick) RequestRebuild();
+                        if (!g_clickRemove && !g_clickAction) RequestRebuild();
                     }
                 }
             }
@@ -7539,7 +7537,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // same lifetime: a click queued in the frame the menu closed has no
         // board to act on any more
         g_clickRemove.reset();
-        g_useClick.reset();   // ONE PATH: same lifetime
+        g_clickAction.reset();   // ONE PATH: same lifetime
     }
 
     void ReleaseAppliedPendingEquip(std::uint32_t a_form)
@@ -11867,6 +11865,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
             // (no quest guard: storing CHANGES CONTAINERS -- see PoolIsQuest)
+            bool queued = false;   // O-2: did anything actually leave?
             if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count)) {
                 // (1.3.3) a follower's pack is 10 x 8 -- keep carrying
                 Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
@@ -11888,6 +11887,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                              HeldUidOf(a_held.key, a_held.uid), a_held.sig,
                                              a_held.fav, a_held.xlIdx, a_held.key);
                     NotePendingRemove(a_held.obj, a_held.key, a_held.count, a_held.xlIdx);
+                    queued = true;   // O-2: this tile really is leaving
                     if (a_held.isBag) {
                         // (1.3.0-D) contents FOLLOW the bag into the chest
                         // (the old E4 reflow spilled them onto the main
@@ -11931,8 +11931,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     }
                 }
             }
+            // ★ONE PATH / O-2: a SYNTHETIC carry never reached the screen,
+            // so the board is still showing this tile -- the opposite of a
+            // drag, which stopped drawing it at the lift. Two consequences
+            // meet here. A store that really happened has to take the tile off
+            // the display itself, by the same partial the click has always
+            // used (the layout was already drained by NotePendingRemove, hence
+            // drained=true). And a store that did NOT happen -- no room, or a
+            // slider still waiting for its number -- needs no repaint at all,
+            // because nothing changed. That second half is why routing the
+            // click here costs no rebuilds it did not already cost.
+            const bool                transient = a_held.transient;
+            const std::string         key = a_held.key;
+            RE::TESBoundObject* const obj = a_held.obj;
+            const int                 count = a_held.count;
             g_held.reset();
-            RequestRebuild();
+            if (!transient) {
+                RequestRebuild();
+            } else if (queued &&
+                       !TryUseClickPartialRemove(key, obj, count, /*drained=*/true)) {
+                RequestRebuild();
+            }
             return true;
         }
 
@@ -12548,18 +12567,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // The tile is looked up FRESH -- anything between the click and here
         // (an engine event, a partner transfer) may have taken it, and a click
         // on a tile that no longer exists is simply a click on nothing.
-        if (g_useClick) {
-            const std::string key = *g_useClick;
-            g_useClick.reset();
+        if (g_clickAction) {
+            const ClickAction ca = *g_clickAction;
+            g_clickAction.reset();
             const Item* tile = nullptr;
             for (const auto& it : g_items) {
-                if (it.key == key) { tile = &it; break; }
+                if (it.key == ca.key) { tile = &it; break; }
             }
             if (tile && BeginSyntheticCarry(*tile)) {
-                RunSyntheticRoute(WholeUse);
+                switch (ca.route) {
+                case ClickRoute::kUse:   RunSyntheticRoute(WholeUse); break;
+                case ClickRoute::kStore: RunSyntheticRoute(WholeStore); break;
+                }
             } else {
-                SKSE::log::info("[ONEPATH] use click '{}' -- tile gone, nothing to do",
-                    key);
+                SKSE::log::info("[ONEPATH] click '{}' -- tile gone, nothing to do",
+                    ca.key);
             }
         }
         if (g_clickRemove) {
