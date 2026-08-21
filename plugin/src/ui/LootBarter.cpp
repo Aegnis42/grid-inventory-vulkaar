@@ -2301,6 +2301,24 @@ namespace
             }
         }
         for (const auto& s : seats) rows = (std::max)(rows, s.row + s.h);
+        {   // ⑰b PROBE: what this window actually seated, printed on change.
+            // The dump above says what the bundle HOLDS; this says what got a
+            // square. A level that holds children and seats none is the report.
+            std::string me = a_w.spot;
+            for (const auto& st : a_w.path) {
+                me += fmt::format("/{:06X}@{},{}", st.form & 0xFFFFFF, st.col, st.row);
+            }
+            std::string now = fmt::format("seated root={} n={}", root, seats.size());
+            for (const auto& t : seats) {
+                now += fmt::format(" #{}@{},{}", t.idx, t.col, t.row);
+            }
+            static std::map<std::string, std::string> s_seat;
+            auto& prev = s_seat[me];
+            if (prev != now) {
+                prev = now;
+                SKSE::log::info("[BUNDLE] win[{}] {}", me, now);
+            }
+        }
 
         // ---- the window: the player bag-window chrome, one for one --------
         auto* wm = WinManager::GetSingleton();
