@@ -3778,10 +3778,31 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // Named after the form, like every other tile since 1.3.2 -- what
             // this carry is stays in the fields below, where it can change
             // without renaming anything.
-            carryKey = FormKey(a_obj);
-            for (int n = 1; g_layout.contains(carryKey) ||
-                            GoldCoins::PinnedValue(carryKey) >= 0; ++n) {
-                carryKey = FormKey(a_obj) + "#" + std::to_string(n);
+            // ★★P2/3-1: A BAG LIFTED OFF THE DOLL KEEPS ITS OWN TILE'S KEY.
+            //
+            // Everything below mints a key that deliberately AVOIDS the ones in
+            // use, because a worn unit historically had no tile of its own and
+            // taking one would steal a spare's. A worn bag broke that premise:
+            // it does have a tile, its contents point at that tile's key, and a
+            // fresh key orphaned every one of them -- so lifting the bag off
+            // the doll closed it and spilled the contents onto the main grid
+            // (user report, and the exact moment named). Adopting the key keeps
+            // the carry, the contents and the cancel all talking about the same
+            // bag.
+            if (IsBagForm(a_obj)) {
+                for (const auto& t : g_items) {
+                    if (t.obj == a_obj && t.def.bag != 0 && t.inBag != kTrashKey) {
+                        carryKey = t.key;
+                        break;
+                    }
+                }
+            }
+            if (carryKey.empty()) {
+                carryKey = FormKey(a_obj);
+                for (int n = 1; g_layout.contains(carryKey) ||
+                                GoldCoins::PinnedValue(carryKey) >= 0; ++n) {
+                    carryKey = FormKey(a_obj) + "#" + std::to_string(n);
+                }
             }
         }
         g_held = Held{ std::move(carryKey), a_obj, std::move(m),
