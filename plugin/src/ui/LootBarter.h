@@ -176,8 +176,15 @@ namespace FUI::LootBarter
 
     // Quantity slider (Shift+right-click on a stack). Opens a small popup to
     // pick how many to move; confirm queues the transfer.
+    // ★kShelfSplit is kPickup's twin on the far side of the window: shift +
+    // left-click on a container cell splits that many onto the CURSOR instead
+    // of hauling them home. Nothing leaves the container -- a lift is not a
+    // take -- so the split is pure cell surgery, and where the fragment ends up
+    // is then the ordinary drop grammar's question: back on the shelf, or over
+    // on the player's board (which is where it becomes a take).
     enum class XferDir { kTake, kStore, kPickup, kBuy, kSell,    // kPickup = split onto cursor
-                         kPickTake, kPickStore };                // F6b pickpocket rolls
+                         kPickTake, kPickStore,                  // F6b pickpocket rolls
+                         kShelfSplit };
     // a_srcKey (kPickup only): the grid tile the split quantity is taken from.
     // a_unitValue (kBuy/kSell only): the item's base value per unit, so the
     // confirmed quantity is priced (buy/sell price * count).

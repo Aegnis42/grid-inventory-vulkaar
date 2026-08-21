@@ -25,6 +25,15 @@
 
 namespace FUI::LootBarter
 {
+    // the ref the wares actually live in: a container/corpse IS the partner,
+    // a merchant's stock is the vendor faction's container. Declared up here
+    // because the ledgers below need to ask it what is already on the shelf.
+    RE::TESObjectREFR* SourceRef();
+    // (defined with the other board writes) split a shelf cell in two and
+    // give the smaller half to the cursor -- the slider's confirm needs it
+    // before the definitions further down.
+    std::string SplitShelfCell(const std::string& a_key, int a_count);
+
     namespace
     {
         Mode                g_mode = Mode::kNormal;
@@ -155,19 +164,54 @@ namespace FUI::LootBarter
             std::uint16_t uid = 0;
             std::uint16_t sig = 0;
             int           count = 0;
+            // ★★HOW MUCH OF THIS FORM THE CONTAINER HELD WHEN THE PROMISE WAS
+            // MADE, which is what lets the promise retire ITSELF.
+            //
+            // The first version relied on the transfer's own handler calling
+            // ClearIn -- fine for the ordinary store, and quietly wrong for
+            // gold, which does not travel that road at all: GoldCoins moves it
+            // on its own queue. Nothing retired those promises, so for the
+            // three seconds until the sweep the reconcile counted the septims
+            // twice, grew a phantom cell for the surplus, and then -- shrinking
+            // from the back, as it should -- took away the square the player
+            // had aimed at and left the phantom in the front gap. Exactly the
+            // report.
+            //
+            // Comparing against the engine needs no one to remember to call
+            // anything: when the count has risen by what we promised, it
+            // arrived, whichever road it came down.
+            int seenAt = 0;
         };
         std::map<std::string, InUnits>        g_in;
         std::chrono::steady_clock::time_point g_inWhen{};
+
+        // How many of a_obj a reference is holding right now.
+        int RefCountOf(RE::TESObjectREFR* a_ref, RE::TESBoundObject* a_obj)
+        {
+            if (!a_ref || !a_obj) return 0;
+            int n = 0;
+            for (auto& [o, d] :
+                 a_ref->GetInventory([&](RE::TESBoundObject& x) { return &x == a_obj; })) {
+                n += d.first;
+            }
+            return n;
+        }
 
         void NoteIn(RE::TESBoundObject* a_obj, std::uint16_t a_uid, std::uint16_t a_sig,
                     int a_count)
         {
             if (!a_obj || a_count <= 0) return;
-            auto& e = g_in[OutKey(a_obj->GetFormID(), a_uid, a_sig)];
+            const auto k = OutKey(a_obj->GetFormID(), a_uid, a_sig);
+            const bool fresh = !g_in.contains(k);
+            auto&      e = g_in[k];
             e.form = a_obj->GetFormID();
             e.uid = a_uid;
             e.sig = a_sig;
             e.count += a_count;
+            // ★Only a FRESH promise takes a baseline: a second store while the
+            // first is still in flight is more units owed against the same
+            // starting point, not a new starting point.
+            if (fresh) e.seenAt = RefCountOf(SourceRef(), a_obj);
             g_inWhen = std::chrono::steady_clock::now();
         }
 
@@ -639,7 +683,6 @@ namespace FUI::LootBarter
         }
     }
 
-    RE::TESObjectREFR* SourceRef();   // defined below (merchant wares / container)
 
     Mode CurrentMode() { return g_mode; }
 
@@ -1583,6 +1626,16 @@ namespace FUI::LootBarter
         if (ok && g_slider.value > 0) {
             switch (g_slider.dir) {
             case XferDir::kTake:   RequestTake(g_slider.obj, g_slider.value, g_slider.uid, g_slider.sig, g_slider.worn); break;
+            case XferDir::kShelfSplit: {
+                const std::string nk = SplitShelfCell(g_slider.srcKey, g_slider.value);
+                if (!nk.empty()) {
+                    g_actingSpot = nk;   // the carry names its own cell
+                    Grid::BeginPartnerCarry(g_slider.obj, g_slider.value,
+                                            g_slider.unitValue, -1.0f, -1.0f,
+                                            g_slider.uid, g_slider.xlIdx, 0, 0);
+                }
+                break;
+            }
             case XferDir::kPickTake:
                 RequestPickTake(g_slider.obj, g_slider.value, g_slider.uid, g_slider.sig,
                                 g_slider.worn);
@@ -2879,9 +2932,20 @@ namespace
             // ★Units we have promised this container but the engine has not
             // moved yet count as PRESENT. See g_in: the cell for them already
             // exists, because the drop is what made it.
-            for (const auto& [k, e] : g_in) {
+            for (auto it = g_in.begin(); it != g_in.end();) {
+                const auto& e = it->second;
                 auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(e.form);
-                if (!obj || e.count <= 0) continue;
+                if (!obj || e.count <= 0) { it = g_in.erase(it); continue; }
+                // ★What has actually turned up since the promise was made. Any
+                // road counts -- the transfer queue, GoldCoins' own queue, a
+                // script -- because the question is only whether the container
+                // has them now.
+                int held = 0;
+                for (const auto& [o, d] : a_inv) {
+                    if (o && o->GetFormID() == e.form) held += d.first;
+                }
+                const int owed = e.count - (std::max)(0, held - e.seenAt);
+                if (owed <= 0) { it = g_in.erase(it); continue; }
                 auto&      sp = seen[PoolOf(e.form, e.uid, e.sig, false)];
                 const auto def = Grid::ResolveDef(obj);
                 sp.obj = obj;
@@ -2890,7 +2954,8 @@ namespace
                 sp.worn = false;
                 sp.w = (std::max)(1, def.w);
                 sp.h = (std::max)(1, def.h);
-                sp.count += e.count;
+                sp.count += owed;
+                ++it;
             }
 
             // ---- 2. bring the cells into line, pool by pool ----
@@ -3508,6 +3573,15 @@ namespace
                                 Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
                             } else if (!(it.obj->IsGold() || Grid::CanFitNewItem(it.obj))) {
                                 Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
+                            } else if (splitLc && it.count > 1) {
+                                // ★shift+left = SPLIT ONTO THE CURSOR, the same
+                                // gesture and the same meaning it has on the
+                                // player's own board. Right-click still hauls
+                                // the whole cell home.
+                                g_actingSpot = it.spotKey;   // GI20
+                                OpenSlider(it.obj, it.count, XferDir::kShelfSplit,
+                                           it.spotKey, it.value, it.uid, it.sig,
+                                           it.worn, false, it.xlIdx);
                             } else if (it.count > 1) {
                                 g_actingSpot = it.spotKey;   // GI20
                                 OpenSlider(it.obj, it.count, XferDir::kTake, {}, 0, it.uid, it.sig, it.worn);
@@ -4298,6 +4372,32 @@ namespace
             g_actingSpot.clear();
         }
         return left;
+    }
+
+    // ★Split a shelf cell in two and hand the smaller half to the cursor. The
+    // engine is untouched: both halves are still in the container, which is
+    // exactly why this can be plain cell surgery. The pouch's gold and a bag's
+    // bundle deliberately do NOT come along -- neither form can split (cap 1),
+    // so reaching here with one would be a bug, and copying them would be a
+    // duplication bug on top of it.
+    std::string SplitShelfCell(const std::string& a_key, int a_count)
+    {
+        auto* cl = BoardFor();
+        if (!cl || a_count <= 0) return {};
+        const auto it = cl->cells.find(a_key);
+        if (it == cl->cells.end() || it->second.count <= a_count) return {};
+        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(it->second.form);
+        if (!obj) return {};
+        ContCell nc = it->second;
+        nc.count = a_count;
+        nc.col = -1;   // unplaced: it is on the cursor, not on the shelf
+        nc.row = -1;
+        nc.gold = 0;
+        nc.bundle.clear();
+        it->second.count -= a_count;
+        const std::string k = MintCellKey(*cl, obj);
+        cl->cells[k] = std::move(nc);
+        return k;
     }
 
     void NoteStoredUnits(RE::TESBoundObject* a_obj, int a_count,
