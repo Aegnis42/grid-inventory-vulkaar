@@ -774,10 +774,11 @@ namespace FUI::Equip
     bool IsWearOrConsume(RE::TESBoundObject* a_obj)
     {
         if (!a_obj) return false;
-        // Spell tomes count: right-click LEARNS them and the tome is consumed
-        // (handled in ProcessPending). A plain book is read, not consumed, and
-        // takes the RequestBookRead branch instead.
-        const auto* book = a_obj->As<RE::TESObjectBOOK>();
+        // ★★NO BOOK IS "USED" HERE, tomes included. A tome used to count,
+        // because equipping one does teach its spell -- but that is the raw
+        // learn with nothing in front of it, and the checks a player expects
+        // (and mods add) live on READING the book instead. Every book now
+        // takes the RequestBookRead branch and the engine settles it.
         return a_obj->Is(RE::FormType::Weapon) || a_obj->Is(RE::FormType::Armor) ||
                a_obj->Is(RE::FormType::Ammo) || a_obj->Is(RE::FormType::Light) ||
                a_obj->Is(RE::FormType::AlchemyItem) || a_obj->Is(RE::FormType::Scroll) ||
@@ -785,8 +786,7 @@ namespace FUI::Equip
                // discovered). The tooltip already promised "use" on these and
                // the gate refused it — the bar said one thing, the click did
                // another.
-               a_obj->Is(RE::FormType::Ingredient) ||
-               (book && book->TeachesSpell());
+               a_obj->Is(RE::FormType::Ingredient);
     }
 
     int EquipCountFor(RE::TESBoundObject* a_obj, int a_tileCount)

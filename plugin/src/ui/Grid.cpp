@@ -3358,13 +3358,24 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 g_clickAction =
                                     ClickAction{ it.key, ClickRoute::kSell };
                             }
-                        } else if (auto* bk = it.obj->As<RE::TESObjectBOOK>();
-                                   bk && !bk->TeachesSpell()) {
+                        } else if (auto* bk = it.obj->As<RE::TESObjectBOOK>()) {
                             // Books and notes had no reachable action at all:
                             // right-click fell through to equip, which rejects
                             // them, so a quest note could be carried but never
-                            // read (user report). Spell tomes keep the equip
-                            // path -- that branch LEARNS them.
+                            // read (user report).
+                            // ★★★AND A SPELL TOME IS READ LIKE ANY OTHER BOOK.
+                            // It used to keep the EQUIP path, because equipping
+                            // a tome does teach the spell -- but that is the
+                            // raw learn, not the reading. Vanilla opens the
+                            // page and settles the tome when the page closes,
+                            // and everything hung off that moment -- a skill
+                            // gate, a quest fragment, a mod's prompt -- runs
+                            // there. Reported: "the game normally says you lack
+                            // the skill; with this mod there is no prompt, the
+                            // book vanishes and the spell is added."
+                            //
+                            // We were not showing the book at all. Now we do,
+                            // and the engine decides what reading it means.
                             RequestBookRead(bk, it.uid, it.sig);
                         // ★Coins are a MIRROR of the gold ledger, not real
                         // tiles, and the prompt bar already offers them no verb.
