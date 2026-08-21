@@ -2079,12 +2079,21 @@ namespace
         // chrome, ground, then the lattice -- the partner board's order
         Grid::DrawCellLattice(dl, base, cols, rows);
         const ImU32 shade = Theme::OccupiedGround();
+        // ★★PER CELL, WITH THE LATTICE'S OWN INSETS. This drew ONE rectangle
+        // over the whole footprint with a flat 1px margin, which is not what
+        // the player's board does and not what the grid underneath looks like:
+        // the inset between two cells is half a groove, the inset at the board
+        // edge is none, and both scale. A two-cell item therefore painted over
+        // its own internal groove and sat a hair off the lattice everywhere
+        // else -- "the item background does not quite line up with the grid".
+        // The rule belongs to the grid, so it is asked for rather than guessed.
         for (const auto& s : seats) {
-            dl->AddRectFilled(ImVec2(base.x + s.col * cell + 1.0f,
-                                     base.y + s.row * cell + 1.0f),
-                              ImVec2(base.x + (s.col + s.w) * cell - 1.0f,
-                                     base.y + (s.row + s.h) * cell - 1.0f),
-                shade);
+            for (int gr = 0; gr < s.h; ++gr) {
+                for (int gc = 0; gc < s.w; ++gc) {
+                    Grid::ShadeCell(dl, base, s.col + gc, s.row + gr,
+                                    cols, rows, shade);
+                }
+            }
         }
         Grid::DrawInkLattice(dl, base, cols, rows);
 

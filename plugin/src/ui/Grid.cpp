@@ -6304,6 +6304,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (manifest.empty()) continue;
                 for (const auto& b : manifest) {
                     int remaining = b.count;
+                    // ★★AND THE ANCHOR COMES HOME WITH IT. The manifest has
+                    // carried col/row since v5 and this routed the contents
+                    // into the bag without ever reading them, so a bag that
+                    // came back out of a chest first-fit its own insides into
+                    // a stranger's order (reported). The FIRST tile claimed for
+                    // an entry takes the anchor -- an entry was one tile when it
+                    // was stored, and if it comes back split, the extras have no
+                    // remembered place of their own and first-fit as before.
+                    bool anchorFree = b.col >= 0 && b.row >= 0;
                     // two passes: the matching sub-stack first, then any unit
                     for (int pass = 0; pass < 2 && remaining > 0; ++pass) {
                         for (const auto& key : g_arrivedTiles) {
@@ -6316,7 +6325,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             if (!it->inBag.empty() || it->def.bag != 0) continue;
                             if (pass == 0 && it->sig != b.sig) continue;
                             it->inBag = bagKey;
-                            g_layout[it->key].bag = bagKey;
+                            auto& le = g_layout[it->key];
+                            le.bag = bagKey;
+                            if (anchorFree) {
+                                le.col = b.col;
+                                le.row = b.row;
+                                le.rot = b.rot & 3;
+                                anchorFree = false;
+                            }
                             remaining -= it->count;
                             SKSE::log::info("[BAGCLAIM] bundle: '{}' x{} -> '{}'",
                                 it->obj->GetName() ? it->obj->GetName() : "?",
@@ -9399,6 +9415,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         Theme::InkStroke(dl, ImVec2(base.x, base.y + gridH), gridW, oth, oc);
         Theme::InkStroke(dl, base, gridH, oth, oc, true);
         Theme::InkStroke(dl, ImVec2(base.x + gridW, base.y), gridH, oth, oc, true);
+    }
+
+    void ShadeCell(ImDrawList* dl, const ImVec2& base, int a_col, int a_row,
+                   int a_cols, int a_rows, ImU32 a_col32)
+    {
+        const auto& sk = Theme::S();
+        const float in0 = sk.engravedCells ? 0.0f
+                        : Theme::InkChrome() ? 0.0f : 1.0f;
+        const float in1 = sk.engravedCells
+            ? Theme::kGrooveW * Theme::Scale() * 0.5f
+            : Theme::InkChrome() ? 0.0f : 1.0f;
+        const ImVec2 p0(base.x + a_col * CellPx(), base.y + a_row * CellPx());
+        const ImVec2 p1(p0.x + CellPx(), p0.y + CellPx());
+        dl->AddRectFilled(
+            ImVec2(p0.x + (a_col > 0 ? in1 : in0),
+                   p0.y + (a_row > 0 ? in1 : in0)),
+            ImVec2(p1.x - (a_col + 1 < a_cols ? in1 : in0),
+                   p1.y - (a_row + 1 < a_rows ? in1 : in0)),
+            a_col32);
     }
 
     void DrawCellLattice(ImDrawList* dl, const ImVec2& base, int a_cols, int a_rows)

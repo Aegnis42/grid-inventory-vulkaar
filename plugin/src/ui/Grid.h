@@ -421,6 +421,14 @@ namespace FUI::Grid
     // halves of the screen show the same board.
     void DrawCellLattice(ImDrawList* a_dl, const ImVec2& a_base, int a_cols, int a_rows);
 
+    // ★The occupied-cell wash for ONE cell, with the insets the lattice uses:
+    // half a groove where a neighbouring cell continues, nothing at the board
+    // edge, both scaled. Lives here because the rule belongs to the grid --
+    // the shelf-bag window used to approximate it with a flat 1px margin and
+    // sat a hair off the lattice for it.
+    void ShadeCell(ImDrawList* a_dl, const ImVec2& a_base, int a_col, int a_row,
+                   int a_cols, int a_rows, ImU32 a_col32);
+
     // ★The ink skin's lattice, drawn AFTER the occupied ground rather than
     // under it -- see the definition for why "the ground steps around the
     // divider" cannot work for a mark that snaps to whole pixels.
