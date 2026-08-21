@@ -93,6 +93,10 @@ namespace FUI::Grid
             // GI62: quarter-turns clockwise (0..3). `mask` is ALREADY rotated by
             // it -- this is kept only for drawing the sprite at the same angle.
             int                 rot = 0;
+            // ★P2/3-1: this tile is ALSO on the body. True only for a worn BAG,
+            // the one unit allowed to be in two places at once (see the worn
+            // exception in EnumerateUnitRefs), so the tray can say so.
+            bool                worn = false;
         };
 
         struct LayoutEntry
@@ -2955,7 +2959,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                ImVec2(trayCell.x + CellPx(), trayCell.y + CellPx()),
                                it.fav,
                                it.stolen,
-                               (it.glow & 0x4) != 0);
+                               (it.glow & 0x4) != 0,
+                               it.worn);   // P2/3-1: a worn bag says so
 
                 // ★1.0.5 rarity: one wedge at the footprint's top-right, over
                 // the sprite. Drawn here rather than in the occupancy pass so a
@@ -4171,6 +4176,24 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             std::vector<Inst> insts;
             std::vector<Inst> wornUnits;   // skipped above; never part of the board
             int listed = 0;
+            // ★★P2/3-1: A WORN BAG STAYS ON THE BOARD, and it is the only unit
+            // that may be in two places at once.
+            //
+            // Wearing a backpack used to make its tile vanish -- worn units are
+            // not enumerated -- and the rebuild then read the missing tile as
+            // "that bag is gone", which spills the contents onto the main grid
+            // (user report (7)). The bag was still on your back and still held
+            // nothing. Report (15), "a bag-flagged backpack cannot be equipped",
+            // is the same event described from the other side: nothing blocks
+            // the equip, it just stops behaving like a bag the moment it lands.
+            //
+            // A container you are WEARING is exactly the container you most
+            // expect to keep using, so the tile stays: same cells, same
+            // subgrid, plus a worn marker in the tray. The doll shows it too,
+            // which is the exception this comment exists to justify.
+            const bool wornBagStays =
+                a_entry && a_entry->object && g_resolver &&
+                g_resolver(a_entry->object).bag != 0;
             if (a_entry && a_entry->extraLists) {
                 int xi = 0;
                 for (auto* xl : *a_entry->extraLists) {
@@ -4178,8 +4201,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (!xl) continue;
                     const int n = (std::max)(1, xl->GetCount());
                     listed += n;
-                    if (a_skipWorn && (xl->HasType<RE::ExtraWorn>() ||
-                                       xl->HasType<RE::ExtraWornLeft>())) {
+                    if (a_skipWorn && !wornBagStays &&
+                        (xl->HasType<RE::ExtraWorn>() ||
+                         xl->HasType<RE::ExtraWornLeft>())) {
                         // remember WHICH units these were: the off-board pass below
                         // has to tell "this unit never entered the set" from "this
                         // unit is on the board and must come out".
@@ -5019,6 +5043,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             Item it;
             it.key = a_key;
             it.obj = a_obj;
+            // P2/3-1: only a bag can be both worn and shown, so only a bag can
+            // answer yes here -- entry-level IsWorn is enough for one of those.
+            it.worn = a_gdef.bag != 0 && a_entry && a_entry->IsWorn();
             it.glow = a_glow;
             it.count = a_cnt;
             it.def = a_gdef;
@@ -12096,6 +12123,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (GoldCoins::IsCoinForm(fid) || a_obj->IsGold()) {
                 Sfx::FailNote(Lang::T(Lang::Str::TrashGoldBlocked));
                 return false;
+            }
+            // ★P2/3-1 creates this hazard and closes it in the same breath.
+            // A worn bag now HAS a tile, and a tile can be dragged into the
+            // trash -- which would delete something the doll is still wearing.
+            // Nothing else on the board can be worn, so nothing else needed
+            // this guard before.
+            if (a_isBag) {
+                if (auto* p2 = RE::PlayerCharacter::GetSingleton()) {
+                    if (auto* e2 = LiveEntry(p2, a_obj); e2 && e2->IsWorn()) {
+                        Sfx::FailNote(Lang::T(Lang::Str::TrashWornBlocked));
+                        return false;
+                    }
+                }
             }
             if (a_isBag) {   // only an EMPTY bag may be trashed
                 for (const auto& [k, le] : g_layout) {

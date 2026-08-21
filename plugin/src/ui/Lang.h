@@ -186,6 +186,7 @@ namespace FUI::Lang
         X(TrashFavConfirm, "Trash this favorited item?")                                                    \
         X(TrashGoldBlocked, "Gold can't be trashed - drop it outside instead")                              \
         X(TrashBagBlocked, "Empty the bag before trashing it")                                              \
+        X(TrashWornBlocked, "Take it off first")   /* P2/3-1: a worn bag has a tile now */                 \
         X(PickpocketTitle, "PICKPOCKET")   /* F6b */                                                        \
         X(PresetLabel, "PRESET")   /* GI46/47 */                                                            \
         X(PresetExport, "EXPORT")                                                                           \
