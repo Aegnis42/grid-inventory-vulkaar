@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <imgui.h>
 #include <limits>
+#include <set>
 #include <vector>
 
 namespace FUI::LootBarter
@@ -411,48 +412,90 @@ namespace FUI::LootBarter
         // routes the arrived contents back INTO the bag.
         std::vector<PendingBundle> g_incomingBundles;
 
+        // ★★★THE NAME MINT. One counter for every bundle entry in the session.
+        // Ids never repeat, so an entry that moves between bags or between
+        // containers carries its name across untouched and nothing collides on
+        // arrival. It is not saved: the load pass raises the counter past every
+        // id it reads, which is the same guarantee with one less field.
+        std::uint32_t g_nextBundleId = 1;
+        std::uint32_t NextBundleId() { return g_nextBundleId++; }
+
+        // Every entry that enters a bundle is named here, and nowhere else.
+        BundleItem& AddBundle(std::vector<BundleItem>& a_v, BundleItem a_b)
+        {
+            a_b.id = NextBundleId();
+            a_v.push_back(std::move(a_b));
+            return a_v.back();
+        }
+
+        // ★Everything under a_id, at any depth, in whatever order the vector
+        // happens to be in. The old walk relied on parents being written before
+        // their children; a name does not care, so a branch survives a bundle
+        // that has been rearranged.
+        std::set<std::uint32_t> IdClosure(const std::vector<BundleItem>& a_v,
+                                          std::uint32_t a_id)
+        {
+            std::set<std::uint32_t> fam;
+            if (a_id == 0) return fam;
+            fam.insert(a_id);
+            for (bool grew = true; grew;) {
+                grew = false;
+                for (const auto& b : a_v) {
+                    if (b.id != 0 && fam.count(b.id) == 0 && fam.count(b.parent) != 0) {
+                        fam.insert(b.id);
+                        grew = true;
+                    }
+                }
+            }
+            return fam;
+        }
+
+        // ★The chain UPWARD from a_id: itself, the bag it is in, that bag's
+        // bag. Used to refuse a drop that would put a bag inside itself -- a
+        // question a flat index could not even be asked, so the loop it would
+        // have made was simply unreachable data.
+        std::set<std::uint32_t> Ancestry(const std::vector<BundleItem>& a_v,
+                                         std::uint32_t a_id)
+        {
+            std::set<std::uint32_t> up;
+            for (int guard = 0; guard < 32 && a_id != 0; ++guard) {
+                if (!up.insert(a_id).second) break;
+                const auto f = std::find_if(a_v.begin(), a_v.end(),
+                    [&](const BundleItem& b) { return b.id == a_id; });
+                a_id = f == a_v.end() ? 0 : f->parent;
+            }
+            return up;
+        }
+
         // ★★CUT A BAG OUT OF A BUNDLE, BRANCH AND ALL, and hand the branch
         // back re-rooted so it can become a manifest of its own.
         //
         // Both ways a bag can leave a bundle need this -- dragged out to the
-        // player, or taken by any other road -- and they were about to grow two
-        // copies of it. The erase has two traps either copy has to remember:
-        // remove from the back, since each removal slides what follows it, and
-        // then repair the survivors, because an entry that stayed would
-        // otherwise point at whatever slid into its parent's place. A bag
-        // adopting a stranger's contents is the same class of bug as a bag
-        // losing its own.
-        std::vector<BundleItem> CutBranch(std::vector<BundleItem>& a_bundle, int a_idx)
+        // player, or taken by any other road. It used to have two traps to
+        // remember: erase from the BACK, since each removal slid what followed
+        // it, and then repair every survivor, because an entry that stayed
+        // would otherwise point at whatever slid into its parent's place. A bag
+        // adopting a stranger's contents was the same bug as a bag losing its
+        // own, and both were the index.
+        //
+        // With names there is no order to respect and no survivor to repair: an
+        // entry outside the closure is untouched by definition.
+        std::vector<BundleItem> CutBranch(std::vector<BundleItem>& a_bundle,
+                                          std::uint32_t a_id)
         {
-            std::vector<int> gen{ a_idx }, branch;
-            for (int i = 0; i < static_cast<int>(a_bundle.size()); ++i) {
-                if (std::find(gen.begin(), gen.end(), a_bundle[i].parentIdx) != gen.end()) {
-                    gen.push_back(i);
-                    branch.push_back(i);
-                }
-            }
+            const auto fam = IdClosure(a_bundle, a_id);
+            if (fam.empty()) return {};
             std::vector<BundleItem> out;
-            std::map<int, int>      remap;
-            for (int i : branch) {
-                remap[i] = static_cast<int>(out.size());
-                BundleItem b = a_bundle[i];
-                const auto pi = remap.find(b.parentIdx);
-                b.parentIdx = (b.parentIdx == a_idx || pi == remap.end())
-                                  ? -1 : pi->second;
-                out.push_back(std::move(b));
+            for (const auto& b : a_bundle) {
+                if (b.id == a_id || fam.count(b.id) == 0) continue;
+                out.push_back(b);
+                // the branch re-roots: what sat in the cut bag now sits in
+                // "the bag that owns this bundle", whichever that turns out to
+                // be on the other side of the move
+                if (out.back().parent == a_id) out.back().parent = 0;
             }
-            std::vector<int> dead = branch;
-            dead.push_back(a_idx);
-            std::sort(dead.begin(), dead.end(), std::greater<int>());
-            for (int i : dead) a_bundle.erase(a_bundle.begin() + i);
-            for (auto& b : a_bundle) {
-                if (b.parentIdx < 0) continue;
-                int shift = 0;
-                for (int i : dead) {
-                    if (i < b.parentIdx) ++shift;
-                }
-                b.parentIdx -= shift;
-            }
+            std::erase_if(a_bundle,
+                [&](const BundleItem& b) { return fam.count(b.id) != 0; });
             return out;
         }
 
@@ -488,26 +531,19 @@ namespace FUI::LootBarter
         // the newest first) -- the player-bag grammar, where every open bag
         // has its own window. The bag's form rides along for the title.
         // ★★A BAG INSIDE A SHELF BAG HAS NO SPOT OF ITS OWN, so a window on
-        // one cannot be named the way the top-level ones are. It is named by the
-        // way DOWN to it: the spot, then one step per level.
+        // one is named by the ENTRY it shows: one id.
         //
-        // A step is (form, col, row) rather than an index into the bundle,
-        // because indices move. Erasing an entry slides everything after it, and
-        // a window holding an index would be looking at whatever slid into its
-        // place -- the same class of bug the take had to fix. A step is what the
-        // player can see: this bag, in that square, at this level.
-        struct BagStep
-        {
-            RE::FormID form = 0;
-            int        col = -1;
-            int        row = -1;
-            bool operator==(const BagStep&) const = default;
-        };
+        // It used to be named by the way DOWN to it -- the spot, then (form,
+        // col, row) per level -- because an index into the bundle would have
+        // gone stale. So did the path: a square is where a bag SITS, so moving
+        // a bag one square over renamed it, its own open window stopped
+        // resolving, and the window closed. Moving something is not closing it.
+        // An id is the one thing about a bag that a move does not touch.
         struct ShelfBagWin
         {
-            std::string          spot;
-            RE::FormID           form = 0;
-            std::vector<BagStep> path;   // empty = the bag ON the spot
+            std::string   spot;
+            RE::FormID    form = 0;
+            std::uint32_t bag = 0;   // 0 = the bag ON the spot
         };
         std::vector<ShelfBagWin> g_shelfBags;
 
@@ -531,13 +567,25 @@ namespace FUI::LootBarter
             std::uint16_t sig = 0;
             int           col = -1;
             int           row = -1;
-            // ★which level of the bundle it was lifted out of. An index is safe
-            // HERE where a window's would not be: the bundle is not mutated
-            // while a carry is out -- the entry survives until it is consumed --
-            // so this cannot go stale during the one thing that reads it.
-            int           root = -1;
+            // ★WHICH ENTRY, by name. This used to be the LEVEL it came out
+            // of, which had to be compared against a window's level to tell the
+            // carried entry from its lookalikes -- one comparison too many, and
+            // any renumbering between the lift and the next frame made the two
+            // disagree: the entry drew in its old square while also riding the
+            // cursor. Two copies of one thing. The id IS the entry.
+            std::uint32_t id = 0;
         };
         BundleCarry g_bundleCarry;
+
+        // ★★A BAG THAT LEAVES A BUNDLE TO BECOME A CELL, named. The two halves
+        // of that move are a Consume and a PlaceStoredCell, and only the first
+        // knows where the bag came FROM while only the second knows where it
+        // lands -- so the name is parked here for the one frame between them.
+        // What it buys: the windows open on that bag and on everything inside
+        // it stay open, hanging off the new cell instead of the old spot. A
+        // window is a name, and none of those names changed.
+        std::string   g_bagToCellSpot;
+        std::uint32_t g_bagToCellId = 0;
 
         // ★(1.3.2) the marker bits of the unit riding the cursor from the
         // PARTNER side (a shelf cell, or a bundle entry). The carry itself
@@ -902,6 +950,8 @@ namespace FUI::LootBarter
         // their claim happens on the player-side rebuild, which may run
         // after this session is gone.
         g_pendingBundles.clear();
+        g_bagToCellSpot.clear();   // an unfinished bag -> cell hand-off
+        g_bagToCellId = 0;
         g_shelfBags.clear();   // (1.3.1) the shelf windows die with the session
         g_shelfPouchSpot.clear();
         g_bundleCarry = {};
@@ -2060,6 +2110,8 @@ namespace
         return ShelfGoldOf(g_actingSpot);
     }
 
+    std::uint32_t MintBundleId() { return NextBundleId(); }
+
     void NoteBagBundle(RE::FormID a_bagForm, std::vector<BundleItem> a_items)
     {
         auto* p = Partner();
@@ -2094,10 +2146,12 @@ namespace
         const auto si = ci->second.cells.find(g_bundleCarry.spot);
         if (si == ci->second.cells.end()) return true;
         auto& bundle = si->second.bundle;
-        // the anchor names the exact entry; fall back to (form, sig)
+        // ★the id names the exact entry, whatever has happened to the vector
+        // since the lift. The anchor used to do this, and an anchor is where
+        // something SITS -- two identical stacks were told apart by their
+        // squares, so anything that moved either of them picked the wrong one.
         auto it = std::find_if(bundle.begin(), bundle.end(), [&](const BundleItem& b) {
-            return b.form == g_bundleCarry.form && b.col == g_bundleCarry.col &&
-                   b.row == g_bundleCarry.row;
+            return b.id == g_bundleCarry.id;
         });
         if (it == bundle.end()) {
             it = std::find_if(bundle.begin(), bundle.end(), [&](const BundleItem& b) {
@@ -2110,9 +2164,9 @@ namespace
             // everything under it -- the contents stayed in the bundle pointing
             // at a parent that was gone, and only surfaced when the OUTER bag
             // came home. Same tree, same rule as the store side.
-            const int idx = static_cast<int>(it - bundle.begin());
+            const std::uint32_t cid = it->id;
             if (Grid::ResolveDef(a_obj).bag != 0) {
-                auto branch = CutBranch(bundle, idx);
+                auto branch = CutBranch(bundle, cid);
                 if (a_toPlayer) {
                     SendBranchHome(a_obj, std::move(branch));
                 } else if (!branch.empty()) {
@@ -2130,16 +2184,13 @@ namespace
                         g_pendingBundles.push_back({ pref->GetFormID(),
                                                      a_obj->GetFormID(),
                                                      std::move(branch) });
+                        g_bagToCellSpot = g_bundleCarry.spot;
+                        g_bagToCellId = cid;
                     }
                 }
             } else {
                 it->count -= a_count;
-                if (it->count <= 0) {
-                    bundle.erase(it);
-                    for (auto& b : bundle) {
-                        if (b.parentIdx > idx) --b.parentIdx;
-                    }
-                }
+                if (it->count <= 0) bundle.erase(it);   // no survivors to repair
             }
         }
         return true;
@@ -2157,30 +2208,16 @@ namespace
     {
         // one bag window. a_ord staggers the default position; returns
         // false when the window should close (the bag left the shelf).
-        // ★Walk a window's path down to the bundle entry it names. -1 is the
-        // bag ON the spot (the path is empty); anything else is a bag nested
-        // inside it. A step that finds nothing means the bag is gone -- taken,
-        // sold, spilled -- and the window closes rather than showing a level
-        // that no longer exists.
-        int ResolveBagPath(const std::vector<BundleItem>& a_bundle,
-                           const std::vector<BagStep>& a_path, bool& a_ok)
+        // ★Is the bag this window shows still in the bundle? 0 is the bag ON
+        // the spot, which lives exactly as long as the cell does; anything else
+        // is a nested entry, and its absence means it is gone -- taken, sold,
+        // spilled -- so the window closes rather than showing a level that no
+        // longer exists. There is no walking left: the name is the answer.
+        bool BagAlive(const std::vector<BundleItem>& a_bundle, std::uint32_t a_id)
         {
-            a_ok = true;
-            int root = -1;
-            for (const auto& step : a_path) {
-                int found = -1;
-                for (int i = 0; i < static_cast<int>(a_bundle.size()); ++i) {
-                    const auto& b = a_bundle[i];
-                    if (b.parentIdx == root && b.form == step.form &&
-                        b.col == step.col && b.row == step.row) {
-                        found = i;
-                        break;
-                    }
-                }
-                if (found < 0) { a_ok = false; return -1; }
-                root = found;
-            }
-            return root;
+            return a_id == 0 ||
+                   std::any_of(a_bundle.begin(), a_bundle.end(),
+                       [&](const BundleItem& b) { return b.id == a_id; });
         }
 
         bool DrawOneShelfBag(RE::TESObjectREFR* p, ContLayout& a_cl,
@@ -2189,17 +2226,9 @@ namespace
         const auto si = a_cl.cells.find(a_w.spot);
         if (si == a_cl.cells.end()) return false;   // the bag left the shelf
         auto& bundle = si->second.bundle;
-        // ★which level this window is showing
-        bool      pathOk = true;
-        const int root = ResolveBagPath(bundle, a_w.path, pathOk);
-        if (!pathOk) {
-            std::string path;
-            for (const auto& st : a_w.path) {
-                path += fmt::format(" {:06X}@{},{}", st.form & 0xFFFFFF, st.col, st.row);
-            }
-            SKSE::log::info("[BUNDLE] window closed -- path no longer resolves:{}", path);
-            return false;   // the nested bag is no longer there
-        }
+        // ★which bag this window is showing
+        const std::uint32_t root = a_w.bag;
+        if (!BagAlive(bundle, root)) return false;   // that bag is no longer here
         auto* bagObj = RE::TESForm::LookupByID<RE::TESBoundObject>(a_w.form);
         if (!bagObj) return false;
         const auto bagDef = Grid::ResolveDef(bagObj);
@@ -2212,19 +2241,15 @@ namespace
         // THIS window is excluded entirely -- its cells free up while it
         // rides the cursor, and a cancel simply re-seats it (colliding
         // anchors refit, nothing is lost).
-        // ★★THE CARRIED ENTRY IS THE ONE THAT MATCHES, and it says which level
-        // it is on itself. Comparing a REMEMBERED index against this window's
-        // root was one index too many: the carry stores the root it was lifted
-        // from, and any renumbering between the lift and the next frame made
-        // the two disagree -- so the entry drew in its old square while also
-        // riding the cursor. Two copies of one thing.
+        // ★★THE CARRIED ENTRY IS THE ONE WITH THE CARRY'S NAME. It used to be
+        // matched on (level, form, square) -- three things that all change --
+        // so a lift that renumbered anything left the entry drawing in its old
+        // square while also riding the cursor. Two copies of one thing.
         const bool carryOut = g_bundleCarry.active &&
                               g_bundleCarry.spot == a_w.spot &&
                               g_bundleCarry.cont == p->GetFormID();
         auto isCarried = [&](const BundleItem& a_b) {
-            return carryOut && a_b.parentIdx == root &&
-                   a_b.form == g_bundleCarry.form &&
-                   a_b.col == g_bundleCarry.col && a_b.row == g_bundleCarry.row;
+            return carryOut && a_b.id == g_bundleCarry.id;
         };
         auto dimsOf = [&](const BundleItem& a_b, RE::TESBoundObject* a_obj,
                           int& a_w, int& a_h) {
@@ -2264,34 +2289,7 @@ namespace
         // draws as one cell. Opening it from inside a chest is deliberately not
         // offered yet; the requirement was that a nesting survives the trip
         // intact, and it does.
-        // ⑰b PROBE: the bundle as it stands, printed only when it CHANGES, so
-        // the log shows the moment a lift rearranges something rather than one
-        // line per frame. Reported: lifting a plain item out of a level makes a
-        // sibling BAG vanish from that level, while the bag is demonstrably
-        // still in the bundle (taking the outer bag home brings it back). That
-        // is a seating problem or a parent problem, and those two look identical from
-        // outside -- this tells them apart.
-        {
-            std::string now = fmt::format("root={} carry={}", root,
-                                          carryOut ? g_bundleCarry.root : -99);
-            for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
-                const auto& b = bundle[i];
-                now += fmt::format(" #{}:{:06X}x{}@{},{}^{}", i, b.form & 0xFFFFFF,
-                                   b.count, b.col, b.row, b.parentIdx);
-            }
-            std::string me = a_w.spot;
-            for (const auto& st : a_w.path) {
-                me += fmt::format("/{:06X}@{},{}", st.form & 0xFFFFFF, st.col, st.row);
-            }
-            now = "win[" + me + "] " + now;
-            static std::map<std::string, std::string> s_last;
-            auto& prev = s_last[me];
-            if (prev != now) {
-                prev = now;
-                SKSE::log::info("[BUNDLE] {}", now);
-            }
-        }
-        auto atThisLevel = [&](const BundleItem& a_b) { return a_b.parentIdx == root; };
+        auto atThisLevel = [&](const BundleItem& a_b) { return a_b.parent == root; };
         for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
             if (isCarried(bundle[i]) || !atThisLevel(bundle[i])) continue;
             auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(bundle[i].form);
@@ -2325,24 +2323,6 @@ namespace
             }
         }
         for (const auto& s : seats) rows = (std::max)(rows, s.row + s.h);
-        {   // ⑰b PROBE: what this window actually seated, printed on change.
-            // The dump above says what the bundle HOLDS; this says what got a
-            // square. A level that holds children and seats none is the report.
-            std::string me = a_w.spot;
-            for (const auto& st : a_w.path) {
-                me += fmt::format("/{:06X}@{},{}", st.form & 0xFFFFFF, st.col, st.row);
-            }
-            std::string now = fmt::format("seated root={} n={}", root, seats.size());
-            for (const auto& t : seats) {
-                now += fmt::format(" #{}@{},{}", t.idx, t.col, t.row);
-            }
-            static std::map<std::string, std::string> s_seat;
-            auto& prev = s_seat[me];
-            if (prev != now) {
-                prev = now;
-                SKSE::log::info("[BUNDLE] win[{}] {}", me, now);
-            }
-        }
 
         // ---- the window: the player bag-window chrome, one for one --------
         auto* wm = WinManager::GetSingleton();
@@ -2353,10 +2333,9 @@ namespace
         const ImVec2 size(cols * cell + 2.0f * Theme::PadX() * S +
                               2.0f * Theme::FrameInsetX(),
                           rows * cell + 54.0f * S + 2.0f * Theme::FrameInsetY());
-        std::string wid = "sb|" + a_w.spot;
-        for (const auto& st : a_w.path) {
-            wid += fmt::format("/{:08X}@{},{}", st.form, st.col, st.row);
-        }
+        // ★the window's own name: the cell it hangs off, and the bag inside
+        // it. Stable across every move, which is what keeps it open through one.
+        const std::string wid = fmt::format("sb|{}/{}", a_w.spot, a_w.bag);
         wm->ApplyNext(wid,
             ImVec2(disp.x * 0.52f + a_ord * 44.0f * S,
                    (disp.y - size.y) * 0.5f + a_ord * 36.0f * S),
@@ -2418,8 +2397,8 @@ namespace
                         if (BagFilter::FilterOf(obj2) != bagDef.accept) continue;
                         const int loose = total - taken[fid2];
                         if (loose <= 0) continue;
-                        bundle.push_back({ fid2, loose, 0, -1, -1, 0,
-                                           0, false, root });
+                        AddBundle(bundle, { fid2, loose, 0, -1, -1, 0,
+                                            0, false, root });
                         taken[fid2] += loose;
                         swept += loose;
                     }
@@ -2475,7 +2454,7 @@ namespace
 
         // a right-click take, applied AFTER the loop below has finished
         // drawing -- see the note at the click
-        int                 takeIdx = -1;
+        std::uint32_t       takeId = 0;
         RE::TESBoundObject* takeObj = nullptr;
         int                 takeCount = 0;
         std::uint16_t       takeSig = 0;
@@ -2536,7 +2515,7 @@ namespace
             }
             if (!Grid::IsHolding()) {
                 char idbuf[24];
-                std::snprintf(idbuf, sizeof(idbuf), "##sbc%d", s.idx);
+                std::snprintf(idbuf, sizeof(idbuf), "##sbc%u", b.id);
                 ImGui::SetCursorScreenPos(p0);
                 ImGui::InvisibleButton(idbuf, ImVec2(bw, bh));
                 if (ImGui::IsItemHovered() && !UIRoot::MouseInOverlay()) {
@@ -2551,7 +2530,7 @@ namespace
                         // is CONSUMED (take home / shelf drop); a cancel puts
                         // it visually straight back
                         g_bundleCarry = { true, p->GetFormID(), a_w.spot,
-                                          b.form, b.sig, s.col, s.row, root };
+                                          b.form, b.sig, s.col, s.row, b.id };
                         g_carryGlow = b.glow;   // (1.3.2)
                         g_carryStolen = b.stolen;
                         Grid::BeginPartnerCarry(s.obj, b.count, 0,
@@ -2562,17 +2541,16 @@ namespace
                         // means everywhere else. Its window is this one's path
                         // plus a step, so a bag three deep is three steps -- the
                         // nesting has no special case and no depth limit.
-                        std::vector<BagStep> sub = a_w.path;
-                        sub.push_back({ b.form, s.col, s.row });
+                        const std::uint32_t sub = b.id;
                         const auto open = std::find_if(g_shelfBags.begin(),
                             g_shelfBags.end(), [&](const ShelfBagWin& a_o) {
-                                return a_o.spot == a_w.spot && a_o.path == sub;
+                                return a_o.spot == a_w.spot && a_o.bag == sub;
                             });
                         if (open != g_shelfBags.end()) {
                             g_shelfBags.erase(open);
                             Sfx::SelectOff();
                         } else {
-                            g_shelfBags.push_back({ a_w.spot, b.form, std::move(sub) });
+                            g_shelfBags.push_back({ a_w.spot, b.form, sub });
                             Sfx::SelectOn();
                         }
                     } else if (ImGui::IsItemClicked(ImGuiMouseButton_Right) &&
@@ -2607,7 +2585,7 @@ namespace
                             // blink when I take another item" report, and why it
                             // looked like a property of the CELL rather than of
                             // the item: it was the ones later in seat order.
-                            takeIdx = s.idx;
+                            takeId = b.id;
                             takeObj = s.obj;
                             takeCount = b.count;
                             takeSig = b.sig;
@@ -2628,14 +2606,9 @@ namespace
         // the take is then the same request any visible cell would make. No
         // acting cell is named: this take retires no cell, because the bundle
         // entry never was one.
-        if (takeIdx >= 0 && takeObj &&
-            takeIdx < static_cast<int>(bundle.size())) {
-            bundle.erase(bundle.begin() + takeIdx);
-            // ★survivors follow the shift, or one points at whatever slid into
-            // its parent's place
-            for (auto& b : bundle) {
-                if (b.parentIdx > takeIdx) --b.parentIdx;
-            }
+        if (takeId != 0 && takeObj) {
+            std::erase_if(bundle,
+                [&](const BundleItem& b) { return b.id == takeId; });
             g_actingSpot.clear();
             RequestTake(takeObj, takeCount, 0, takeSig);
         }
@@ -2697,9 +2670,9 @@ namespace
                                      g_bundleCarry.spot == a_w.spot &&
                                      g_bundleCarry.cont == p->GetFormID();
                 const RE::FormID hfid = hobj->GetFormID();
-                // eligibility: a rearrange is already inside; a shelf cell may
-                // not be a bag (no nesting) or a coin/pouch (its gold lives on
-                // the SLOT this move would retire); a player item answers to
+                // eligibility: a rearrange is already inside; a shelf cell
+                // may not be a coin or a pouch (its gold lives on the SLOT this
+                // move would retire); a player item answers to
                 // HeldShelfStorable. Typed bags keep their filter -- a move
                 // from ANOTHER bag answers to it too.
                 // ★★A BAG MAY GO IN, which it could not while a bundle was one
@@ -2713,7 +2686,23 @@ namespace
                                  : Grid::HeldShelfStorable() != nullptr);
                 const bool filterOk = sameBag || bagDef.accept.empty() ||
                                       BagFilter::FilterOf(hobj) == bagDef.accept;
-                if (intakeOk && filterOk) {
+                // ★★AND NOT INTO ITSELF. A bag can be lifted out of one window
+                // and dropped into another, and one of those windows may be its
+                // own -- or one belonging to something inside it. A flat index
+                // could not be asked that question, so the loop it would have
+                // made was simply unreachable data: a branch parented to itself,
+                // visible nowhere and freed by nothing.
+                const bool loopOk =
+                    !(bundleRe && root != 0 &&
+                      Ancestry(bundle, root).count(g_bundleCarry.id) != 0) &&
+                    // ★★AND A SHELF BAG IS NOT DROPPED INTO ITSELF. The cell
+                    // being carried is still on the board, so its window is
+                    // still open, and the intake would retire that very cell --
+                    // the same cell whose bundle it is writing into. Not a
+                    // logical loop but a live reference to a map node being
+                    // erased under it.
+                    !(fromPartner && !bundleRe && g_actingSpot == a_w.spot);
+                if (intakeOk && filterOk && loopOk) {
                     // seats blocking the drop rect
                     std::vector<int> blocks;
                     for (int sn = 0; sn < static_cast<int>(seats.size()); ++sn) {
@@ -2759,88 +2748,70 @@ namespace
                                     auto& srcB = ssi->second.bundle;
                                     const auto bit = std::find_if(srcB.begin(),
                                         srcB.end(), [&](const BundleItem& b) {
-                                            return b.form == g_bundleCarry.form &&
-                                                   b.col == g_bundleCarry.col &&
-                                                   b.row == g_bundleCarry.row;
+                                            return b.id == g_bundleCarry.id;
                                         });
                                     if (bit != srcB.end()) {
-                                        // ★★★MOVE IT IN PLACE WHEN IT IS NOT
-                                        // GOING ANYWHERE. Erase-and-append was
-                                        // reordering the vector, and every
-                                        // parentIdx in it is an INDEX into that
-                                        // vector -- so putting one item down
-                                        // renumbered the whole tree while every
-                                        // reference kept pointing at the old
-                                        // numbers.
+                                        // ★★★NOTHING IS RENUMBERED, EVER.
+                                        // Where an entry sits and which bag it
+                                        // is in are two fields; its NAME is a
+                                        // third, and a move writes only the
+                                        // first two.
                                         //
-                                        // Measured: moving the item in bag A
-                                        // sent it from #0 to the end and pulled
-                                        // everything else down one, leaving bag
-                                        // B at #0 with children still claiming
-                                        // #1. B's window resolved, stayed open,
-                                        // and seated nothing -- "the contents
-                                        // disappeared".
-                                        //
-                                        // Within one bundle nothing needs to
-                                        // move at all: the entry is already
-                                        // there, and what changed is where it
-                                        // SITS and whose it is. Writing those
-                                        // three fields leaves every index in
-                                        // the vector exactly where it was.
+                                        // This is where the tree used to come
+                                        // apart. Erase-and-append reordered the
+                                        // vector while every parent in it was
+                                        // an INDEX into that vector, so putting
+                                        // one item down renumbered everything
+                                        // and every reference kept the old
+                                        // numbers -- measured: moving the item
+                                        // in bag A sent it from #0 to the end
+                                        // and pulled the rest down one, leaving
+                                        // bag B's children claiming an index
+                                        // that was now their uncle. B's window
+                                        // stayed open and seated nothing: "the
+                                        // contents disappeared." Then in-place
+                                        // moves patched that, and the open
+                                        // windows had to be patched too because
+                                        // a window was named by the SQUARE the
+                                        // bag sat in. None of that survives a
+                                        // name.
                                         if (&srcB == &bundle) {
-                                            // ★★AND ANY WINDOW ON IT FOLLOWS.
-                                            // A window is named by the way down
-                                            // to it, and a step is the bag's
-                                            // SQUARE -- so moving a bag renamed
-                                            // it and its own window stopped
-                                            // resolving and closed. Moving
-                                            // something is not closing it.
-                                            for (auto& w : g_shelfBags) {
-                                                if (w.spot != a_w.spot) continue;
-                                                for (auto& st : w.path) {
-                                                    if (st.form == bit->form &&
-                                                        st.col == bit->col &&
-                                                        st.row == bit->row) {
-                                                        st.col = dropC;
-                                                        st.row = dropR;
-                                                        break;
-                                                    }
-                                                }
-                                            }
                                             bit->col = dropC;
                                             bit->row = dropR;
                                             bit->rot = hrot & 3;
-                                            bit->parentIdx = root;
-                                            consumed = true;
+                                            bit->parent = root;
                                         } else {
                                             // ★A genuine crossing between two
-                                            // containers' bundles. The entry
-                                            // leaves one vector and joins
-                                            // another, so BOTH have to be
-                                            // repaired -- CutBranch does the
-                                            // leaving half (and brings a bag's
-                                            // branch with it), and the arriving
-                                            // half is a plain append whose
-                                            // parents are remapped onto it.
-                                            const int idx =
-                                                static_cast<int>(bit - srcB.begin());
+                                            // cells' bundles: the entry and its
+                                            // whole branch change vectors, ids
+                                            // intact. The mint is global, so
+                                            // there is nothing on this side to
+                                            // collide with and nothing to remap.
                                             BundleItem moved = *bit;
-                                            auto branch = CutBranch(srcB, idx);
+                                            auto branch = CutBranch(srcB, moved.id);
                                             moved.col = dropC;
                                             moved.row = dropR;
                                             moved.rot = hrot & 3;
-                                            moved.parentIdx = root;
-                                            const int here =
-                                                static_cast<int>(bundle.size());
+                                            moved.parent = root;
                                             bundle.push_back(moved);
                                             for (auto& b : branch) {
-                                                b.parentIdx = b.parentIdx < 0
-                                                    ? here
-                                                    : b.parentIdx + here + 1;
+                                                if (b.parent == 0) b.parent = moved.id;
                                                 bundle.push_back(b);
                                             }
-                                            consumed = true;
+                                            // ★the branch changed CELLS, so any
+                                            // window open on it hangs off this
+                                            // cell now. Its name is unchanged;
+                                            // only the spot it lives on moved.
+                                            const auto fam =
+                                                IdClosure(bundle, moved.id);
+                                            for (auto& w : g_shelfBags) {
+                                                if (w.spot == g_bundleCarry.spot &&
+                                                    fam.count(w.bag) != 0) {
+                                                    w.spot = a_w.spot;
+                                                }
+                                            }
                                         }
+                                        consumed = true;
                                     }
                                 }
                             }
@@ -2849,17 +2820,51 @@ namespace
                         } else if (fromPartner) {
                             // off the shelf, into the bag: retire its slot --
                             // the engine item never moves, the entry hides it
-                            if (!g_actingSpot.empty()) {
-                                a_cl.cells.erase(g_actingSpot);
+                            // ★★AND A SHELF BAG BRINGS ITS OWN INSIDES. The
+                            // cell's bundle IS what is in that bag, and retiring
+                            // the cell used to drop it on the floor: bag B put
+                            // back into bag A arrived empty while everything
+                            // that had been in B surfaced loose on the shelf.
+                            // It becomes B's branch here, every name intact.
+                            std::vector<BundleItem> carried;
+                            const std::string from = g_actingSpot;
+                            if (!from.empty()) {
+                                if (const auto ai = a_cl.cells.find(from);
+                                    ai != a_cl.cells.end()) {
+                                    carried = std::move(ai->second.bundle);
+                                }
+                                a_cl.cells.erase(from);
                                 g_actingSpot.clear();
                             }
                             // off a shelf cell: the container's own ownership
                             // is all this side knows (kSteal = owned whole)
-                            bundle.push_back({ hfid, hcount, hsig,
-                                               dropC, dropR, hrot & 3, hglow,
-                                               g_carryStolen ||
-                                                   g_mode == Mode::kSteal,
-                                               root });
+                            const std::uint32_t nid =
+                                AddBundle(bundle, { hfid, hcount, hsig,
+                                                    dropC, dropR, hrot & 3, hglow,
+                                                    g_carryStolen ||
+                                                        g_mode == Mode::kSteal,
+                                                    root }).id;
+                            for (auto& b : carried) {
+                                if (b.parent == 0) b.parent = nid;
+                                bundle.push_back(b);
+                            }
+                            // ★and the windows that hung off that cell hang off
+                            // this one now -- the mirror of the move out
+                            if (!from.empty()) {
+                                for (auto& w : g_shelfBags) {
+                                    if (w.spot != from) continue;
+                                    if (w.bag == 0) {
+                                        w.spot = a_w.spot;
+                                        w.bag = nid;
+                                    } else if (std::any_of(carried.begin(),
+                                                   carried.end(),
+                                                   [&](const BundleItem& b) {
+                                                       return b.id == w.bag;
+                                                   })) {
+                                        w.spot = a_w.spot;
+                                    }
+                                }
+                            }
                             consumed = true;
                             Grid::DropHeldForShelf();
                         } else {
@@ -2869,9 +2874,27 @@ namespace
                             int           rt = 0;
                             std::uint8_t  gl = 0;
                             bool          st = false;
+                            const bool heldBag = Grid::ResolveDef(hobj).bag != 0;
                             if (Grid::CommitHeldToShelfBag(f, cnt, sg, rt, gl, st)) {
-                                bundle.push_back({ f, cnt, sg, dropC, dropR, rt,
-                                                   gl, st, root });
+                                const std::uint32_t nid =
+                                    AddBundle(bundle, { f, cnt, sg, dropC, dropR,
+                                                        rt, gl, st, root }).id;
+                                // ★★AND A BAG BRINGS ITS INSIDES. The commit
+                                // queues the contents' stores and parks their
+                                // manifest -- the same door a bag stored onto
+                                // the shelf GRID comes through -- and here it is
+                                // spliced in under the entry that just landed.
+                                // Without this the drop was refused outright
+                                // ("no bag inside a bag"), which was a statement
+                                // about the old flat data and not a rule anyone
+                                // chose: a bag would not go into an open shelf
+                                // bag at all (reported).
+                                if (heldBag) {
+                                    for (auto& b : TakePendingBundle(f)) {
+                                        if (b.parent == 0) b.parent = nid;
+                                        bundle.push_back(b);
+                                    }
+                                }
                                 consumed = true;
                             }
                         }
@@ -2879,7 +2902,7 @@ namespace
                             // C4: the occupant rides the cursor in its place
                             g_bundleCarry = { true, p->GetFormID(), a_w.spot,
                                               lifted.form, lifted.sig,
-                                              lifted.col, lifted.row, root };
+                                              lifted.col, lifted.row, lifted.id };
                             g_carryGlow = lifted.glow;   // (1.3.2)
                             g_carryStolen = lifted.stolen;
                             Grid::BeginPartnerCarry(liftedObj, lifted.count, 0,
@@ -5010,7 +5033,23 @@ namespace
             // nothing parked yet: the pouch has not left the player. Wait for it.
             if (c.gold <= 0) c.awaitGold = 8;
         }
-        cl->cells[MintCellKey(*cl, a_obj)] = std::move(c);
+        const std::string key = MintCellKey(*cl, a_obj);
+        // ★the windows follow the bag onto its new cell (see g_bagToCellSpot)
+        if (!g_bagToCellSpot.empty()) {
+            for (auto& w : g_shelfBags) {
+                if (w.spot != g_bagToCellSpot) continue;
+                if (w.bag == g_bagToCellId) {
+                    w.spot = key;   // the bag itself: it IS the cell now
+                    w.bag = 0;
+                } else if (std::any_of(c.bundle.begin(), c.bundle.end(),
+                               [&](const BundleItem& b) { return b.id == w.bag; })) {
+                    w.spot = key;   // something inside it: same name, new cell
+                }
+            }
+            g_bagToCellSpot.clear();
+            g_bagToCellId = 0;
+        }
+        cl->cells[key] = std::move(c);
     }
 
     // ---- F7: cosave 'GCLY' v1 ----
@@ -5020,7 +5059,7 @@ namespace
     {
         constexpr std::uint32_t kContMaxStr = 512;
         constexpr std::uint32_t kContMaxEntries = 65536;
-        constexpr std::uint32_t kContCosaveVersion = 11;   // v11: a bundle entry's parent (nested bags)   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints  v10: the cell owns form + count + xlIdx
+        constexpr std::uint32_t kContCosaveVersion = 12;   // ★v12: a bundle entry's NAME (id + parent id, replacing the index)   // v11: a bundle entry's parent (nested bags)   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints  v10: the cell owns form + count + xlIdx
 
         // ★v9 migration: before this, a spot's binding lived inside its KEY
         // ("form~B825!worn#1"). Read it back out and put it where it belongs.
@@ -5119,8 +5158,11 @@ namespace
                     a_intfc->WriteRecordData(static_cast<std::int32_t>(b.glow));
                     // v8: someone else's goods
                     a_intfc->WriteRecordData(static_cast<std::int32_t>(b.stolen ? 1 : 0));
-                    // ★v11: which bag inside the bundle this entry sits in
-                    a_intfc->WriteRecordData(static_cast<std::int32_t>(b.parentIdx));
+                    // ★v12: the entry's NAME, and the name of the bag it is
+                    // in. v11 wrote an index into this same vector -- see the
+                    // load for the one-pass migration off it.
+                    a_intfc->WriteRecordData(b.id);
+                    a_intfc->WriteRecordData(b.parent);
                 }
                 // ★v9: which unit this spot is showing. A hint, not a name:
                 // a stale one only weakens the next match, and the fallback
@@ -5183,6 +5225,14 @@ namespace
                     std::uint32_t nb = 0;
                     if (!a_intfc->ReadRecordData(nb) || nb > kContMaxEntries) return;
                     bundle.reserve(nb);
+                    // ★v<=11 migration: the id given to the entry at each
+                    // ORIGINAL index, filled as the entries are read. A v11
+                    // parent always pointed BACKWARDS (the manifest was written
+                    // parent-first), so by the time one is read its target is
+                    // already in this table -- one forward pass, no sorting.
+                    // Dropped entries still take a slot, or the table would
+                    // shift under the very indices it exists to translate.
+                    std::vector<std::uint32_t> idOf;
                     for (std::uint32_t bi = 0; bi < nb; ++bi) {
                         RE::FormID    f = 0;
                         std::int32_t  bc = 0;
@@ -5209,22 +5259,35 @@ namespace
                         if (a_version >= 8) {   // someone else's goods
                             if (!a_intfc->ReadRecordData(bstolen)) return;
                         }
-                        // ★v11: nesting. A save from before this has none --
-                        // every entry sat directly in the stored bag, which is
-                        // exactly what -1 means, so the default IS the
-                        // migration.
-                        std::int32_t bparent = -1;
-                        if (a_version >= 11) {
-                            if (!a_intfc->ReadRecordData(bparent)) return;
+                        // ★v12: names. v11 wrote an index; anything older
+                        // had no nesting at all, and "directly in the stored
+                        // bag" is what 0 means -- so for those the default IS
+                        // the migration.
+                        std::uint32_t bid = 0, bparent = 0;
+                        if (a_version >= 12) {
+                            if (!a_intfc->ReadRecordData(bid) ||
+                                !a_intfc->ReadRecordData(bparent)) {
+                                return;
+                            }
+                        } else if (a_version >= 11) {
+                            std::int32_t oldParent = -1;
+                            if (!a_intfc->ReadRecordData(oldParent)) return;
+                            if (oldParent >= 0 &&
+                                oldParent < static_cast<std::int32_t>(idOf.size())) {
+                                bparent = idOf[static_cast<std::size_t>(oldParent)];
+                            }
                         }
+                        if (bid == 0) bid = NextBundleId();
+                        idOf.push_back(bid);
                         // load-order shift: unresolvable contents are dropped
                         // (their engine items simply stay visible on the shelf)
                         RE::FormID rf = 0;
                         if (a_intfc->ResolveFormID(f, rf) && rf != 0 && bc > 0) {
-                            bundle.push_back({ rf, bc, bs, bcol, brow, brot & 3,
-                                               static_cast<std::uint8_t>(bglow),
-                                               bstolen != 0,
-                                               bparent >= 0 ? bparent : -1 });
+                            BundleItem bi{ rf, bc, bs, bcol, brow, brot & 3,
+                                           static_cast<std::uint8_t>(bglow),
+                                           bstolen != 0, bparent };
+                            bi.id = bid;
+                            bundle.push_back(std::move(bi));
                         }
                     }
                 }
@@ -5279,6 +5342,15 @@ namespace
         }
         g_contLayouts = std::move(loaded);
         g_contStamp = maxStamp;
+        // ★the mint resumes past everything this save already named, which is
+        // why the counter itself never needs to be written down
+        for (const auto& [rid, cl2] : g_contLayouts) {
+            for (const auto& [k2, c2] : cl2.cells) {
+                for (const auto& b2 : c2.bundle) {
+                    g_nextBundleId = (std::max)(g_nextBundleId, b2.id + 1);
+                }
+            }
+        }
         SKSE::log::info("[LOOT] cosave: loaded {} container layouts", g_contLayouts.size());
     }
 
@@ -5291,6 +5363,10 @@ namespace
         g_storeHint = {};
         g_pendingBundles.clear();   // (1.3.0-D) bundles from the previous save
         g_incomingBundles.clear();
+        g_shelfBags.clear();        // windows onto a board that no longer exists
+        g_bagToCellSpot.clear();
+        g_bagToCellId = 0;
+        g_nextBundleId = 1;         // names belong to the save that minted them
         g_partnerGridLive = false;
         g_lastCells.clear();
     }

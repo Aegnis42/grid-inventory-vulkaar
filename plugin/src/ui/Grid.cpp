@@ -1233,17 +1233,18 @@ namespace FUI::Grid
         // The walk is a STACK, not recursion: the depth is the player's data,
         // and user data does not belong on the call stack.
         //
-        // Parent-first is the ordering the manifest needs. Every entry records
-        // the index of the bag it sits in, and an entry's parent is always
-        // written before it -- so parentIdx points backwards, and the restore
-        // can rebuild the whole chain in one forward pass (see
-        // ClaimIncomingBundles) without sorting or a second lookup.
+        // Every entry records the NAME of the bag it sits in -- an id minted
+        // once and never rewritten -- so nothing in the manifest depends on the
+        // order it was written in, or on where an entry ends up once it lands.
+        // The walk still happens to be parent-first, which is all the restore
+        // needs to have a parent's tile ready when its children are read (see
+        // ClaimIncomingBundles).
         void StoreBagContents(const std::string& a_bagKey, RE::TESBoundObject* a_bagObj)
         {
             std::vector<LootBarter::BundleItem> manifest;
-            // (bag key, index of that bag's entry in the manifest; -1 = the
-            // bag being stored, which has no entry of its own)
-            std::vector<std::pair<std::string, int>> todo{ { a_bagKey, -1 } };
+            // (bag key, the id of that bag's entry; 0 = the bag being stored,
+            // which has no entry of its own)
+            std::vector<std::pair<std::string, std::uint32_t>> todo{ { a_bagKey, 0u } };
             std::set<std::string> seen{ a_bagKey };   // a cycle cannot form, but
                                                       // a corrupt save must not spin
             while (!todo.empty()) {
@@ -1252,12 +1253,14 @@ namespace FUI::Grid
             for (auto& it : g_items) {
                 if (it.inBag != bagKey || !it.obj) continue;
                 if (it.coinValue >= 0) continue;   // pinned purses stay home
+                // ★the entry's name, minted before anything can refer to it
+                const std::uint32_t bid = LootBarter::MintBundleId();
                 if (it.def.bag != 0) {
                     // ★A nested bag is BOTH an entry and a branch: it is stored
                     // like any other item, and its own contents are walked next
-                    // with this entry's index as their parent.
+                    // with this entry's NAME as their parent.
                     if (!seen.insert(it.key).second) continue;
-                    todo.push_back({ it.key, static_cast<int>(manifest.size()) });
+                    todo.push_back({ it.key, bid });
                 }
                 LootBarter::RequestStore(it.obj, it.count, it.uid, it.sig, it.fav,
                                          it.xlIdx, it.key);
@@ -1271,9 +1274,11 @@ namespace FUI::Grid
                 // stranger's order. The player arranged that interior; a trip
                 // through a container is not a reason to undo it. (Reported as
                 // "the bag works, but the items inside get rearranged".)
-                manifest.push_back({ it.obj->GetFormID(), it.count, it.sig,
-                                     it.col, it.row, it.rot & 3, it.glow,
-                                     it.stolen, parent });
+                LootBarter::BundleItem bi{ it.obj->GetFormID(), it.count,
+                                           it.sig, it.col, it.row, it.rot & 3,
+                                           it.glow, it.stolen, parent };
+                bi.id = bid;
+                manifest.push_back(std::move(bi));
             }
             }
             if (!manifest.empty() && a_bagObj) {
@@ -6394,21 +6399,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const auto manifest =
                     LootBarter::TakeIncomingBundle(bt->obj->GetFormID());
                 if (manifest.empty()) continue;
-                // ★★S-3-4: the tile each manifest entry ended up as, so a
-                // NESTED bag's own contents can be routed into it rather than
-                // into the bag that was stored. Entries are written parent
-                // first, so by the time a child is read its parent's tile is
-                // already known -- one forward pass, no sorting.
-                std::vector<std::string> tileOf(manifest.size());
+                // ★★S-3-4: the tile each manifest entry ended up as, keyed by
+                // the entry's NAME, so a NESTED bag's own contents route into it
+                // rather than into the bag that was stored. Entries are written
+                // parent first, so by the time a child is read its parent's tile
+                // is already known -- one forward pass, no sorting.
+                std::map<std::uint32_t, std::string> tileOf;
                 for (std::size_t mi = 0; mi < manifest.size(); ++mi) {
                     const auto& b = manifest[mi];
                     // which bag this entry belongs in: the stored bag, or a
                     // nested one that came home earlier in this same pass. A
                     // parent whose tile never arrived leaves its children
                     // loose on the board rather than guessing at a home.
-                    const std::string& into =
-                        b.parentIdx < 0 ? bagKey
-                                        : tileOf[static_cast<std::size_t>(b.parentIdx)];
+                    const std::string into =
+                        b.parent == 0 ? bagKey : tileOf[b.parent];
                     if (into.empty()) continue;
                     int remaining = b.count;
                     // ★★AND THE ANCHOR COMES HOME WITH IT. The manifest has
@@ -6437,7 +6441,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             it->inBag = into;
                             auto& le = g_layout[it->key];
                             le.bag = into;
-                            if (tileOf[mi].empty()) tileOf[mi] = it->key;
+                            if (tileOf[b.id].empty()) tileOf[b.id] = it->key;
                             if (anchorFree) {
                                 // ★★THE TILE, NOT ONLY THE LAYOUT. Writing the
                                 // layout alone was too late to matter: Item::col
@@ -13272,10 +13276,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     RE::TESBoundObject* HeldShelfStorable()
     {
         if (!g_held || g_held->fromPartner || !g_held->obj) return nullptr;
-        if (g_held->isBag) return nullptr;            // no bag inside a bag
+        // ★★A BAG MAY GO IN. This read "no bag inside a bag", which was a
+        // statement about the old flat bundle rather than a rule anyone chose --
+        // the player's own boards have nested bags since E4b. A bundle is a tree
+        // now, and the commit below sends the bag's contents along with it.
         if (g_held->coinValue >= 0) return nullptr;   // coin tiles mirror the ledger
         const RE::FormID fid = g_held->obj->GetFormID();
-        if (GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid)) return nullptr;
+        // ★★AND NEITHER DOES A POUCH, for the same reason a shelf pouch may
+        // not go in: the amount hangs off a SLOT, and a bundle entry is not one.
+        // It was let through, and its gold had nowhere to be written down --
+        // the bag kept the pouch and the pouch came back empty. A bundle can
+        // hold a bag (it has a branch to put the contents in); it has nothing
+        // to hold a number, so the pouch stays on a board that does.
+        if (GoldCoins::IsCoinForm(fid)) return nullptr;
         if (g_held->quest) return nullptr;   // Phase 7
         return g_held->obj;
     }
@@ -13300,6 +13313,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             auto* xl = ExtraForPoolImpl(entry, g_held->uid, g_held->sig);
             a_glow = GlowBits(obj, entry, xl);
         }
+        // ★★A BAG TRAVELS WITH ITS INSIDES, here as everywhere else. The
+        // manifest is parked for the caller to splice under the entry this
+        // commit is about to become -- the same door a bag stored onto the shelf
+        // GRID comes through, one step earlier.
+        if (g_held->isBag) StoreBagContents(g_held->key, obj);
         LootBarter::RequestStore(obj, g_held->count,
             HeldUidOf(g_held->key, g_held->uid), g_held->sig, g_held->fav,
             -1, g_held->key);

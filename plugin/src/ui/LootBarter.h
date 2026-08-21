@@ -143,20 +143,32 @@ namespace FUI::LootBarter
         // owned" (kSteal). A unit that was stolen when it went in stays
         // stolen in the bag, and the mark has to say so.
         bool          stolen = false;
-        // ★★S-3-4: WHICH BAG INSIDE THE BUNDLE THIS ENTRY SITS IN.
+        // ★★★A BAG HAS A NAME, NOT A NUMBER (cosave v12).
         //
-        // A bundle used to be one flat list because a stored bag could only
-        // ever hold plain items -- StoreBagContents skipped nested bags
-        // outright, so a bag inside a bag did not travel with its parent at
-        // all. Recursive nesting is a tree, and a flat list can carry a tree
-        // if every entry names its parent.
+        // A bundle carries a tree by having every entry name the bag it sits
+        // in, and that name used to be an INDEX INTO THIS SAME VECTOR. Every
+        // hole reported around nested shelf bags was one way for an index to
+        // go stale: erasing an entry slid the ones after it, moving one
+        // renumbered the whole tree while every reference kept the old
+        // numbers, and a window holding a position ended up looking at
+        // whatever slid into it. Five fixes in a row were index arithmetic.
         //
-        // -1 = directly inside the stored bag. Otherwise an INDEX INTO THIS
-        // SAME VECTOR, always pointing BACKWARDS: the manifest is written
-        // parent-first, which is what lets the restore rebuild the chain in a
-        // single forward pass, with no sorting and no recursion.
-        int           parentIdx = -1;
+        // So the index is gone. The player's own board never had any of these
+        // bugs, and the reason is one line: LayoutEntry::bag is a KEY. A name
+        // survives every reorder, and nothing has to be repaired after one.
+        //
+        // id     : minted once (LootBarter::MintBundleId) and never rewritten
+        //          -- not by a move, a deletion, or a trip between containers.
+        // parent : the id of the bag entry this one sits in. 0 = directly
+        //          inside the bag that owns the bundle.
+        std::uint32_t parent = 0;
+        std::uint32_t id = 0;
     };
+    // ★A fresh, never-reused name for a bundle entry. One counter for the
+    // whole session rather than one per container: an entry that crosses from
+    // one bag to another -- or one chest to another -- keeps the id it was
+    // born with, so no boundary has to renumber anything.
+    [[nodiscard]] std::uint32_t MintBundleId();
     // Grid calls this as it queues the contents' stores; the bundle waits
     // (per container) for the bag's shelf spot to be born and rides it.
     void NoteBagBundle(RE::FormID a_bagForm, std::vector<BundleItem> a_items);
