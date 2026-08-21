@@ -344,6 +344,32 @@ namespace FUI::Costume
         if (!player->Is3DLoaded()) return;   // nothing to dress yet
         auto* race = player->GetRace();
         if (!race) return;
+        // ★★NEVER DRESS A TRANSFORMED PLAYER. A costume hangs its pieces on
+        // anchors worn in biped slots, and a werewolf or a vampire lord is a
+        // body those slots do not belong to -- dressing it is how a beast ends
+        // up wearing a cuirass, or loses the parts of itself that share a slot.
+        //
+        // ★And this is NOT prevented by the inventory being unavailable in
+        // beast form, which is the reassuring answer and the wrong one. Nothing
+        // here is driven by the menu: Tick runs on the main-thread hook every
+        // frame, open or closed, and the watch below asks whether the body was
+        // rebuilt from under us. TRANSFORMING IS EXACTLY THAT REBUILD -- it is
+        // the surest way there is to trip the very watchdog that calls this.
+        //
+        // The request is kept, not dropped: the same watch fires again when the
+        // form ends and the real body comes back, and by then this gate opens.
+        static bool s_beastNoted = false;
+        if (!race->GetPlayable()) {
+            if (!s_beastNoted) {
+                s_beastNoted = true;
+                SKSE::log::info("[COSTUME] transformed into '{}' -- holding the "
+                                "costume back until the form ends",
+                    race->GetName() ? race->GetName() : "?");
+            }
+            g_dirty = true;   // still owed, once there is a body to dress
+            return;
+        }
+        s_beastNoted = false;
         auto& rt = player->GetActorRuntimeData();
         auto* biped = rt.biped.get();
         if (!biped) return;
