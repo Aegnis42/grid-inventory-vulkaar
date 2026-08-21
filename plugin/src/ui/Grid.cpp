@@ -1456,6 +1456,11 @@ namespace FUI::Grid
         // Empty pool = "any", which is what a carry with no signature wants.
         struct DropHint { std::string baseKey; std::string pool; int col = -1; int row = -1;
                           std::string bag; int rot = 0;
+            // ★HOW MANY were let go of. A drag says an amount as well as a
+            // square, and without this the hint could only ever describe where
+            // the LEFTOVER went -- see the placement in ACQUIRE. 0 = whatever
+            // arrives (a single item, a buy, an older caller).
+            int count = 0;
             [[nodiscard]] bool Wants(const std::string& a_base,
                                      const std::string& a_pool) const
             {
@@ -5938,6 +5943,43 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     ks.empty() ? " (none)" : ks);
                 }
                 if (diff > 0) {
+                    // ★★★A DROP HINT IS A PLACEMENT, NOT A LEFTOVER.
+                    //
+                    // The hint used to be spent down in the spill loop, which
+                    // runs AFTER the fill below -- so anything the fill absorbed
+                    // never reached the square the player aimed at. With a typed
+                    // bag held that is not an edge case but the normal outcome:
+                    // drag potions out of a chest onto an empty cell and the
+                    // potion bag tops its own partial stack up first, leaving
+                    // only the remainder to land where they were dropped
+                    // (reported). The fill loop is right to prefer the bag for
+                    // an arrival NOBODY AIMED -- loot off a corpse, a purchase,
+                    // a reward. This one was aimed.
+                    //
+                    // So the aimed units are placed first and the rest goes on
+                    // to the ordinary rules. A hinted tile is deliberately not
+                    // pushed to g_freshTiles: routing must never override the
+                    // player's own hand (same reason the spill path skips it).
+                    if (g_dropHint.Wants(baseKey, poolKey)) {
+                        const int want = g_dropHint.count > 0 ? g_dropHint.count : diff;
+                        const int cnt = (std::min)({ want, cap, diff });
+                        if (cnt > 0) {
+                            Slot ns;
+                            ns.key = NextTileKey(baseKey);
+                            ns.le.uid = UidOf(poolKey);
+                            ns.le.sig = SigOf(poolKey);
+                            ns.le.col = g_dropHint.col;
+                            ns.le.row = g_dropHint.row;
+                            ns.le.bag = g_dropHint.bag;
+                            ns.le.rot = g_dropHint.rot;   // GI62
+                            ns.le.count = cnt;
+                            g_dropHint = {};
+                            g_layout[ns.key] = ns.le;   // reserve: NextTileKey advances
+                            g_arrivedTiles.push_back(ns.key);
+                            slots.push_back(std::move(ns));
+                            diff -= cnt;
+                        }
+                    }
                     // ACQUIRE: fill partial tiles top-left, then spill into new tiles
                     for (auto si : mine) {
                         auto& s = slots[si];
@@ -11371,8 +11413,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         (!sigDrifts && (a_held.uid != 0 || a_held.sig != 0))
                             ? PoolPrefix(hintBase, a_held.uid, a_held.sig)
                             : std::string{};
+                    // ★...and how many. A drag has already said the amount;
+                    // the hint carries it so the aimed units are PLACED rather
+                    // than left to whatever the fill pass did not want.
+                    // (A stack that opened the quantity slider commits its own
+                    // number on confirm, so cnt is the right answer there too.)
                     g_dropHint = { hintBase, hintPool,
-                                   g_target.col, g_target.row, v.bagKey, a_held.rot };
+                                   g_target.col, g_target.row, v.bagKey, a_held.rot,
+                                   cnt };
                     if (swapDisp) {
                         // free the displaced tile's spot for the incoming item
                         // and put it on the cursor (same as the C4 swap)
