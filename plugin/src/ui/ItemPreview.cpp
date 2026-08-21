@@ -577,6 +577,14 @@ namespace FUI
             return;
         }
         Inv3D::Unload(mgr);
+        // ★Same hole as ResetScene's, and the same answer: the guard above ran
+        // before Unload, End3D walks the array Unload just touched.
+        if (LoadInFlight(mgr)) {
+            SKSE::GetTaskInterface()->AddTask([this, a_session, a_tries]() {
+                TeardownWhenIdle(a_session, a_tries + 1);
+            });
+            return;
+        }
         Inv3D::End3D(mgr);
         if (a_tries > 0) {
             SKSE::log::info("[PREVIEW] End3D (deferred {} tasks)", a_tries);
@@ -708,6 +716,23 @@ namespace FUI
         }
         RestoreNodeScale();
         Inv3D::Unload(mgr);
+        // ★★ASK AGAIN, AFTER THE UNLOAD. The check above happened BEFORE
+        // Unload touched loadedModels, and End3D is what walks that array
+        // dereferencing each entry's spModel -- so the answer the guard gave
+        // was about a state that no longer exists by the time it matters.
+        // (Crash log 2026-08-21: EXCEPTION_ACCESS_VIOLATION reading [rcx] with
+        // rcx = 0, inside 51756 = End3D, reached from Request's ResetScene
+        // during an icon precache. The guard was there and was simply asked at
+        // the wrong moment.)
+        //
+        // Skipping the teardown costs nothing: the scene stays as it is, the
+        // caller's Load runs against a full array and fails quietly, and the
+        // next pass tries again. A crash costs the session.
+        if (LoadInFlight(mgr)) {
+            SKSE::log::warn("[PREVIEW] scene reset: a load landed mid-teardown "
+                            "-- End3D skipped");
+            return false;
+        }
         Inv3D::End3D(mgr);
         Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
         m_current = nullptr;
