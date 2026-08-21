@@ -42,7 +42,10 @@
 namespace
 {
     bool g_planBPendingOpen = false;   // open our menu once InventoryMenu fully closed
-    bool g_invEchoOwed = false;        // ⑫ — see InventoryCloseEchoTick
+    // ⑫ — the vanilla menu we swallowed and still owe a close for; empty =
+    // nothing owed. A NAME rather than a flag because three different screens
+    // come through the same door (see MenuCloseEchoTick).
+    std::string_view g_echoMenu{};
     bool g_pendingPartnerOpen = false; // open our grid once Container/BarterMenu fully closed (loot/barter)
     bool g_movementOff = false;        // we disabled the movement handler (text input)
     bool g_reopenAfterMsg = false;     // we stepped aside for a MessageBox (poison confirm)
@@ -69,7 +72,7 @@ namespace
         }
     }
     void LockpickReopenTick();      // defined below (lockpick auto-open fallback)
-    void InventoryCloseEchoTick();   // defined below (⑫ — the close nobody heard)
+    void MenuCloseEchoTick();        // defined below (⑫ — the close nobody heard)
 
     // ---- PlayerCharacter::Update vtable hook (index 0xAD) ----
     struct UpdateHook
@@ -94,7 +97,7 @@ namespace
             // the overlay menu down.
             FUI::Wheeler::Tick();
             LockpickReopenTick();      // lockpick auto-open fallback
-            InventoryCloseEchoTick();   // ⑫ — the inventory close, when it is true
+            MenuCloseEchoTick();        // ⑫ — the close, when it is true
         }
         static inline REL::Relocation<decltype(thunk)> func;
 
@@ -1469,7 +1472,7 @@ namespace
                 }
             }
             g_planBPendingOpen = true;
-            g_invEchoOwed = true;   // ⑫ — see InventoryCloseEchoTick
+            g_echoMenu = RE::InventoryMenu::MENU_NAME;   // ⑫
             logger::info("[INV] intercepted InventoryMenu -> deferring GridInventoryMenu open");
         }
         return false;   // opening intercept falls through (matches old flow)
@@ -1514,22 +1517,36 @@ namespace
     //
     // Mods that act on the early close will now see two; that is strictly
     // better than the one they see being a lie.
-    void InventoryCloseEchoTick()
+    //
+    // ★★AND IT IS NOT ONLY THE INVENTORY. ContainerMenu and BarterMenu come
+    // through the identical swallow-then-open door, and TK registers for both
+    // (checked in its string table). The report named the inventory because
+    // that is what the reporter tried; looting a chest breaks dodge exactly the
+    // same way. Fixing one of three would have sent the bug straight back.
+    //
+    // FavoritesMenu is swallowed too and is NOT here -- deliberately. What
+    // replaces it is the wheel, which is not kPausesGame (Wheeler.cpp), so menu
+    // mode really has ended by the time that close is delivered and the guard
+    // passes on its own.
+    void MenuCloseEchoTick()
     {
-        if (!g_invEchoOwed) return;
+        if (g_echoMenu.empty()) return;
         auto* ui = RE::UI::GetSingleton();
         if (!ui) return;
         // This tick only runs unpaused (kPausesGame stops the Update hook), so
-        // both tests are belt and braces -- and both are the condition TK is
-        // about to evaluate for itself.
+        // both tests are belt and braces -- and both are the condition the
+        // listener is about to evaluate for itself. Waiting for BOTH is what
+        // makes the hop-outs work: the magic key closes our grid and raises
+        // MagicMenu in the same breath, and this simply keeps owing until that
+        // screen is gone too.
         if (ui->IsMenuOpen("GridInventoryMenu"sv) || ui->GameIsPaused()) return;
-        g_invEchoOwed = false;
         RE::MenuOpenCloseEvent e{};
-        e.menuName = RE::InventoryMenu::MENU_NAME;
+        e.menuName = g_echoMenu;
         e.opening = false;
+        g_echoMenu = {};
         // UI is three event sources at once; name the one we mean
         static_cast<RE::BSTEventSource<RE::MenuOpenCloseEvent>*>(ui)->SendEvent(&e);
-        logger::info("[INV] inventory session over -> announcing InventoryMenu close");
+        logger::info("[INV] session over -> announcing '{}' close", e.menuName.c_str());
     }
 
     // ---- lockpick auto-open fallback ----
@@ -1628,6 +1645,7 @@ namespace
                     RE::UI_MESSAGE_TYPE::kHide, nullptr);
             }
             g_pendingPartnerOpen = true;
+            g_echoMenu = RE::ContainerMenu::MENU_NAME;   // ⑫
             logger::info("[LOOT] intercepted ContainerMenu (mode {}) -> deferring grid",
                 static_cast<int>(cmode));
         }
@@ -1659,6 +1677,7 @@ namespace
                     RE::UI_MESSAGE_TYPE::kHide, nullptr);
             }
             g_pendingPartnerOpen = true;
+            g_echoMenu = RE::BarterMenu::MENU_NAME;   // ⑫
             logger::info("[BARTER] intercepted BarterMenu -> deferring grid");
         }
         return false;
