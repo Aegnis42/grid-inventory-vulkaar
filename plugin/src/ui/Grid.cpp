@@ -1128,6 +1128,19 @@ namespace FUI::Grid
         {
             const RE::FormID fid = a_obj->GetFormID();
             if (GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid)) return 1;
+            // ★★VANILLA GOLD IS A STACK WITH A BIG CAP, and saying so here is
+            // what lets the container side stop treating money as a special
+            // case -- the cap-sized banding it used to do by hand is just this
+            // number going through the ordinary rule.
+            //
+            // ★It answers for exactly ONE board. The player's own never sees
+            // this form: the rebuild takes Gold001 out as the ledger and shows
+            // the coin mirror in its place. A chest is where the gold really is
+            // Gold001, and where it really does need to sit a capful to a cell
+            // for the same reason a hundred arrows do. Without this line it
+            // falls through to the misc default and a chest banks the player's
+            // fortune twenty septims at a time.
+            if (a_obj->IsGold()) return GoldCoins::kCoinCap;
             if (a_obj->Is(RE::FormType::Armor) ||
                 a_obj->Is(RE::FormType::Weapon)) return 1;
             if (a_obj->Is(RE::FormType::Ammo)) return 100;          // arrows/bolts
