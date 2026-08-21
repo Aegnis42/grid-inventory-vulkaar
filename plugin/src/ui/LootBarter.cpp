@@ -357,6 +357,21 @@ namespace FUI::LootBarter
             // any other death simply spills them onto the shelf (the hiding
             // is derived from live bundles, so dropping one un-hides).
             std::vector<BundleItem> bundle;
+            // ★★★AND IF THIS CELL IS A BAG, THE BAG'S OWN NAME (cosave v13).
+            //
+            // A bundle entry has had one since v12, and a bag that sat on the
+            // shelf did not -- so the same bag was called one thing inside
+            // another bag and something else standing on the grid, and crossing
+            // between the two renamed it. Nothing broke, but its WINDOW is
+            // named after it, and a window that is renamed is a window ImGui
+            // has never seen: it reopened at the default position every time
+            // the bag changed parents ("가방의 UI 위치가 부모가 바뀔때마다
+            // 바뀌는게 거슬린다").
+            //
+            // Minted on first need rather than at birth: most cells are not
+            // bags, and a name nothing ever asks for is a name worth not
+            // spending. 0 = not asked yet.
+            std::uint32_t bagId = 0;
             // ★★WHICH UNIT THIS SPOT IS SHOWING -- as data, not as a name.
             // These used to live inside the spot's KEY, which made a shelf
             // position depend on the item's mutable state: clear an ownership
@@ -2333,9 +2348,16 @@ namespace
         const ImVec2 size(cols * cell + 2.0f * Theme::PadX() * S +
                               2.0f * Theme::FrameInsetX(),
                           rows * cell + 54.0f * S + 2.0f * Theme::FrameInsetY());
-        // ★the window's own name: the cell it hangs off, and the bag inside
-        // it. Stable across every move, which is what keeps it open through one.
-        const std::string wid = fmt::format("sb|{}/{}", a_w.spot, a_w.bag);
+        // ★★THE WINDOW IS NAMED AFTER THE BAG, and after nothing else. The
+        // cell used to be in here too, which was one fact too many: a bag that
+        // moved between a cell and a bundle -- or between two cells -- kept its
+        // own name and still got a new window key, so ImGui filed it as a
+        // window it had never seen and dropped it back at the default position.
+        // A nested bag answers with its entry's name; the bag ON the cell
+        // answers with the cell's, minted here on first sight.
+        if (a_w.bag == 0 && si->second.bagId == 0) si->second.bagId = NextBundleId();
+        const std::string wid =
+            fmt::format("sb|{}", a_w.bag != 0 ? a_w.bag : si->second.bagId);
         wm->ApplyNext(wid,
             ImVec2(disp.x * 0.52f + a_ord * 44.0f * S,
                    (disp.y - size.y) * 0.5f + a_ord * 36.0f * S),
@@ -2827,23 +2849,29 @@ namespace
                             // that had been in B surfaced loose on the shelf.
                             // It becomes B's branch here, every name intact.
                             std::vector<BundleItem> carried;
+                            std::uint32_t cellName = 0;
                             const std::string from = g_actingSpot;
                             if (!from.empty()) {
                                 if (const auto ai = a_cl.cells.find(from);
                                     ai != a_cl.cells.end()) {
                                     carried = std::move(ai->second.bundle);
+                                    cellName = ai->second.bagId;
                                 }
                                 a_cl.cells.erase(from);
                                 g_actingSpot.clear();
                             }
                             // off a shelf cell: the container's own ownership
                             // is all this side knows (kSteal = owned whole)
-                            const std::uint32_t nid =
-                                AddBundle(bundle, { hfid, hcount, hsig,
-                                                    dropC, dropR, hrot & 3, hglow,
-                                                    g_carryStolen ||
-                                                        g_mode == Mode::kSteal,
-                                                    root }).id;
+                            // ★the entry keeps the name the CELL had, when the
+                            // cell had one -- the mirror of the move out, and
+                            // the other half of "one bag, one name"
+                            BundleItem ni{ hfid, hcount, hsig,
+                                           dropC, dropR, hrot & 3, hglow,
+                                           g_carryStolen || g_mode == Mode::kSteal,
+                                           root };
+                            ni.id = cellName != 0 ? cellName : NextBundleId();
+                            const std::uint32_t nid = ni.id;
+                            bundle.push_back(std::move(ni));
                             for (auto& b : carried) {
                                 if (b.parent == 0) b.parent = nid;
                                 bundle.push_back(b);
@@ -4988,6 +5016,7 @@ namespace
         nc.row = -1;
         nc.gold = 0;
         nc.bundle.clear();
+        nc.bagId = 0;   // and it is not the same bag -- see above, it is not one
         it->second.count -= a_count;
         const std::string k = MintCellKey(*cl, obj);
         cl->cells[k] = std::move(nc);
@@ -5034,8 +5063,11 @@ namespace
             if (c.gold <= 0) c.awaitGold = 8;
         }
         const std::string key = MintCellKey(*cl, a_obj);
-        // ★the windows follow the bag onto its new cell (see g_bagToCellSpot)
+        // ★the windows follow the bag onto its new cell (see g_bagToCellSpot),
+        // and the cell takes over the name the entry was carrying -- which is
+        // what keeps the window's key, and so its position, unchanged
         if (!g_bagToCellSpot.empty()) {
+            c.bagId = g_bagToCellId;
             for (auto& w : g_shelfBags) {
                 if (w.spot != g_bagToCellSpot) continue;
                 if (w.bag == g_bagToCellId) {
@@ -5059,7 +5091,7 @@ namespace
     {
         constexpr std::uint32_t kContMaxStr = 512;
         constexpr std::uint32_t kContMaxEntries = 65536;
-        constexpr std::uint32_t kContCosaveVersion = 12;   // ★v12: a bundle entry's NAME (id + parent id, replacing the index)   // v11: a bundle entry's parent (nested bags)   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints  v10: the cell owns form + count + xlIdx
+        constexpr std::uint32_t kContCosaveVersion = 13;   // ★v13: a bag CELL's name   // ★v12: a bundle entry's NAME (id + parent id, replacing the index)   // v11: a bundle entry's parent (nested bags)   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints  v10: the cell owns form + count + xlIdx
 
         // ★v9 migration: before this, a spot's binding lived inside its KEY
         // ("form~B825!worn#1"). Read it back out and put it where it belongs.
@@ -5176,6 +5208,8 @@ namespace
                 a_intfc->WriteRecordData(s.form);
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.count));
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.xlIdx));
+                // ★v13: if this cell is a bag, the bag's own name
+                a_intfc->WriteRecordData(s.bagId);
             }
         }
         SKSE::log::info("[LOOT] cosave: saved {} container layouts", g_contLayouts.size());
@@ -5323,6 +5357,13 @@ namespace
                     if (a_intfc->ResolveFormID(rawForm, rf)) sp.form = rf;
                     sp.count = sc > 0 ? sc : 0;
                     sp.xlIdx = sx;
+                    // ★v13: a save from before this simply has not named its
+                    // bag cells yet, and 0 says exactly that -- the first time
+                    // one is opened it gets a name, which is where they all
+                    // come from anyway.
+                    if (a_version >= 13) {
+                        if (!a_intfc->ReadRecordData(sp.bagId)) return;
+                    }
                 } else {
                     // ★★v<=9 MIGRATION. The form used to live inside the key and
                     // the count did not exist anywhere. Parse the one, leave the
@@ -5346,6 +5387,7 @@ namespace
         // why the counter itself never needs to be written down
         for (const auto& [rid, cl2] : g_contLayouts) {
             for (const auto& [k2, c2] : cl2.cells) {
+                g_nextBundleId = (std::max)(g_nextBundleId, c2.bagId + 1);
                 for (const auto& b2 : c2.bundle) {
                     g_nextBundleId = (std::max)(g_nextBundleId, b2.id + 1);
                 }
