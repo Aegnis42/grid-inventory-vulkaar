@@ -362,33 +362,49 @@ namespace FUI::Costume
         if (!race->GetPlayable()) {
             if (!s_beastNoted) {
                 s_beastNoted = true;
-                SKSE::log::info("[COSTUME] transformed into '{}' -- holding the "
-                                "costume back until the form ends",
-                    race->GetName() ? race->GetName() : "?");
+                // ★★A TRANSFORMATION TAKES THE COSTUME OFF. Holding it back
+                // and putting it on again afterwards was the first answer, and
+                // it bought a race we do not need to run: the form ends, the
+                // engine is still rebuilding the body out of the addon lists it
+                // took apart for the beast, and an anchor dressed into that
+                // half-built body ends up worn, holding its slot, with no model
+                // in it -- the bald head (user report: costume still ticked,
+                // appearance plain and bald, cured by unticking it). Timing it
+                // right means guessing when the actor has settled, which is the
+                // guess §NoteGameLoaded already has to make once per load.
+                //
+                // Clearing is the simpler contract and the safer one: a costume
+                // is a thing you put ON, and turning into a beast is exactly
+                // the kind of event that should end it. The tick goes away, the
+                // player sees why, and putting it back on is one click on a
+                // body that is finished being built.
+                if (g_tab >= 0) {
+                    SKSE::log::info("[COSTUME] transformed into '{}' -- costume "
+                                    "cleared (put it back on after the form ends)",
+                        race->GetName() ? race->GetName() : "?");
+                    g_tab = -1;
+                }
             }
-            g_dirty = true;   // still owed, once there is a body to dress
+            // ★The BODY still has to be put right, and not while it is a
+            // beast's: keep the request standing so the pass below runs the
+            // moment there is a real body again. The anchors come back worn
+            // when the engine restores what the player had on, and an anchor
+            // worn with no costume behind it is the same bald head from the
+            // other direction -- undressing is what takes it off.
+            g_dirty = true;
             return;
         }
         if (s_beastNoted) {
             s_beastNoted = false;
-            // ★★THE FORM ENDING IS A LOAD, as far as this file is concerned.
-            // Holding the costume back was right and dressing ONCE the moment
-            // the race turns playable again is not enough: the engine is still
-            // putting the body together out of the addon lists it took apart
-            // for the beast, and an anchor dressed into that half-built body
-            // ends up worn, holding its slot, with no model in it. That is the
-            // BALD HEAD -- the same one §NoteGameLoaded exists for, arriving
-            // through a different door (user report: costume still ticked,
-            // appearance plain and bald, fixed by unticking).
-            //
-            // So borrow the same belt: re-dress on a schedule until the actor
-            // settles, and forget what we think the body is wearing so each
-            // pass actually runs.
+            // The form ended. Same belt as a load: the body is still being
+            // assembled, so make the plain state stick over several passes
+            // rather than betting on one, and forget what we think it is
+            // wearing so each pass actually runs.
             g_reapplyLeft = kReapplyTimes;
             g_reapplyAt = g_frame + kReapplyFirst;
             g_appliedTab = -2;
-            SKSE::log::info("[COSTUME] form ended -- {} re-dress passes scheduled",
-                kReapplyTimes);
+            SKSE::log::info("[COSTUME] form ended -- {} passes scheduled to put "
+                            "the body back to plain", kReapplyTimes);
         }
         auto& rt = player->GetActorRuntimeData();
         auto* biped = rt.biped.get();
