@@ -143,6 +143,19 @@ namespace FUI::LootBarter
         // owned" (kSteal). A unit that was stolen when it went in stays
         // stolen in the bag, and the mark has to say so.
         bool          stolen = false;
+        // ★★S-3-4: WHICH BAG INSIDE THE BUNDLE THIS ENTRY SITS IN.
+        //
+        // A bundle used to be one flat list because a stored bag could only
+        // ever hold plain items -- StoreBagContents skipped nested bags
+        // outright, so a bag inside a bag did not travel with its parent at
+        // all. Recursive nesting is a tree, and a flat list can carry a tree
+        // if every entry names its parent.
+        //
+        // -1 = directly inside the stored bag. Otherwise an INDEX INTO THIS
+        // SAME VECTOR, always pointing BACKWARDS: the manifest is written
+        // parent-first, which is what lets the restore rebuild the chain in a
+        // single forward pass, with no sorting and no recursion.
+        int           parentIdx = -1;
     };
     // Grid calls this as it queues the contents' stores; the bundle waits
     // (per container) for the bag's shelf spot to be born and rides it.

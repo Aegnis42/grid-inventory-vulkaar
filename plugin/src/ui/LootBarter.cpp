@@ -1939,8 +1939,18 @@ namespace
             RE::TESBoundObject* obj;
         };
         std::vector<Seat> seats;
+        // ★★S-3-4: ONLY WHAT SITS DIRECTLY IN THIS BAG. A bundle is a tree
+        // now -- a nested bag's own contents ride in the same vector, pointing
+        // at their parent -- so seating every entry would spill a whole branch
+        // into the window of the bag that merely contains it.
+        //
+        // The nested bag itself IS seated: it is an entry at this level, and it
+        // draws as one cell. Opening it from inside a chest is deliberately not
+        // offered yet; the requirement was that a nesting survives the trip
+        // intact, and it does.
+        auto atThisLevel = [&](const BundleItem& a_b) { return a_b.parentIdx < 0; };
         for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
-            if (isCarried(bundle[i])) continue;
+            if (isCarried(bundle[i]) || !atThisLevel(bundle[i])) continue;
             auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(bundle[i].form);
             if (!obj) continue;
             int w = 1, h = 1;
@@ -1954,7 +1964,8 @@ namespace
             }
         }
         for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
-            if (bundle[i].col >= 0 || isCarried(bundle[i])) continue;
+            if (bundle[i].col >= 0 || isCarried(bundle[i]) ||
+                !atThisLevel(bundle[i])) continue;
             auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(bundle[i].form);
             if (!obj) continue;
             int w = 1, h = 1;
@@ -4535,7 +4546,7 @@ namespace
     {
         constexpr std::uint32_t kContMaxStr = 512;
         constexpr std::uint32_t kContMaxEntries = 65536;
-        constexpr std::uint32_t kContCosaveVersion = 10;   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints  v10: the cell owns form + count + xlIdx
+        constexpr std::uint32_t kContCosaveVersion = 11;   // v11: a bundle entry's parent (nested bags)   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints  v10: the cell owns form + count + xlIdx
 
         // ★v9 migration: before this, a spot's binding lived inside its KEY
         // ("form~B825!worn#1"). Read it back out and put it where it belongs.
@@ -4634,6 +4645,8 @@ namespace
                     a_intfc->WriteRecordData(static_cast<std::int32_t>(b.glow));
                     // v8: someone else's goods
                     a_intfc->WriteRecordData(static_cast<std::int32_t>(b.stolen ? 1 : 0));
+                    // ★v11: which bag inside the bundle this entry sits in
+                    a_intfc->WriteRecordData(static_cast<std::int32_t>(b.parentIdx));
                 }
                 // ★v9: which unit this spot is showing. A hint, not a name:
                 // a stale one only weakens the next match, and the fallback
@@ -4722,13 +4735,22 @@ namespace
                         if (a_version >= 8) {   // someone else's goods
                             if (!a_intfc->ReadRecordData(bstolen)) return;
                         }
+                        // ★v11: nesting. A save from before this has none --
+                        // every entry sat directly in the stored bag, which is
+                        // exactly what -1 means, so the default IS the
+                        // migration.
+                        std::int32_t bparent = -1;
+                        if (a_version >= 11) {
+                            if (!a_intfc->ReadRecordData(bparent)) return;
+                        }
                         // load-order shift: unresolvable contents are dropped
                         // (their engine items simply stay visible on the shelf)
                         RE::FormID rf = 0;
                         if (a_intfc->ResolveFormID(f, rf) && rf != 0 && bc > 0) {
                             bundle.push_back({ rf, bc, bs, bcol, brow, brot & 3,
                                                static_cast<std::uint8_t>(bglow),
-                                               bstolen != 0 });
+                                               bstolen != 0,
+                                               bparent >= 0 ? bparent : -1 });
                         }
                     }
                 }

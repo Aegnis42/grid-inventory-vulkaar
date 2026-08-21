@@ -1223,13 +1223,42 @@ namespace FUI::Grid
         // (LootBarter parks it until the bag's spot is born). Coin tiles are
         // mirror artefacts and never travel; a nested bag stays behind,
         // matching the "no bag inside a bag" rule everywhere else.
+        // ★★★A BAG TRAVELS AS A SUBTREE, not as one layer.
+        //
+        // This used to skip nested bags outright (`if (it.def.bag != 0)
+        // continue`), so putting a bag inside a bag and then storing the outer
+        // one left the inner one -- and everything in it -- behind on the
+        // board. Nesting is a tree; storing a bag has to move the whole branch.
+        //
+        // The walk is a STACK, not recursion: the depth is the player's data,
+        // and user data does not belong on the call stack.
+        //
+        // Parent-first is the ordering the manifest needs. Every entry records
+        // the index of the bag it sits in, and an entry's parent is always
+        // written before it -- so parentIdx points backwards, and the restore
+        // can rebuild the whole chain in one forward pass (see
+        // ClaimIncomingBundles) without sorting or a second lookup.
         void StoreBagContents(const std::string& a_bagKey, RE::TESBoundObject* a_bagObj)
         {
             std::vector<LootBarter::BundleItem> manifest;
+            // (bag key, index of that bag's entry in the manifest; -1 = the
+            // bag being stored, which has no entry of its own)
+            std::vector<std::pair<std::string, int>> todo{ { a_bagKey, -1 } };
+            std::set<std::string> seen{ a_bagKey };   // a cycle cannot form, but
+                                                      // a corrupt save must not spin
+            while (!todo.empty()) {
+                const auto [bagKey, parent] = todo.back();
+                todo.pop_back();
             for (auto& it : g_items) {
-                if (it.inBag != a_bagKey || !it.obj) continue;
-                if (it.def.bag != 0) continue;
+                if (it.inBag != bagKey || !it.obj) continue;
                 if (it.coinValue >= 0) continue;   // pinned purses stay home
+                if (it.def.bag != 0) {
+                    // ★A nested bag is BOTH an entry and a branch: it is stored
+                    // like any other item, and its own contents are walked next
+                    // with this entry's index as their parent.
+                    if (!seen.insert(it.key).second) continue;
+                    todo.push_back({ it.key, static_cast<int>(manifest.size()) });
+                }
                 LootBarter::RequestStore(it.obj, it.count, it.uid, it.sig, it.fav,
                                          it.xlIdx, it.key);
                 NotePendingRemove(it.obj, it.key, it.count, it.xlIdx);
@@ -1244,7 +1273,8 @@ namespace FUI::Grid
                 // "the bag works, but the items inside get rearranged".)
                 manifest.push_back({ it.obj->GetFormID(), it.count, it.sig,
                                      it.col, it.row, it.rot & 3, it.glow,
-                                     it.stolen });
+                                     it.stolen, parent });
+            }
             }
             if (!manifest.empty() && a_bagObj) {
                 LootBarter::NoteBagBundle(a_bagObj->GetFormID(), std::move(manifest));
@@ -6210,11 +6240,31 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // they are indistinguishable from outside. This names
                         // the bag key that went missing and what the cursor was
                         // holding at the time, which separates all three.
+                        // ★★S-3-4: A LOST PARENT IS NOT A LOST HOME. With
+                        // nesting, the bag that vanished may itself have been
+                        // sitting inside another one -- and dumping its
+                        // contents on the main board would empty a satchel out
+                        // of the backpack it was in, which is not what losing
+                        // the satchel means. Walk up instead: the nearest
+                        // ancestor still on the board takes them, and only a
+                        // chain that is gone all the way to the top reflows to
+                        // main (E4). Bounded, because a corrupt save must not
+                        // be able to spin this.
+                        std::string up;
+                        std::string probe = it.inBag;
+                        for (int hop = 0; hop < 16; ++hop) {
+                            const auto li = g_layout.find(probe);
+                            if (li == g_layout.end() || li->second.bag.empty()) break;
+                            probe = li->second.bag;
+                            if (probe == kTrashKey) break;
+                            if (bags.contains(probe)) { up = probe; break; }
+                        }
                         SKSE::log::info("[BAG] '{}' left the board -- '{}' reflows "
-                                        "to main (held '{}')",
+                                        "to {} (held '{}')",
                             it.inBag, it.key,
+                            up.empty() ? std::string("main") : "'" + up + "'",
                             g_held ? g_held->key : std::string("-"));
-                        it.inBag.clear();   // bag truly gone: contents reflow (E4)
+                        it.inBag = up;   // bag truly gone: contents reflow (E4)
                     }
                 }
             }
@@ -6344,7 +6394,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const auto manifest =
                     LootBarter::TakeIncomingBundle(bt->obj->GetFormID());
                 if (manifest.empty()) continue;
-                for (const auto& b : manifest) {
+                // ★★S-3-4: the tile each manifest entry ended up as, so a
+                // NESTED bag's own contents can be routed into it rather than
+                // into the bag that was stored. Entries are written parent
+                // first, so by the time a child is read its parent's tile is
+                // already known -- one forward pass, no sorting.
+                std::vector<std::string> tileOf(manifest.size());
+                for (std::size_t mi = 0; mi < manifest.size(); ++mi) {
+                    const auto& b = manifest[mi];
+                    // which bag this entry belongs in: the stored bag, or a
+                    // nested one that came home earlier in this same pass. A
+                    // parent whose tile never arrived leaves its children
+                    // loose on the board rather than guessing at a home.
+                    const std::string& into =
+                        b.parentIdx < 0 ? bagKey
+                                        : tileOf[static_cast<std::size_t>(b.parentIdx)];
+                    if (into.empty()) continue;
                     int remaining = b.count;
                     // ★★AND THE ANCHOR COMES HOME WITH IT. The manifest has
                     // carried col/row since v5 and this routed the contents
@@ -6364,11 +6429,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 [&](const Item& t) { return t.key == key; });
                             if (it == g_items.end() || !it->obj) continue;
                             if (it->obj->GetFormID() != b.form) continue;
-                            if (!it->inBag.empty() || it->def.bag != 0) continue;
+                            // ★A nested BAG is claimable now -- it is an entry
+                            // like any other. It was excluded when a bundle
+                            // could not contain one.
+                            if (!it->inBag.empty()) continue;
                             if (pass == 0 && it->sig != b.sig) continue;
-                            it->inBag = bagKey;
+                            it->inBag = into;
                             auto& le = g_layout[it->key];
-                            le.bag = bagKey;
+                            le.bag = into;
+                            if (tileOf[mi].empty()) tileOf[mi] = it->key;
                             if (anchorFree) {
                                 // ★★THE TILE, NOT ONLY THE LAYOUT. Writing the
                                 // layout alone was too late to matter: Item::col
@@ -6389,7 +6458,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             remaining -= it->count;
                             SKSE::log::info("[BAGCLAIM] bundle: '{}' x{} -> '{}'",
                                 it->obj->GetName() ? it->obj->GetName() : "?",
-                                it->count, bagKey);
+                                it->count, into);
                         }
                     }
                 }
