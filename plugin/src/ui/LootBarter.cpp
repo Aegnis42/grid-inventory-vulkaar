@@ -1202,12 +1202,51 @@ namespace FUI::LootBarter
                             lists.empty() ? " (none)" : lists);
                     }
                 }
+                // ★★⑰ NAMING A LIST COSTS THE STEAL STAMP.
+                //
+                // Measured: taking four cabbages out of an owned chest hands
+                // RemoveItem a named list holding all four, and the four arrive
+                // NOT stolen -- while a fifth unit with no list of its own
+                // arrives stolen. The log line that settled it:
+                //
+                //   want 4 | xl=named xlCount=4 | lists=1 [4x own=n uid=0 sig=0]
+                //
+                // The source list carries no ownership (an owned container owns
+                // its contents; the items do not own themselves), and handing
+                // the engine an existing list makes it MOVE that list -- so it
+                // arrives exactly as it was, unstamped. kSteal only stamps what
+                // the engine creates for itself, which is why the one listless
+                // unit was the only stolen one. Four plus one.
+                //
+                // We name a list for GI39: so the engine cannot walk out a
+                // TEMPERED spare when a plain one was asked for. With a single
+                // plain list there is no spare to confuse it with, and the name
+                // buys nothing while costing the stamp. So drop it there, and
+                // only there -- a form with several lists still needs saying
+                // which, and that case keeps its old behaviour rather than
+                // trading a wrong item for a right flag.
+                RE::ExtraDataList* takeXl = pick.xl;
+                if (g_mode == Mode::kSteal && takeXl && r.uid == 0 && r.sig == 0) {
+                    int lists = 0;
+                    if (auto* e = Grid::LiveEntryOf(source, r.obj); e && e->extraLists) {
+                        for (auto* l : *e->extraLists) {
+                            if (l) ++lists;
+                        }
+                    }
+                    if (lists == 1) {
+                        takeXl = nullptr;   // let the engine stamp what it moves
+                        SKSE::log::info("[STEAL] '{}' x{}: plain single list -- "
+                                        "unnamed so the engine marks it stolen",
+                                        r.obj->GetName() ? r.obj->GetName() : "?",
+                                        r.count);
+                    }
+                }
                 GuardedRemove(source, r.obj,
                     pick.kind == Grid::PickKind::kFallback, "take", [&]() {
                     source->RemoveItem(r.obj, r.count,
                         g_mode == Mode::kSteal ? RE::ITEM_REMOVE_REASON::kSteal
                                                : RE::ITEM_REMOVE_REASON::kRemove,
-                        pick.xl, player);
+                        takeXl, player);
                 });
                 ClearOut(r.obj, r.uid, r.sig, r.count);   // engine moved it
                 itemSound(r.obj, true);
