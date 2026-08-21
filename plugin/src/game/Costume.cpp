@@ -369,7 +369,27 @@ namespace FUI::Costume
             g_dirty = true;   // still owed, once there is a body to dress
             return;
         }
-        s_beastNoted = false;
+        if (s_beastNoted) {
+            s_beastNoted = false;
+            // ★★THE FORM ENDING IS A LOAD, as far as this file is concerned.
+            // Holding the costume back was right and dressing ONCE the moment
+            // the race turns playable again is not enough: the engine is still
+            // putting the body together out of the addon lists it took apart
+            // for the beast, and an anchor dressed into that half-built body
+            // ends up worn, holding its slot, with no model in it. That is the
+            // BALD HEAD -- the same one §NoteGameLoaded exists for, arriving
+            // through a different door (user report: costume still ticked,
+            // appearance plain and bald, fixed by unticking).
+            //
+            // So borrow the same belt: re-dress on a schedule until the actor
+            // settles, and forget what we think the body is wearing so each
+            // pass actually runs.
+            g_reapplyLeft = kReapplyTimes;
+            g_reapplyAt = g_frame + kReapplyFirst;
+            g_appliedTab = -2;
+            SKSE::log::info("[COSTUME] form ended -- {} re-dress passes scheduled",
+                kReapplyTimes);
+        }
         auto& rt = player->GetActorRuntimeData();
         auto* biped = rt.biped.get();
         if (!biped) return;
