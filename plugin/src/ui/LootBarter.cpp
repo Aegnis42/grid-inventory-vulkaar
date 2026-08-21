@@ -2173,6 +2173,30 @@ namespace
                         g_carryStolen = b.stolen;
                         Grid::BeginPartnerCarry(s.obj, b.count, 0,
                                                 -1.0f, -1.0f, 0, -1, 0, s.rot);
+                    } else if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                        // ★★AND RIGHT-CLICK TAKES IT, like every other cell on
+                        // this side of the window. Only the lift was ever wired
+                        // up here, so an item inside a shelved bag was the one
+                        // thing in a container that could not be taken the
+                        // ordinary way -- it had to be dragged out by hand.
+                        //
+                        // The units are already IN the container; the bundle
+                        // only hides them. So dropping the entry is what makes
+                        // them the shelf's again, and the take is then the same
+                        // request any visible cell would make. No acting cell:
+                        // this take retires no cell, because the bundle entry
+                        // was never one.
+                        if (Grid::CanFitNewItem(s.obj)) {
+                            const int  cnt = b.count;
+                            auto*      obj = s.obj;
+                            const auto sig = b.sig;
+                            bundle.erase(bundle.begin() + s.idx);
+                            g_actingSpot.clear();
+                            RequestTake(obj, cnt, 0, sig);
+                        } else {
+                            Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
+                        }
+                        break;   // `bundle` and `seats` just moved under us
                     }
                 }
             }

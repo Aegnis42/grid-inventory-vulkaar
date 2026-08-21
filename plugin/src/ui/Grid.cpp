@@ -6328,9 +6328,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             auto& le = g_layout[it->key];
                             le.bag = bagKey;
                             if (anchorFree) {
+                                // ★★THE TILE, NOT ONLY THE LAYOUT. Writing the
+                                // layout alone was too late to matter: Item::col
+                                // is seeded from g_layout in an EARLIER stage,
+                                // the view placement runs off the tile ("already
+                                // placed? leave it alone"), and its first-fit
+                                // result is then written BACK over the layout.
+                                // So the anchor was recorded, ignored, and
+                                // overwritten in the same pass -- the bag still
+                                // came home shuffled. Both, or neither.
                                 le.col = b.col;
                                 le.row = b.row;
                                 le.rot = b.rot & 3;
+                                it->col = b.col;
+                                it->row = b.row;
                                 anchorFree = false;
                             }
                             remaining -= it->count;
@@ -11137,12 +11148,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // right cell two frames later.
                 const auto sd = LootBarter::QueryStoreDrop();
                 if (sd.onCell && sd.freeSpot) {
-                    // ★(1.3.1) a carry lifted OUT OF A SHELF BAG surfaces here:
-                    // the engine item never moved, so releasing it from the
-                    // bundle is what makes its cell appear. A plain partner
-                    // carry passes through false.
+                    // ★★(1.3.1) A CARRY LIFTED OUT OF A SHELF BAG HAS NO CELL
+                    // TO MOVE. The engine item never went anywhere -- it was
+                    // hidden inside the bundle, not stored -- so releasing it
+                    // from the bundle is what makes a cell exist at all, and
+                    // asking to MOVE one lands it wherever the reconcile
+                    // happens to put a newly visible unit: the front gap.
+                    // A plain partner carry does own a cell, and moves it.
+                    const bool fromBundle = LootBarter::IsBundleCarry();
                     LootBarter::ConsumeBundleCarry(a_held.obj, a_held.count);
-                    LootBarter::MoveHeldCell(sd.col, sd.row, a_held.rot);
+                    if (fromBundle) {
+                        LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
+                                                    sd.col, sd.row, a_held.rot,
+                                                    a_held.uid, a_held.sig);
+                    } else {
+                        LootBarter::MoveHeldCell(sd.col, sd.row, a_held.rot);
+                    }
                     if (g_sound) g_sound(a_held.obj, false);
                     g_held.reset();
                 } else if (sd.onCell && sd.occ && LootBarter::IsBundleCarry()) {
