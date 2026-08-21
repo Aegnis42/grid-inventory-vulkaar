@@ -2801,7 +2801,7 @@ namespace FUI::Wheeler
         return race && !race->GetPlayable();
     }
 
-    bool SomethingElseOwnsTheKey()
+    bool SomethingElseOwnsTheKey(std::uint32_t a_pressed)
     {
         if (auto* ui = RE::UI::GetSingleton()) {
             if (ui->GameIsPaused()) return true;
@@ -2815,9 +2815,21 @@ namespace FUI::Wheeler
             // Rare and worth measuring: which races actually land here
             // (the plan asks whether modded transformations do).
             auto* race = RE::PlayerCharacter::GetSingleton()->GetRace();
+            // ★And WHAT THE KEY IS at that moment. "Q does nothing in beast
+            // form" may be nothing to do with us: if the engine no longer maps
+            // the favourites event to this key while transformed, the press was
+            // never going to raise that menu however politely we stand aside.
+            // 0xFF is the engine's own "not bound".
+            std::uint32_t fav = 0xFF;
+            if (auto* cm = RE::ControlMap::GetSingleton()) {
+                if (auto* ue = RE::UserEvents::GetSingleton()) {
+                    fav = cm->GetMappedKey(ue->favorites, RE::INPUT_DEVICE::kKeyboard);
+                }
+            }
             SKSE::log::info("[WHEEL] yielding the favourites key -- "
-                            "transformed into '{}' (unplayable race)",
-                race->GetName() ? race->GetName() : "?");
+                            "transformed into '{}' (unplayable race); "
+                            "favourites is bound to {:#04x}, pressed {:#04x}",
+                race->GetName() ? race->GetName() : "?", fav, a_pressed);
             return true;
         }
         return false;
@@ -3019,7 +3031,7 @@ namespace FUI::Wheeler
         if (g_open && id != g_openedBy && !a_event->IsUp()) return false;
 
         if (a_event->IsDown() && !g_open && ComboComplete(pad)) {
-            if (SomethingElseOwnsTheKey()) return false;
+            if (SomethingElseOwnsTheKey(id)) return false;
             LoadTextures();
             // ★Ask for a re-read rather than trusting the event stream. This
             // costs one inventory scan per open and removes a whole class of

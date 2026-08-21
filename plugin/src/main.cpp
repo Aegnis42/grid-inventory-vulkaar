@@ -1618,6 +1618,20 @@ namespace
             RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override
         {
             if (a_event) {
+                // ★★WHILE TRANSFORMED, NAME EVERY MENU. "Q does nothing in
+                // beast form" has three different causes that look identical
+                // from outside: no menu was raised at all, the favourites menu
+                // was raised and shut again, or the game raised something else
+                // entirely (a beast form need not map that key the way a body
+                // does). Only the engine's own event stream tells them apart,
+                // so while the player is a beast we write down every menu that
+                // opens or closes -- and the yield line from the wheel sits
+                // right above it in the same log, at the same second.
+                // Scoped to the transformation so ordinary play stays quiet.
+                if (FUI::Wheeler::YieldingToVanilla()) {
+                    logger::info("[BEAST] menu '{}' {}", a_event->menuName.c_str(),
+                        a_event->opening ? "OPENING" : "closing");
+                }
                 // one handler per menu concern; true = event fully handled
                 HandleLockpickAutoReopen(*a_event);   // observation only
                 HandleMessageBoxAside(*a_event) ||
