@@ -5259,6 +5259,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // find. Counted by hand, or the player sees the very same ring
                 // on the doll AND on the board at once.
                 if (DualRing::Second() == obj) wornUnits += 1;
+                // ★★★P2/3-1, AND THIS IS THE LINE THAT DECIDES IT. A worn unit
+                // leaves the board by being SUBTRACTED here -- not by the
+                // per-unit skip further down, which is what the first attempt
+                // at this exception patched, to no visible effect (the tile
+                // still vanished, the contents still spilled, and every other
+                // symptom in the report followed from that one).
+                //
+                // A BAG is the single form that does not leave: wearing a
+                // backpack is not putting it away, and the container you have
+                // on your back is the one you most expect to keep using. So it
+                // keeps its cells, its subgrid and its right-click, and the
+                // tray marker says it is also on the doll.
+                if (gdef.bag != 0) wornUnits = 0;
                 int units = count - wornUnits -
                             Loadout::ReservedCount(obj->GetFormID());
                 // Phase 7: units sold/stored whose engine removal is still queued
