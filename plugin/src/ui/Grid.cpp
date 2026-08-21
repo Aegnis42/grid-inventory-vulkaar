@@ -11875,8 +11875,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return true;
         }
 
-        void NoteGoldStoreSpot();   // P2/3-5, defined with the gold routes
-
         bool WholeStore(Held& a_held)
         {
             // dropped on the container window = STORE (coins excluded —
@@ -11899,7 +11897,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (moved > 0) {
                         GoldCoins::DebitLedger(moved);
                     } else {
-                        NoteGoldStoreSpot();   // P2/3-5
                         GoldCoins::StoreToContainer(dst, a_held.coinValue);
                     }
                     if (GoldCoins::PinnedValue(a_held.key) >= 0) {
@@ -12412,24 +12409,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return true;   // note played; the pin keeps riding the cursor
         }
 
-        // ★(1.3.2a) gold dropped on a shelf POUCH cell deposits into its
-        // slot -- the player pouch's deposit grammar on the container side.
-        // The pin's value re-enters walking first (unpin), the ledger then
-        // pays the banked amount; any excess over the pouch cap stays as
-        // walking gold. False = not over a pouch (the next route decides).
-        // ★P2/3-5: the cell the gold was DROPPED on, remembered for the
-        // stored coins the same way a stored item's is. The note has to name
-        // VANILLA gold: our coin form is a tile identity on this side of the
-        // window, and the thing about to appear on the other side is Gold001.
-        void NoteGoldStoreSpot()
-        {
-            const auto sd = LootBarter::QueryStoreDrop();
-            if (!sd.onCell || !sd.freeSpot) return;
-            if (auto* g = GoldCoins::VanillaGold()) {
-                LootBarter::NoteStoreSpot(g, sd.col, sd.row, 0, 0);
-            }
-        }
-
+        // ★★P2/3-5: GOLD DOES NOT REMEMBER A CELL, and trying to make it
+        // was a mistake worth writing down.
+        //
+        // Storing an item is a promise about a THING: this dagger goes in that
+        // square. Gold in a container is not a thing, it is an AMOUNT -- one
+        // Gold001 stack the board bands into capfuls purely so it can be read.
+        // Those bands have no identity: deposit 300 more and the last one is
+        // worth 800 instead of 500, because the total moved.
+        //
+        // Noting a drop cell on top of that made the first band jump to
+        // wherever the newest coins landed, so every extra deposit rewrote the
+        // amounts AND the positions of gold that was already in the chest (user
+        // report). The bands sit in ordinal order instead, which is stable: the
+        // early ones stay full and stay put, and only the last one changes --
+        // what a growing pile should look like.
         // ★P2/3-5: gold dropped on a partner window. Two destinations, in
         // order: a POUCH cell under the cursor takes it into that pouch's slot
         // (the older grammar), and anything else hands it to the CONTAINER
@@ -12445,7 +12439,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
             if (moved <= 0) {
                 if (auto* dst = LootBarter::Partner()) {
-                    NoteGoldStoreSpot();   // P2/3-5: land on the dropped cell
                     GoldCoins::StoreToContainer(dst, a_held.coinValue);
                     moved = a_held.coinValue;
                 } else {
