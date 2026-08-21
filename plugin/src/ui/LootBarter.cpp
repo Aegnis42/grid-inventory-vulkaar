@@ -1039,6 +1039,22 @@ namespace FUI::LootBarter
     {
         // GI42: the Tick-time resolution -- same rules as click time, resolved
         // FRESH here because a list captured a frame ago may be gone.
+        // ★★WHOSE CONTAINER IS THIS. Measured, after the stamp came back
+        // "owner (none)" on a chest the engine itself had put us in kSteal for:
+        // TESObjectREFR::GetOwner() answers for the REF, and a chest in a house
+        // or a shop carries no owner of its own -- the CELL does. Asking only
+        // the ref is how a theft could produce no owner to blame.
+        //
+        // ★StealAlarm was asking the same way, so the bounty roll has been
+        // handed a null owner all along. It goes through here now too.
+        RE::TESForm* ContainerOwner(RE::TESObjectREFR* a_source)
+        {
+            if (!a_source) return nullptr;
+            if (auto* own = a_source->GetOwner()) return own;
+            if (auto* cell = a_source->GetParentCell()) return cell->GetOwner();
+            return nullptr;
+        }
+
         Grid::UnitChoice SourceUnit(RE::TESObjectREFR* a_source, const XferReq& a_r)
         {
             auto* entry = Grid::LiveEntryOf(a_source, a_r.obj);
@@ -1160,7 +1176,7 @@ namespace FUI::LootBarter
                 }
                 if (g_mode == Mode::kSteal) {
                     player->StealAlarm(source, r.obj, r.count,
-                        r.obj->GetGoldValue() * r.count, source->GetOwner(), true);
+                        r.obj->GetGoldValue() * r.count, ContainerOwner(source), true);
                     // ★★⑰ MEASUREMENT, not a fix. Reported: a five-stack taken
                     // out of an owned container arrives as four clean items and
                     // one stolen. Reading got as far as a hypothesis -- that
@@ -1255,7 +1271,7 @@ namespace FUI::LootBarter
                     // ★A list that ALREADY has an owner is left alone -- it was
                     // stolen before it got here, and overwriting whose it is
                     // would rewrite who the player has to answer to.
-                    auto* owner = source->GetOwner();
+                    auto* owner = ContainerOwner(source);
                     int   marked = 0;
                     if (owner) {
                         if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
