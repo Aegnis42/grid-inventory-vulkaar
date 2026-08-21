@@ -3336,6 +3336,29 @@ namespace
                         if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
                             Editor::Select(it.obj, Grid::DefKeyOf(it.obj));
                         }
+                    // ★★P2/3-5c: GOLD DRAGS OUT OF A CONTAINER TOO.
+                    //
+                    // Every other cell here lifts onto the cursor and is taken
+                    // when it lands; gold was excluded outright, so a chest full
+                    // of septims could only be emptied by right-clicking it and
+                    // letting the mirror decide where the coins went.
+                    //
+                    // Gold cannot ride the ordinary partner carry: that carry
+                    // holds an ITEM until it lands, and a coin tile is not an
+                    // item -- it is a face the gold ledger wears. So this takes
+                    // the band NOW and hands the player a PINNED PURSE instead,
+                    // which is the same thing withdrawing from a pouch already
+                    // does (CarryWithdrawnGold). From there the purse is an
+                    // ordinary gold fragment: drop it on a cell, merge it into
+                    // another purse, cancel it back -- all roads that exist.
+                    // ★The credit is queued by the take on this same frame, so
+                    // the pin's subtraction has something to subtract from.
+                    } else if (!ImGui::GetIO().KeyShift &&
+                        ImGui::IsItemClicked(ImGuiMouseButton_Left) &&
+                        it.obj->IsGold() && IsLootMode(g_mode)) {
+                        g_actingSpot = it.spotKey;   // GI20: retire THIS band's slot
+                        RequestTake(it.obj, it.count);
+                        Grid::CarryWithdrawnGold(it.count);
                     } else if (!ImGui::GetIO().KeyShift &&
                         ImGui::IsItemClicked(ImGuiMouseButton_Left) && !it.obj->IsGold()) {
                         if (it.locked) {
