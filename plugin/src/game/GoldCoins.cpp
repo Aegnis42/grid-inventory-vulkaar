@@ -268,11 +268,12 @@ namespace FUI::GoldCoins
 
     const char* FallbackIconKey(RE::FormID a_id)
     {
-        static constexpr const char* kTiers[4] = {
-            "msc_gold1", "msc_gold2", "msc_gold3", "msc_gold4",
-        };
+        // One coin, one fallback icon -- the other three tier keys retired
+        // with the tiers (see CoinForTier). The remaining forms are still
+        // RECOGNISED here, because a save made before this change can hold
+        // tiles keyed to them.
         for (int i = 0; i < 4; ++i) {
-            if (g_coins[i] && g_coins[i]->GetFormID() == a_id) return kTiers[i];
+            if (g_coins[i] && g_coins[i]->GetFormID() == a_id) return "msc_gold1";
         }
         // the pouch, its draw-time icon variants, and the purse sizes all read
         // as one thing: a bag of coins
@@ -661,18 +662,35 @@ namespace FUI::GoldCoins
     }
 
     // ---- G4: pinned gold purses ------------------------------------------
-    int BandTier(int a_value)
+    // ★★★ONE COIN, NOT FOUR (P2/3-5b).
+    //
+    // The mirror used to pick one of four coin forms by amount, so a pile of
+    // ten drew differently from a pile of a thousand. It read well on the
+    // player's board and nowhere else: a container has no such mirror, so gold
+    // put in a chest came back as a raw thousand-in-one-cell stack with no
+    // banding, no cap and no drag -- and the two sides could not be made to
+    // agree without teaching the partner board four tiers it had never heard
+    // of.
+    //
+    // So the tiers retire. Gold is ONE form with ONE picture, and the only
+    // rule left is the stack cap both sides can keep: kCoinCap per tile. The
+    // amount is already written on the tile as a number, which is the thing
+    // players actually read.
+    //
+    // ★The identity stays OURS (the plugin's own coin form) rather than
+    // becoming vanilla Gold001, deliberately: IsCoinForm is the gate that keeps
+    // gold out of every ordinary transfer path, and widening it to vanilla gold
+    // would change what that gate answers for a merchant's purse and a looted
+    // chest at the same time. Same picture either way; this way nothing else
+    // has to be re-checked.
+    int BandTier(int)
     {
-        if (a_value >= 100) return 3;
-        if (a_value >= 10)  return 2;
-        if (a_value >= 5)   return 1;
-        if (a_value >= 1)   return 0;
-        return -1;
+        return 0;   // retired: kept so the call sites read unchanged
     }
 
-    RE::TESBoundObject* CoinForTier(int a_tier)
+    RE::TESBoundObject* CoinForTier(int)
     {
-        return (a_tier >= 0 && a_tier < 4) ? g_coins[a_tier] : nullptr;
+        return g_coins[0];   // the one coin
     }
 
     int PinnedValue(const std::string& a_tileKey)
