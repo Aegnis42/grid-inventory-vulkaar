@@ -325,6 +325,15 @@ namespace FUI::LootBarter
             RE::FormID form = 0;
             int        count = 0;   // ★units in this cell (never above the cap)
             int        xlIdx = -1;  // which extra list, for a per-unit cell
+            // ★★A POUCH'S CELL CAN NOW OUTRUN ITS MONEY. The amount is parked
+            // by the engine event that fires as the pouch LEAVES THE PLAYER --
+            // next Tick -- while the cell is born the instant the player lets
+            // go, which is the whole point of the board owning its cells. So a
+            // pouch stored onto an aimed square asked for its gold a frame too
+            // early, got nothing, and drew empty until it was taken back out
+            // (reported). This counts down the passes during which the cell is
+            // still expecting it. Not saved: a promise cannot survive a load.
+            int        awaitGold = 0;
 
             // ---- WHERE ----
             int col = -1;
@@ -3034,6 +3043,22 @@ namespace
                 }
             }
 
+            // ★A pouch cell that was born before its money. One claim per
+            // pass and one cell at a time -- only one pouch can be in flight,
+            // since only one thing can ride the cursor.
+            for (auto& [k, c] : a_cl.cells) {
+                if (c.awaitGold <= 0) continue;
+                if (const int g = GoldCoins::TakeAwayGold(); g > 0) {
+                    c.gold += g;
+                    c.awaitGold = 0;
+                    SKSE::log::info("[LOOT] pouch shelved with {} G ('{}', late claim)",
+                                    g, k);
+                } else {
+                    --c.awaitGold;
+                }
+                break;
+            }
+
             // ---- 3. and only now, what is gone is gone ----
             // A cell whose pool the engine no longer reports, or that ended this
             // pass holding nothing. ★Same death rites as before: a pouch's money
@@ -4434,7 +4459,11 @@ namespace
         // shelf cell is born through now. There used to be three doors and they
         // disagreed about which of them claimed the amount.
         c.bundle = TakePendingBundle(c.form);
-        if (GoldCoins::IsPouch(c.form)) c.gold = GoldCoins::TakeAwayGold();
+        if (GoldCoins::IsPouch(c.form)) {
+            c.gold = GoldCoins::TakeAwayGold();
+            // nothing parked yet: the pouch has not left the player. Wait for it.
+            if (c.gold <= 0) c.awaitGold = 8;
+        }
         cl->cells[MintCellKey(*cl, a_obj)] = std::move(c);
     }
 

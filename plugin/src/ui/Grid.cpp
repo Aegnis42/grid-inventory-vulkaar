@@ -1236,8 +1236,14 @@ namespace FUI::Grid
                 // ★(1.3.2) the tile's marker bits ride along; the favourite
                 // star does NOT -- RequestStore's fav argument strips it as
                 // the unit leaves, so a stored item is never starred.
+                // ★★AND WHERE IT SAT. The manifest has had anchor fields since
+                // v5 and this filled them with -1 -- "unplaced" -- so a bag put
+                // in a chest came home with its contents first-fit into a
+                // stranger's order. The player arranged that interior; a trip
+                // through a container is not a reason to undo it. (Reported as
+                // "the bag works, but the items inside get rearranged".)
                 manifest.push_back({ it.obj->GetFormID(), it.count, it.sig,
-                                     -1, -1, it.rot & 3, it.glow,
+                                     it.col, it.row, it.rot & 3, it.glow,
                                      it.stolen });
             }
             if (!manifest.empty() && a_bagObj) {
