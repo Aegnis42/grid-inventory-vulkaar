@@ -291,6 +291,22 @@ namespace FUI::GoldCoins
         for (int i = 0; i < 4; ++i) {
             if (g_coins[i] && g_coins[i]->GetFormID() == a_id) return "msc_gold1";
         }
+        // ★★AND VANILLA GOLD, which draws on exactly one board: a container's.
+        //
+        // The player's own never shows this form -- the rebuild takes Gold001
+        // out as the ledger and draws the coin mirror in its place -- so it was
+        // never asked about here, and a chest full of septims fell through every
+        // rule below it to the catch-all. The player saw a pickaxe where their
+        // money was, which is the "stored gold has no icon" report.
+        //
+        // ★DRAW-TIME ONLY, exactly like the pouch's icon variants: the item in
+        // the chest stays Gold001 and must. That is the form the rest of the
+        // game reads -- followers, quest scripts, theft, chest respawns -- and
+        // the form that survives this plugin being uninstalled. Swapping the
+        // STORED item for our coin would hide the player's money from
+        // everything but us, and destroy it the day the esp is removed. The
+        // picture is ours to choose; the money is not.
+        if (a_id == kGold001) return "msc_gold1";
         // the pouch, its draw-time icon variants, and the purse sizes all read
         // as one thing: a bag of coins
         for (auto* p : { g_pouch, g_pouchS, g_pouchM, g_pouchF,
