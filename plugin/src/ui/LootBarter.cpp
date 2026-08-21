@@ -2763,6 +2763,36 @@ namespace
                     } else {
                         pc.locked = pc.unnameable;
                     }
+                    // ★★P2/3-5b: GOLD BANDS ON THIS SIDE TOO.
+                    //
+                    // Every other cell here is one cell per form, count in the
+                    // badge -- fine for ingots, wrong for money. A chest with
+                    // twelve thousand septims drew a single cell reading 12000,
+                    // while the player's own board has never let more than
+                    // kCoinCap sit in one square. Storing gold in a chest
+                    // (P2/3-5) is what made the two sides look at each other,
+                    // and this is the side that had no rule.
+                    //
+                    // Split into cap-sized cells, each with its own ordinal so
+                    // the spot memory can tell them apart and each can be taken
+                    // on its own. Deliberately gold-only: an ingot stack in one
+                    // cell is not a bug, and banding everything would rearrange
+                    // every container in the game for no one's benefit.
+                    if (obj->IsGold() && pc.count > GoldCoins::kCoinCap) {
+                        int left = pc.count;
+                        while (left > 0) {
+                            const int take = (std::min)(left, GoldCoins::kCoinCap);
+                            PartnerCell band = pc;
+                            band.count = take;
+                            band.value = take;
+                            band.ord = plainOrd++;
+                            band.spotKey = std::format("{:08X}|g{}",
+                                obj->GetFormID(), band.ord);
+                            cells.push_back(std::move(band));
+                            left -= take;
+                        }
+                        continue;
+                    }
                     cells.push_back(std::move(pc));
                 }
             }
