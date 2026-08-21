@@ -2785,9 +2785,15 @@ namespace
                             PartnerCell band = pc;
                             band.count = take;
                             band.value = take;
+                            // ★Ordinal only -- NO hand-rolled spot key. Giving
+                            // the bands keys of my own invention was the bug the
+                            // report described: a cell with a key already on it
+                            // skips the spot-assignment pass, which is the very
+                            // thing that remembers where a cell sat. So every
+                            // deposit re-first-fitted the whole pile. The bands
+                            // are ordinary cells; the pass gives each one a
+                            // remembered slot exactly as it does for an ingot.
                             band.ord = plainOrd++;
-                            band.spotKey = std::format("{:08X}|g{}",
-                                obj->GetFormID(), band.ord);
                             cells.push_back(std::move(band));
                             left -= take;
                         }
