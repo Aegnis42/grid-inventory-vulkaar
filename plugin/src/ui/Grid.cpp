@@ -11113,6 +11113,77 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 RequestRebuild();
                 return true;
             }
+            // Is the cursor over the player's own board at all? Everything
+            // below needs the same answer, and the gold route needs it BEFORE
+            // the swap question is even asked.
+            const bool onOwnBoard = g_target.has &&
+                                    !LootBarter::IsPartnerHovered() &&
+                                    g_target.view < static_cast<int>(g_views.size());
+            // F2: a partner item can't be taken INTO the trash — cancel.
+            // ★Hoisted out of the placement block below so it is asked of EVERY
+            // drop on the board, not only the ones that block reaches. It used
+            // to sit inside, which was harmless only because everything it did
+            // not cover fell through to the same cancel at the bottom.
+            if (onOwnBoard && g_views[g_target.view].bagKey == kTrashKey) {
+                g_held.reset();
+                RequestRebuild();
+                return true;
+            }
+            // ★★P2/3-5d: GOLD LANDS WHERE IT WAS DROPPED, at its own amount.
+            //
+            // Right-clicking a chest's gold pours it into the purse and lets
+            // the mirror sort out the tiles -- correct, and unchanged. A DRAG
+            // is a different promise: this many coins, in that square.
+            // Everything needed for it already exists on this side, because a
+            // withdrawn pouch amount has always ridden the cursor as a pinned
+            // purse and the gold-fragment routes already say what happens when
+            // one lands: an empty cell takes it, a coin or a pouch merges with
+            // it, and whatever will not fit stays on the cursor.
+            //
+            // So the take happens, the amount becomes a pinned purse, and that
+            // purse is handed straight to those routes -- the same ones a
+            // shift-split fragment uses. No new grammar, and the slider is
+            // skipped: a drag has already said how much.
+            //
+            // ★★AND IT SITS ABOVE THE SWAP QUESTION, which is where the first
+            // version got it wrong. It lived inside the placement block below,
+            // whose gate is "an empty cell, or a single occupant we may swap
+            // with" -- and that swap test excludes coin forms by design. So the
+            // route was reachable ONLY over an empty cell: dropping a chest's
+            // gold onto a coin tile or a pouch matched nothing, fell through to
+            // the cancel at the bottom, and the money went back in the chest
+            // (reported: cases 3 and 4). The two destinations the fragment
+            // routes exist to serve were the two they could not be reached for.
+            //
+            // Landing on the board is the whole condition. Which square, and
+            // what is already sitting there, is the routes' question to answer
+            // -- including "2+ blockers, keep carrying", which is why there is
+            // no target-validity test here either.
+            //
+            // ★★S-0: AND THE LEDGER IS TOLD FIRST. The take moves engine coins
+            // through LootBarter's queue, which the gold book cannot see, so
+            // without the announcement below it read this arrival as loot off
+            // the floor. Two reports came out of that: the pouch's auto-store
+            // swallowed the dragged amount while the pin drew its value from
+            // the coins already laid out, and the pin landing a tick before the
+            // credit blinked a tile. GoldCoins::ExpectIncoming says both of
+            // those out of one line -- and it is said ONLY on a queued request,
+            // because a promise made for a refused transfer is a lie the ledger
+            // would carry.
+            if (onOwnBoard && a_held.obj->IsGold() &&
+                LootBarter::IsLootMode(LootBarter::CurrentMode())) {
+                const int take = a_held.count;
+                if (LootBarter::RequestTake(a_held.obj, take, a_held.uid, a_held.sig)) {
+                    GoldCoins::ExpectIncoming(take);
+                    g_held.reset();
+                    CarryWithdrawnGold(take);   // nets to zero against the above
+                    if (g_held) ResolveDrop(*g_held);
+                } else {
+                    g_held.reset();   // refused: the carry goes home
+                }
+                RequestRebuild();
+                return true;
+            }
             // F7-swap: a partner item dropped on a SINGLE occupied player tile
             // takes/buys into that spot and the displaced tile rides the
             // cursor (player-grid C4 grammar). Coins/pouch keep the old no-op.
@@ -11129,54 +11200,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (g_target.has && (g_target.valid || swapDisp) &&
                 !LootBarter::IsPartnerHovered() &&
                 g_target.view < static_cast<int>(g_views.size())) {
-                const auto& v = g_views[g_target.view];
-                // F2: a partner item can't be taken INTO the trash — cancel
-                if (v.bagKey == kTrashKey) {
-                    g_held.reset();
-                    RequestRebuild();
-                    return true;
-                }
+                const auto& v = g_views[g_target.view];   // (trash: asked above)
                 const int cnt = a_held.count;
-                // ★★P2/3-5d: GOLD LANDS WHERE IT WAS DROPPED, at its own amount.
-                //
-                // Right-clicking a chest's gold pours it into the purse and lets
-                // the mirror sort out the tiles -- correct, and unchanged. A
-                // DRAG is a different promise: this many coins, in that square.
-                // Everything needed for it already exists on this side, because
-                // a withdrawn pouch amount has always ridden the cursor as a
-                // pinned purse and the gold-fragment routes already say what
-                // happens when one lands: an empty cell takes it, a coin or a
-                // pouch merges with it, and whatever will not fit stays on the
-                // cursor.
-                //
-                // So the take happens, the amount becomes a pinned purse, and
-                // that purse is handed straight to those routes -- the same
-                // ones a shift-split fragment uses. No new grammar, and the
-                // slider is skipped: a drag has already said how much.
-                //
-                // ★★S-0: AND THE LEDGER IS TOLD FIRST. The take moves engine
-                // coins through LootBarter's queue, which the gold book cannot
-                // see, so without the announcement below it read this arrival
-                // as loot off the floor. Two reports came out of that: the
-                // pouch's auto-store swallowed the dragged amount while the pin
-                // drew its value from the coins already laid out, and the pin
-                // landing a tick before the credit blinked a tile.
-                // GoldCoins::ExpectIncoming says both of those out of one line
-                // -- and it is said ONLY on a queued request, because a promise
-                // made for a refused transfer is a lie the ledger would carry.
-                if (a_held.obj->IsGold() &&
-                    LootBarter::IsLootMode(LootBarter::CurrentMode())) {
-                    if (LootBarter::RequestTake(a_held.obj, cnt, a_held.uid, a_held.sig)) {
-                        GoldCoins::ExpectIncoming(cnt);
-                        g_held.reset();
-                        CarryWithdrawnGold(cnt);   // nets to zero against the above
-                        if (g_held) ResolveDrop(*g_held);
-                    } else {
-                        g_held.reset();   // refused: the carry goes home
-                    }
-                    RequestRebuild();
-                    return true;
-                }
                 bool ok = true;
                 if (LootBarter::CurrentMode() == LootBarter::Mode::kBarter && cnt <= 1) {
                     const int total = LootBarter::BuyPrice(a_held.obj, a_held.partnerValue);
