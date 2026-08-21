@@ -1307,6 +1307,42 @@ namespace FUI::LootBarter
                             if (l) hadBefore.insert(l);
                         }
                     }
+                    // ★★SAY WHOSE IT IS WHILE IT IS STILL ON THE SHELF.
+                    //
+                    // Ownership lives on an ExtraDataList, and the engine hands
+                    // out units from a container two different ways: it moves an
+                    // existing list, or it lets units in as bare count and mints
+                    // a list for them. Measured, taking two cabbages out of the
+                    // Sleeping Giant, it did BOTH at once --
+                    //
+                    //   shelf before: delta=4 [4x own=-] lists=1
+                    //   player after: delta=2 [1x own=<faction>] lists=1
+                    //
+                    // -- one unit minted and stamped, one let in bare. A bare
+                    // unit has nowhere to carry an owner, so it arrives clean.
+                    // Four-plus-one and one-plus-one were this same split at
+                    // different sizes.
+                    //
+                    // Marking them AFTER the fact cannot fix the bare half:
+                    // there is no list to write on, and ExtraDataList is a game
+                    // class we cannot construct. Marking them BEFORE needs
+                    // neither -- the shelf's list already exists, and whatever
+                    // the engine then moves or splits off carries the owner with
+                    // it. Which is also simply true: the items in a chest in
+                    // somebody's inn are theirs, and the game only leaves that
+                    // implicit until one of them travels.
+                    //
+                    // ★The owner was never missing, either. It is a faction with
+                    // no NAME, so an earlier log printed "owner " and I read it
+                    // as null and went hunting through the cell for it. It was
+                    // on the ref the whole time.
+                    if (auto* owner = ContainerOwner(source)) {
+                        if (auto* e = Grid::LiveEntryOf(source, r.obj); e && e->extraLists) {
+                            for (auto* l : *e->extraLists) {
+                                if (l && !l->GetOwner()) l->SetOwner(owner);
+                            }
+                        }
+                    }
                 }
                 GuardedRemove(source, r.obj,
                     pick.kind == Grid::PickKind::kFallback, "take", [&]() {
@@ -1316,30 +1352,50 @@ namespace FUI::LootBarter
                         pick.xl, player);
                 });
                 if (g_mode == Mode::kSteal) {
-                    // ★The container's owner, which is what makes the item
-                    // stolen: our own reader calls a unit stolen when its list
-                    // has an owner that is not the player (PoolIsStolen).
-                    // ★A list that ALREADY has an owner is left alone -- it was
-                    // stolen before it got here, and overwriting whose it is
-                    // would rewrite who the player has to answer to.
+                    // ★★A UNIT WITH NO LIST CANNOT BE STOLEN, because ownership
+                    // lives on the list. That is the whole of this bug.
+                    //
+                    // Measured, taking two cabbages out of the Sleeping Giant:
+                    //
+                    //   shelf before: delta=4 [4x own=-] lists=1
+                    //   player after: delta=2 [1x own=<faction>] lists=1
+                    //
+                    // Two units arrive. The engine gave ONE of them a list and
+                    // stamped it -- kSteal marks what the engine creates -- and
+                    // let the other in as bare count. No list, nowhere to write
+                    // an owner, not stolen. Four-plus-one and one-plus-one were
+                    // always this same split at different sizes.
+                    //
+                    // ★And the owner was never missing. It is a faction with no
+                    // NAME, so the earlier log printed "owner " and I read that
+                    // as null and went looking for it in the cell. It had been
+                    // on the ref the whole time.
+                    //
+                    // So: stamp the lists that arrived unowned, and give the
+                    // listless remainder a list of its own to be owned by. The
+                    // engine's own stamp is left alone where it applied.
+                    // ★A list that arrived without an owner is still marked
+                    // here -- the pre-stamp covers what the shelf was already
+                    // holding, and this covers anything the engine produced from
+                    // outside it. A list that ALREADY has an owner is left
+                    // alone: it was stolen before it got here, and rewriting
+                    // whose it is would rewrite who the player answers to.
                     auto* owner = ContainerOwner(source);
                     int   marked = 0;
                     if (owner) {
                         if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
                             for (auto* l : *e->extraLists) {
-                                if (!l || hadBefore.contains(l)) continue;
-                                if (l->GetOwner()) continue;
+                                if (!l || hadBefore.contains(l) || l->GetOwner()) continue;
                                 l->SetOwner(owner);
                                 ++marked;
                             }
                         }
                     }
-                    SKSE::log::info("[STEAL] '{}' x{} -> {} arriving list(s) marked "
-                                    "stolen (owner {})",
+                    SKSE::log::info("[STEAL] '{}' x{}: {} arriving list(s) stamped "
+                                    "(owner {:08X}) | {}",
                                     r.obj->GetName() ? r.obj->GetName() : "?",
                                     r.count, marked,
-                                    owner ? owner->GetName() : "none");
-                    SKSE::log::info("[STEAL]   player after: {}",
+                                    owner ? owner->GetFormID() : 0,
                                     ListReport(player, r.obj));
                 }
                 ClearOut(r.obj, r.uid, r.sig, r.count);   // engine moved it
