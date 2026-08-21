@@ -772,15 +772,28 @@ namespace FUI::UIRoot
             case K::kY:             return kActDrop;
             case K::kLeftShoulder:  return kActFavorite;
             case K::kRightShoulder: return kActInspect;
+            // ★★THE TRIGGERS MEAN TWO THINGS, AND THE CURSOR SAYS WHICH.
+            //
+            // Holding an item, they ROTATE it. Otherwise they are the split /
+            // compare modifier they have always been. The two can never want
+            // the trigger at the same moment: splitting is something you do to
+            // a tile you are picking UP, and comparing is something you do to a
+            // tile you are hovering -- both are gestures of an empty cursor.
+            // With something on the cursor, that meaning has nothing to act on
+            // and the trigger is free.
+            //
+            // Resolved at PRESS and remembered (see NotePadButton), so a
+            // trigger held across a pickup still releases the action it took,
+            // rather than leaving Shift stuck down.
+            //
+            // ★Rotation is deliberately not looked up in ControlMap above:
+            // there is no game action called "turn the thing you are holding",
+            // so there would be nothing to ask for. It is ours, and it is
+            // pinned to physical buttons.
             case K::kLeftTrigger:
-            case K::kRightTrigger:  return kActSplit;
-            // ★The stick BUTTONS were the only ones this menu left unclaimed,
-            // and rotation is the only action left without a button. They are
-            // deliberately not looked up in ControlMap above: there is no game
-            // action called "rotate the item you are holding", so there would
-            // be nothing to ask for.
-            case K::kLeftThumb:     return kActRotL;
-            case K::kRightThumb:    return kActRotR;
+                return Grid::IsHolding() ? kActRotL : kActSplit;
+            case K::kRightTrigger:
+                return Grid::IsHolding() ? kActRotR : kActSplit;
             case K::kLeft:          return kActNudgeL;
             case K::kRight:         return kActNudgeR;
             case K::kUp:            return kActNudgeU;
@@ -827,6 +840,16 @@ namespace FUI::UIRoot
                     // first button wins — both triggers carry kActSplit
                     if ((act & kWanted[i]) != 0 && !g_padLabel[i]) g_padLabel[i] = b.name;
                 }
+            }
+            // ★The triggers answer differently depending on whether something
+            // is on the cursor, and this runs once, at menu open, with an empty
+            // one -- so the loop above can only ever have seen them as the split
+            // modifier. Name their other meaning outright rather than resolving
+            // a state-dependent binding at a moment whose state we know is the
+            // wrong one.
+            for (std::size_t i = 0; i < std::size(kWanted); ++i) {
+                if (kWanted[i] == kActRotL) g_padLabel[i] = "LT";
+                if (kWanted[i] == kActRotR) g_padLabel[i] = "RT";
             }
             g_padLabelReady = true;
         }
