@@ -2736,14 +2736,64 @@ namespace
                                                    b.row == g_bundleCarry.row;
                                         });
                                     if (bit != srcB.end()) {
-                                        BundleItem moved = *bit;
-                                        srcB.erase(bit);
-                                        moved.col = dropC;
-                                        moved.row = dropR;
-                                        moved.rot = hrot & 3;
-                                        moved.parentIdx = root;   // it lives HERE now
-                                        bundle.push_back(moved);
-                                        consumed = true;
+                                        // ★★★MOVE IT IN PLACE WHEN IT IS NOT
+                                        // GOING ANYWHERE. Erase-and-append was
+                                        // reordering the vector, and every
+                                        // parentIdx in it is an INDEX into that
+                                        // vector -- so putting one item down
+                                        // renumbered the whole tree while every
+                                        // reference kept pointing at the old
+                                        // numbers.
+                                        //
+                                        // Measured: moving the item in bag A
+                                        // sent it from #0 to the end and pulled
+                                        // everything else down one, leaving bag
+                                        // B at #0 with children still claiming
+                                        // #1. B's window resolved, stayed open,
+                                        // and seated nothing -- "the contents
+                                        // disappeared".
+                                        //
+                                        // Within one bundle nothing needs to
+                                        // move at all: the entry is already
+                                        // there, and what changed is where it
+                                        // SITS and whose it is. Writing those
+                                        // three fields leaves every index in
+                                        // the vector exactly where it was.
+                                        if (&srcB == &bundle) {
+                                            bit->col = dropC;
+                                            bit->row = dropR;
+                                            bit->rot = hrot & 3;
+                                            bit->parentIdx = root;
+                                            consumed = true;
+                                        } else {
+                                            // ★A genuine crossing between two
+                                            // containers' bundles. The entry
+                                            // leaves one vector and joins
+                                            // another, so BOTH have to be
+                                            // repaired -- CutBranch does the
+                                            // leaving half (and brings a bag's
+                                            // branch with it), and the arriving
+                                            // half is a plain append whose
+                                            // parents are remapped onto it.
+                                            const int idx =
+                                                static_cast<int>(bit - srcB.begin());
+                                            BundleItem moved = *bit;
+                                            auto branch = CutBranch(srcB, idx);
+                                            moved.col = dropC;
+                                            moved.row = dropR;
+                                            moved.rot = hrot & 3;
+                                            moved.parentIdx = root;
+                                            const int here =
+                                                static_cast<int>(bundle.size());
+                                            bundle.push_back(moved);
+                                            for (auto& b : branch) {
+                                                b.parentIdx = b.parentIdx < 0
+                                                    ? here
+                                                    : b.parentIdx + here + 1;
+                                                bundle.push_back(b);
+                                            }
+                                            consumed = true;
+                                        }
                                     }
                                 }
                             }
