@@ -1437,7 +1437,22 @@ namespace FUI::Wheeler
                 // exactly what you would expect: turning the wheel off restored
                 // the vanilla menu's right to open, while the key that opens it
                 // was still being erased one layer earlier.
-                if (g_enabled && a_event) {
+                // ★★★...AND NOTHING WHILE THE PLAYER IS TRANSFORMED, for the
+                // same reason and one layer deeper than anyone looked.
+                //
+                // This hook is where the beast-form yield was quietly being
+                // undone. The wheel's OnButton stood aside, the menu intercept
+                // in main.cpp stopped closing the menu -- and the key still did
+                // nothing, because the menu never got to SEE it: this blanks
+                // the hotkey at MenuControls whether the wheel is open or not,
+                // which is precisely its job the rest of the time. Measured
+                // either way: with the wheel off, Q in vampire-lord form opens
+                // the vanilla menu and it stays up (four seconds in the log);
+                // with the wheel on, nothing at all.
+                //
+                // So the stand-down has to reach here too. Three layers, one
+                // question -- ask it in all three or the answer never arrives.
+                if (g_enabled && !YieldingToVanilla() && a_event) {
                     for (auto* e = *a_event; e && n < 16; e = e->next) {
                         auto* b = e->AsButtonEvent();
                         if (!b) continue;
