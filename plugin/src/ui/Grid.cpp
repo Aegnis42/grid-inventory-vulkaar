@@ -11889,13 +11889,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // GoldOnPartnerPouch); anywhere else coins keep their old cancel
             if (a_held.coinValue > 0 &&
                 GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid)) {
+                // P2/3-5: same two destinations as the fragment's route above --
+                // a pouch cell under the cursor, else the container itself.
                 const int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
-                if (moved > 0) {
+                RE::TESObjectREFR* const dst = moved > 0 ? nullptr : LootBarter::Partner();
+                if (moved > 0 || dst) {
+                    if (moved > 0) {
+                        GoldCoins::DebitLedger(moved);
+                    } else {
+                        GoldCoins::StoreToContainer(dst, a_held.coinValue);
+                    }
                     if (GoldCoins::PinnedValue(a_held.key) >= 0) {
                         GoldCoins::UnpinTile(a_held.key);
                     }
                     g_layout.erase(a_held.key);
-                    GoldCoins::DebitLedger(moved);
                     if (g_sound) g_sound(a_held.obj, false);
                     g_held.reset();
                     RequestRebuild();
@@ -12407,16 +12414,33 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // The pin's value re-enters walking first (unpin), the ledger then
         // pays the banked amount; any excess over the pouch cap stays as
         // walking gold. False = not over a pouch (the next route decides).
+        // ★P2/3-5: gold dropped on a partner window. Two destinations, in
+        // order: a POUCH cell under the cursor takes it into that pouch's slot
+        // (the older grammar), and anything else hands it to the CONTAINER
+        // itself -- a chest, a follower's pack -- which is what "I want to keep
+        // my money in the warehouse" has always meant and never had a road to.
+        //
+        // ★The merchant is not on this list and needs no test for it: the row
+        // that reaches here is kPartnerLoot, which only matches a container or
+        // a follower. Selling gold to a shopkeeper is not a thing.
         bool GoldOnPartnerPouch(Held& a_held)
         {
             if (a_held.coinValue <= 0) return false;
-            const int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
-            if (moved <= 0) return false;
+            int moved = LootBarter::DepositOnHoveredPouch(a_held.coinValue);
+            if (moved <= 0) {
+                if (auto* dst = LootBarter::Partner()) {
+                    GoldCoins::StoreToContainer(dst, a_held.coinValue);
+                    moved = a_held.coinValue;
+                } else {
+                    return false;
+                }
+            } else {
+                GoldCoins::DebitLedger(moved);   // the pouch route debits here
+            }
             if (GoldCoins::PinnedValue(a_held.key) >= 0) {
                 GoldCoins::UnpinTile(a_held.key);
             }
             g_layout.erase(a_held.key);
-            GoldCoins::DebitLedger(moved);
             if (g_sound) g_sound(a_held.obj, false);
             g_held.reset();
             RequestRebuild();

@@ -145,9 +145,15 @@ namespace FUI::GoldCoins
         struct LedgerOp
         {
             enum Kind { kDropCoin, kPouchLeave, kPouchReturn,
-                        kDebit };   // (1.3.2a) plain debit -- no awayGold tie
+                        kDebit,        // (1.3.2a) plain debit -- no awayGold tie
+                        kStoreCoin };  // P2/3-5: gold into a container
             Kind kind;
             int  value;
+            // kStoreCoin only: where it goes. A handle would be safer against a
+            // cell unloading, but the op is consumed on the very next Tick and
+            // the container is the one the player has open -- and LookupByID
+            // returning null is already the "gone" answer this needs (원칙 2).
+            RE::FormID target = 0;
         };
         std::vector<LedgerOp> g_pending;
 
@@ -878,6 +884,23 @@ namespace FUI::GoldCoins
                     if (g_lastLedger >= 0) g_lastLedger -= d;
                 }
                 break;
+            case LedgerOp::kStoreCoin:
+                {
+                    // ★Clamped to what the player actually has: a payment
+                    // queued the same tick may have run first, and promising
+                    // more than the purse holds is how a ledger drifts.
+                    auto* dst = RE::TESForm::LookupByID<RE::TESObjectREFR>(a_op.target);
+                    const int d = (std::min)(a_op.value, CountOf(a_p, a_gold));
+                    if (dst && d > 0) {
+                        a_p->RemoveItem(a_gold, d, RE::ITEM_REMOVE_REASON::kStoreInContainer,
+                                        nullptr, dst);
+                        a_p->PlayPickUpSound(a_gold, false, false);
+                        SKSE::log::info("[GOLD] {} G stored into '{}'", d,
+                            dst->GetName() ? dst->GetName() : "?");
+                    }
+                    if (g_lastLedger >= 0) g_lastLedger -= d;
+                }
+                break;
             case LedgerOp::kPouchLeave:
                 {
                     const int d = (std::min)(a_op.value, CountOf(a_p, a_gold));
@@ -914,6 +937,15 @@ namespace FUI::GoldCoins
                 break;
             }
         }
+    }
+
+    void StoreToContainer(RE::TESObjectREFR* a_dst, int a_value)
+    {
+        if (!a_dst || a_value <= 0) return;
+        const int v = (std::min)(a_value, WalkingGold());
+        if (v <= 0) return;
+        g_pending.push_back({ LedgerOp::kStoreCoin, v, a_dst->GetFormID() });
+        g_dirty = true;
     }
 
     void DropAsGold(int a_value)

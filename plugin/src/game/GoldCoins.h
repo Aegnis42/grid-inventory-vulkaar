@@ -118,6 +118,18 @@ namespace FUI::GoldCoins
     // pouch -> walking gold. a_sound=false when the caller immediately lifts
     // the amount onto the cursor (the pickup sound plays instead).
     void Withdraw(int a_value, bool a_sound = true);
+    // ★P2/3-5: hand gold to a CONTAINER -- a chest, a follower's pack --
+    // instead of to the floor. The transfer runs on the Tick like every other
+    // ledger op, because moving engine gold from the render pass is exactly the
+    // hazard the queue exists to avoid.
+    //
+    // ★It does NOT ride the ordinary store path, and that is deliberate: a coin
+    // tile is a MIRROR of this ledger, not an inventory item, so taking it
+    // through RequestStore would have the transfer counted twice -- once by the
+    // request ledger and once here. One debit, from the book that owns the
+    // gold.
+    void StoreToContainer(RE::TESObjectREFR* a_dst, int a_value);
+
     void DropAsGold(int a_value);     // ledger down; a Coin_Sack (0x805,
                                       // coinbaglarge.nif) ref lands at the feet
                                       // carrying the value; falls back to a
