@@ -11624,6 +11624,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             le.uid   = a_held.uid;
             le.sig   = a_held.sig;
             le.xlIdx = a_held.xlIdx;
+            // ★★A SPLIT FRAGMENT KNOWS ITS POOL, NOT ITS uid/sig.
+            //
+            // PickupPartial records the source's pool string and leaves uid and
+            // sig at zero -- reasonably, since the fragment is a QUANTITY out of
+            // a pool rather than a named unit. But this is where a new tile's
+            // pool gets decided, and reading the zeroes made every fragment a
+            // PLAIN tile.
+            //
+            // For an ordinary stack nothing showed: the units were plain, so the
+            // plain pool was the right answer by accident. Split a STOLEN stack
+            // and the accident ends -- ownership lives on an extra list, which
+            // gives those units a signature. The fragment landed in a pool with
+            // no units in it, so the reconcile erased it and refilled the tile
+            // it came from: "I split it, put it down, and it merged back"
+            // (reported for stolen goods; the same was true of anything signed
+            // -- tempered, enchanted, poisoned).
+            if (le.uid == 0 && le.sig == 0 && !a_held.srcPool.empty()) {
+                le.uid = UidOf(a_held.srcPool);
+                le.sig = SigOf(a_held.srcPool);
+            }
             return nk;
         }
 
