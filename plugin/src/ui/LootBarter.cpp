@@ -411,14 +411,103 @@ namespace FUI::LootBarter
         // routes the arrived contents back INTO the bag.
         std::vector<PendingBundle> g_incomingBundles;
 
+        // ★★CUT A BAG OUT OF A BUNDLE, BRANCH AND ALL, and hand the branch
+        // back re-rooted so it can become a manifest of its own.
+        //
+        // Both ways a bag can leave a bundle need this -- dragged out to the
+        // player, or taken by any other road -- and they were about to grow two
+        // copies of it. The erase has two traps either copy has to remember:
+        // remove from the back, since each removal slides what follows it, and
+        // then repair the survivors, because an entry that stayed would
+        // otherwise point at whatever slid into its parent's place. A bag
+        // adopting a stranger's contents is the same class of bug as a bag
+        // losing its own.
+        std::vector<BundleItem> CutBranch(std::vector<BundleItem>& a_bundle, int a_idx)
+        {
+            std::vector<int> gen{ a_idx }, branch;
+            for (int i = 0; i < static_cast<int>(a_bundle.size()); ++i) {
+                if (std::find(gen.begin(), gen.end(), a_bundle[i].parentIdx) != gen.end()) {
+                    gen.push_back(i);
+                    branch.push_back(i);
+                }
+            }
+            std::vector<BundleItem> out;
+            std::map<int, int>      remap;
+            for (int i : branch) {
+                remap[i] = static_cast<int>(out.size());
+                BundleItem b = a_bundle[i];
+                const auto pi = remap.find(b.parentIdx);
+                b.parentIdx = (b.parentIdx == a_idx || pi == remap.end())
+                                  ? -1 : pi->second;
+                out.push_back(std::move(b));
+            }
+            std::vector<int> dead = branch;
+            dead.push_back(a_idx);
+            std::sort(dead.begin(), dead.end(), std::greater<int>());
+            for (int i : dead) a_bundle.erase(a_bundle.begin() + i);
+            for (auto& b : a_bundle) {
+                if (b.parentIdx < 0) continue;
+                int shift = 0;
+                for (int i : dead) {
+                    if (i < b.parentIdx) ++shift;
+                }
+                b.parentIdx -= shift;
+            }
+            return out;
+        }
+
+        // ★The takes that bring a cut branch home, plus the manifest that puts
+        // it back inside the bag on arrival.
+        void SendBranchHome(RE::TESBoundObject* a_bag, std::vector<BundleItem> a_branch)
+        {
+            if (!a_bag || a_branch.empty()) return;
+            if (auto* src = SourceRef()) {
+                auto inv = src->GetInventory();
+                for (const auto& b : a_branch) {
+                    auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(b.form);
+                    if (!obj) continue;
+                    int present = 0;
+                    if (const auto ei = inv.find(obj); ei != inv.end()) {
+                        present = ei->second.first;
+                    }
+                    const int take = (std::min)(b.count, present);
+                    if (take > 0) RequestTake(obj, take, 0, b.sig, false);
+                }
+            }
+            SKSE::log::info("[LOOT] nested bag leaves with {} entr(ies)",
+                            a_branch.size());
+            g_incomingBundles.push_back({ 0, a_bag->GetFormID(), std::move(a_branch) });
+            if (g_incomingBundles.size() > 8) {
+                g_incomingBundles.erase(g_incomingBundles.begin());
+            }
+        }
+
+
         // ---- (1.3.1/1.3.2c) OPEN shelf bags -------------------------------
         // One window per opened bag spot, ordered by open time (ESC closes
         // the newest first) -- the player-bag grammar, where every open bag
         // has its own window. The bag's form rides along for the title.
+        // ★★A BAG INSIDE A SHELF BAG HAS NO SPOT OF ITS OWN, so a window on
+        // one cannot be named the way the top-level ones are. It is named by the
+        // way DOWN to it: the spot, then one step per level.
+        //
+        // A step is (form, col, row) rather than an index into the bundle,
+        // because indices move. Erasing an entry slides everything after it, and
+        // a window holding an index would be looking at whatever slid into its
+        // place -- the same class of bug the take had to fix. A step is what the
+        // player can see: this bag, in that square, at this level.
+        struct BagStep
+        {
+            RE::FormID form = 0;
+            int        col = -1;
+            int        row = -1;
+            bool operator==(const BagStep&) const = default;
+        };
         struct ShelfBagWin
         {
-            std::string spot;
-            RE::FormID  form = 0;
+            std::string          spot;
+            RE::FormID           form = 0;
+            std::vector<BagStep> path;   // empty = the bag ON the spot
         };
         std::vector<ShelfBagWin> g_shelfBags;
 
@@ -442,6 +531,11 @@ namespace FUI::LootBarter
             std::uint16_t sig = 0;
             int           col = -1;
             int           row = -1;
+            // ★which level of the bundle it was lifted out of. An index is safe
+            // HERE where a window's would not be: the bundle is not mutated
+            // while a carry is out -- the entry survives until it is consumed --
+            // so this cannot go stale during the one thing that reads it.
+            int           root = -1;
         };
         BundleCarry g_bundleCarry;
 
@@ -2011,8 +2105,24 @@ namespace
             });
         }
         if (it != bundle.end()) {
-            it->count -= a_count;
-            if (it->count <= 0) bundle.erase(it);
+            // ★★A BAG LEAVES WITH ITS BRANCH, however it leaves. Dragging one
+            // out of a shelf bag used to erase the single entry and orphan
+            // everything under it -- the contents stayed in the bundle pointing
+            // at a parent that was gone, and only surfaced when the OUTER bag
+            // came home. Same tree, same rule as the store side.
+            const int idx = static_cast<int>(it - bundle.begin());
+            if (Grid::ResolveDef(a_obj).bag != 0) {
+                auto branch = CutBranch(bundle, idx);
+                SendBranchHome(a_obj, std::move(branch));
+            } else {
+                it->count -= a_count;
+                if (it->count <= 0) {
+                    bundle.erase(it);
+                    for (auto& b : bundle) {
+                        if (b.parentIdx > idx) --b.parentIdx;
+                    }
+                }
+            }
         }
         return true;
     }
@@ -2029,12 +2139,42 @@ namespace
     {
         // one bag window. a_ord staggers the default position; returns
         // false when the window should close (the bag left the shelf).
+        // ★Walk a window's path down to the bundle entry it names. -1 is the
+        // bag ON the spot (the path is empty); anything else is a bag nested
+        // inside it. A step that finds nothing means the bag is gone -- taken,
+        // sold, spilled -- and the window closes rather than showing a level
+        // that no longer exists.
+        int ResolveBagPath(const std::vector<BundleItem>& a_bundle,
+                           const std::vector<BagStep>& a_path, bool& a_ok)
+        {
+            a_ok = true;
+            int root = -1;
+            for (const auto& step : a_path) {
+                int found = -1;
+                for (int i = 0; i < static_cast<int>(a_bundle.size()); ++i) {
+                    const auto& b = a_bundle[i];
+                    if (b.parentIdx == root && b.form == step.form &&
+                        b.col == step.col && b.row == step.row) {
+                        found = i;
+                        break;
+                    }
+                }
+                if (found < 0) { a_ok = false; return -1; }
+                root = found;
+            }
+            return root;
+        }
+
         bool DrawOneShelfBag(RE::TESObjectREFR* p, ContLayout& a_cl,
                              const ShelfBagWin& a_w, int a_ord)
         {
         const auto si = a_cl.cells.find(a_w.spot);
         if (si == a_cl.cells.end()) return false;   // the bag left the shelf
         auto& bundle = si->second.bundle;
+        // ★which level this window is showing
+        bool      pathOk = true;
+        const int root = ResolveBagPath(bundle, a_w.path, pathOk);
+        if (!pathOk) return false;   // the nested bag is no longer there
         auto* bagObj = RE::TESForm::LookupByID<RE::TESBoundObject>(a_w.form);
         if (!bagObj) return false;
         const auto bagDef = Grid::ResolveDef(bagObj);
@@ -2049,6 +2189,7 @@ namespace
         // anchors refit, nothing is lost).
         const bool carryOut = g_bundleCarry.active &&
                               g_bundleCarry.spot == a_w.spot &&
+                              g_bundleCarry.root == root &&
                               g_bundleCarry.cont == p->GetFormID();
         auto isCarried = [&](const BundleItem& a_b) {
             return carryOut && a_b.form == g_bundleCarry.form &&
@@ -2092,7 +2233,7 @@ namespace
         // draws as one cell. Opening it from inside a chest is deliberately not
         // offered yet; the requirement was that a nesting survives the trip
         // intact, and it does.
-        auto atThisLevel = [&](const BundleItem& a_b) { return a_b.parentIdx < 0; };
+        auto atThisLevel = [&](const BundleItem& a_b) { return a_b.parentIdx == root; };
         for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
             if (isCarried(bundle[i]) || !atThisLevel(bundle[i])) continue;
             auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(bundle[i].form);
@@ -2136,12 +2277,15 @@ namespace
         const ImVec2 size(cols * cell + 2.0f * Theme::PadX() * S +
                               2.0f * Theme::FrameInsetX(),
                           rows * cell + 54.0f * S + 2.0f * Theme::FrameInsetY());
-        const std::string wid = "sb|" + a_w.spot;
+        std::string wid = "sb|" + a_w.spot;
+        for (const auto& st : a_w.path) {
+            wid += fmt::format("/{:08X}@{},{}", st.form, st.col, st.row);
+        }
         wm->ApplyNext(wid,
             ImVec2(disp.x * 0.52f + a_ord * 44.0f * S,
                    (disp.y - size.y) * 0.5f + a_ord * 36.0f * S),
             size, WinManager::Anchor::kTopLeft, topPad);
-        ImGui::Begin(("##sb_" + a_w.spot).c_str(), nullptr, kManagedWinFlags);
+        ImGui::Begin(("##sb_" + wid).c_str(), nullptr, kManagedWinFlags);
         // ★★(1.3.2) NO NoteOverlayRect HERE. This is a BAG window, not a
         // popup -- and registering it made the window block its own cells:
         // every lift is gated on `IsItemHovered() && !MouseInOverlay()`, and
@@ -2178,7 +2322,7 @@ namespace
                 ImGui::GetWindowPos().x + size.x - colW - Theme::TopControlRightPad(),
                 textTop - (btnH - lineH) * 0.5f));
             const auto& sk = Theme::S();
-            if (Sfx::Button(("##sbcollect_" + a_w.spot).c_str(), ImVec2(colW, btnH))) {
+            if (Sfx::Button(("##sbcollect_" + wid).c_str(), ImVec2(colW, btnH))) {
                 // already-bundled counts across THIS container hide cells;
                 // collect only what is still loose
                 std::map<RE::FormID, int> taken;
@@ -2198,7 +2342,8 @@ namespace
                         if (BagFilter::FilterOf(obj2) != bagDef.accept) continue;
                         const int loose = total - taken[fid2];
                         if (loose <= 0) continue;
-                        bundle.push_back({ fid2, loose, 0, -1, -1, 0 });
+                        bundle.push_back({ fid2, loose, 0, -1, -1, 0,
+                                           0, false, root });
                         taken[fid2] += loose;
                         swept += loose;
                     }
@@ -2330,11 +2475,30 @@ namespace
                         // is CONSUMED (take home / shelf drop); a cancel puts
                         // it visually straight back
                         g_bundleCarry = { true, p->GetFormID(), a_w.spot,
-                                          b.form, b.sig, s.col, s.row };
+                                          b.form, b.sig, s.col, s.row, root };
                         g_carryGlow = b.glow;   // (1.3.2)
                         g_carryStolen = b.stolen;
                         Grid::BeginPartnerCarry(s.obj, b.count, 0,
                                                 -1.0f, -1.0f, 0, -1, 0, s.rot);
+                    } else if (ImGui::IsItemClicked(ImGuiMouseButton_Right) &&
+                               Grid::ResolveDef(s.obj).bag != 0) {
+                        // ★★AND A BAG OPENS, which is what right-click on a bag
+                        // means everywhere else. Its window is this one's path
+                        // plus a step, so a bag three deep is three steps -- the
+                        // nesting has no special case and no depth limit.
+                        std::vector<BagStep> sub = a_w.path;
+                        sub.push_back({ b.form, s.col, s.row });
+                        const auto open = std::find_if(g_shelfBags.begin(),
+                            g_shelfBags.end(), [&](const ShelfBagWin& a_o) {
+                                return a_o.spot == a_w.spot && a_o.path == sub;
+                            });
+                        if (open != g_shelfBags.end()) {
+                            g_shelfBags.erase(open);
+                            Sfx::SelectOff();
+                        } else {
+                            g_shelfBags.push_back({ a_w.spot, b.form, std::move(sub) });
+                            Sfx::SelectOn();
+                        }
                     } else if (ImGui::IsItemClicked(ImGuiMouseButton_Right) &&
                                Grid::ResolveDef(s.obj).bag == 0) {
                         // ★★RIGHT-CLICK TAKES IT, like every other cell on this
@@ -2390,81 +2554,14 @@ namespace
         // entry never was one.
         if (takeIdx >= 0 && takeObj &&
             takeIdx < static_cast<int>(bundle.size())) {
-            // ★★A NESTED BAG LEAVES WITH ITS BRANCH.
-            //
-            // Reported: opening a stored bag in a chest and right-clicking a bag
-            // INSIDE it brought that bag home empty, and everything under it
-            // stayed behind -- to spill out only when the outer bag was taken
-            // too. Storing already moves a subtree (S-3-4); taking one out of a
-            // bundle was the half that still moved a single entry.
-            //
-            // The descendants come out of the parent's manifest and become a
-            // manifest of their own, re-rooted: what pointed at the bag now
-            // points at nothing, because the bag IS the root of the new one.
-            // Parent-first order survives the copy, so the indices still point
-            // backwards and the claim on the other side needs no sorting.
-            std::vector<int>          subtree;   // parent-first, the bag excluded
-            std::vector<BundleItem>   carried;
-            if (Grid::ResolveDef(takeObj).bag != 0) {
-                std::vector<int> gen{ takeIdx };
-                for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
-                    if (std::find(gen.begin(), gen.end(), bundle[i].parentIdx) !=
-                        gen.end()) {
-                        gen.push_back(i);
-                        subtree.push_back(i);
-                    }
-                }
-                // old manifest index -> index in the new one
-                std::map<int, int> remap;
-                for (int i : subtree) {
-                    remap[i] = static_cast<int>(carried.size());
-                    BundleItem b = bundle[i];
-                    const auto pi = remap.find(b.parentIdx);
-                    b.parentIdx = (b.parentIdx == takeIdx || pi == remap.end())
-                                      ? -1 : pi->second;
-                    carried.push_back(std::move(b));
-                }
-            }
-            // ★Highest first: erasing shifts everything after it.
-            std::vector<int> dead = subtree;
-            dead.push_back(takeIdx);
-            std::sort(dead.begin(), dead.end(), std::greater<int>());
-            for (int i : dead) bundle.erase(bundle.begin() + i);
-            // ★And the entries that stayed have to follow the shift too, or a
-            // survivor would point at whatever slid into its parent's place.
+            bundle.erase(bundle.begin() + takeIdx);
+            // ★survivors follow the shift, or one points at whatever slid into
+            // its parent's place
             for (auto& b : bundle) {
-                if (b.parentIdx < 0) continue;
-                int shift = 0;
-                for (int i : dead) {
-                    if (i < b.parentIdx) ++shift;
-                }
-                b.parentIdx -= shift;
+                if (b.parentIdx > takeIdx) --b.parentIdx;
             }
-
             g_actingSpot.clear();
             RequestTake(takeObj, takeCount, 0, takeSig);
-            if (!carried.empty()) {
-                if (auto* src = SourceRef()) {
-                    auto inv = src->GetInventory();
-                    for (const auto& b : carried) {
-                        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(b.form);
-                        if (!obj) continue;
-                        int present = 0;
-                        if (const auto ei = inv.find(obj); ei != inv.end()) {
-                            present = ei->second.first;
-                        }
-                        const int take = (std::min)(b.count, present);
-                        if (take > 0) RequestTake(obj, take, 0, b.sig, false);
-                    }
-                }
-                SKSE::log::info("[LOOT] nested bag taken, {} entr(ies) follow",
-                                carried.size());
-                g_incomingBundles.push_back({ 0, takeObj->GetFormID(),
-                                              std::move(carried) });
-                if (g_incomingBundles.size() > 8) {
-                    g_incomingBundles.erase(g_incomingBundles.begin());
-                }
-            }
         }
 
         // ★(1.3.2) drop ghost, the same one both boards draw: green = the
@@ -2592,6 +2689,7 @@ namespace
                                         moved.col = dropC;
                                         moved.row = dropR;
                                         moved.rot = hrot & 3;
+                                        moved.parentIdx = root;   // it lives HERE now
                                         bundle.push_back(moved);
                                         consumed = true;
                                     }
@@ -2611,7 +2709,8 @@ namespace
                             bundle.push_back({ hfid, hcount, hsig,
                                                dropC, dropR, hrot & 3, hglow,
                                                g_carryStolen ||
-                                                   g_mode == Mode::kSteal });
+                                                   g_mode == Mode::kSteal,
+                                               root });
                             consumed = true;
                             Grid::DropHeldForShelf();
                         } else {
@@ -2623,7 +2722,7 @@ namespace
                             bool          st = false;
                             if (Grid::CommitHeldToShelfBag(f, cnt, sg, rt, gl, st)) {
                                 bundle.push_back({ f, cnt, sg, dropC, dropR, rt,
-                                                   gl, st });
+                                                   gl, st, root });
                                 consumed = true;
                             }
                         }
