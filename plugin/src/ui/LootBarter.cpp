@@ -1051,8 +1051,54 @@ namespace FUI::LootBarter
         {
             if (!a_source) return nullptr;
             if (auto* own = a_source->GetOwner()) return own;
-            if (auto* cell = a_source->GetParentCell()) return cell->GetOwner();
+            if (auto* npc = a_source->GetActorOwner()) return npc;
+            if (auto* fac = a_source->GetFactionOwner()) return fac;
+            if (auto* cell = a_source->GetParentCell()) {
+                if (auto* own = cell->GetOwner()) return own;
+                if (auto* npc = cell->GetActorOwner()) return npc;
+                if (auto* fac = cell->GetFactionOwner()) return fac;
+            }
             return nullptr;
+        }
+
+        // ⑰ MEASUREMENT: name every ownership source, and describe the lists a
+        // reference is holding for one form. Two takes of this -- the shelf
+        // before, the player after -- is the whole picture the guessing has
+        // been standing in for.
+        std::string OwnerReport(RE::TESObjectREFR* a_ref)
+        {
+            if (!a_ref) return "(null ref)";
+            const auto nm = [](RE::TESForm* f) {
+                return f ? std::string(f->GetName() ? f->GetName() : "?") +
+                               fmt::format("[{:08X}]", f->GetFormID())
+                         : std::string("-");
+            };
+            auto* cell = a_ref->GetParentCell();
+            return fmt::format(
+                "ref own={} actor={} fac={} | cell own={} actor={} fac={} | offLimits={}",
+                nm(a_ref->GetOwner()), nm(a_ref->GetActorOwner()),
+                nm(a_ref->GetFactionOwner()),
+                cell ? nm(cell->GetOwner()) : "-",
+                cell ? nm(cell->GetActorOwner()) : "-",
+                cell ? nm(cell->GetFactionOwner()) : "-",
+                a_ref->IsOffLimits() ? "y" : "n");
+        }
+
+        std::string ListReport(RE::TESObjectREFR* a_ref, RE::TESBoundObject* a_obj)
+        {
+            auto* e = Grid::LiveEntryOf(a_ref, a_obj);
+            if (!e) return "(no entry)";
+            std::string out = fmt::format("delta={}", e->countDelta);
+            if (!e->extraLists) return out + " lists=(none)";
+            int n = 0;
+            for (auto* l : *e->extraLists) {
+                if (!l) continue;
+                ++n;
+                auto* own = l->GetOwner();
+                out += fmt::format(" [{}x own={}]", (std::max)(1, l->GetCount()),
+                                   own ? (own->GetName() ? own->GetName() : "?") : "-");
+            }
+            return out + fmt::format(" lists={}", n);
         }
 
         Grid::UnitChoice SourceUnit(RE::TESObjectREFR* a_source, const XferReq& a_r)
@@ -1216,6 +1262,11 @@ namespace FUI::LootBarter
                             pick.xl ? (std::max)(1, pick.xl->GetCount()) : -1,
                             e ? e->countDelta : -1, nl,
                             lists.empty() ? " (none)" : lists);
+                        SKSE::log::info("[STEAL]   owners: {}", OwnerReport(source));
+                        SKSE::log::info("[STEAL]   shelf before: {}",
+                                        ListReport(source, r.obj));
+                        SKSE::log::info("[STEAL]   player before: {}",
+                                        ListReport(player, r.obj));
                     }
                 }
                 // ★★⑰ NAMING A LIST COSTS THE STEAL STAMP.
@@ -1288,6 +1339,8 @@ namespace FUI::LootBarter
                                     r.obj->GetName() ? r.obj->GetName() : "?",
                                     r.count, marked,
                                     owner ? owner->GetName() : "none");
+                    SKSE::log::info("[STEAL]   player after: {}",
+                                    ListReport(player, r.obj));
                 }
                 ClearOut(r.obj, r.uid, r.sig, r.count);   // engine moved it
                 itemSound(r.obj, true);
