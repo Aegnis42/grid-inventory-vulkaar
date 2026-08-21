@@ -2174,7 +2174,14 @@ namespace
         // ★which level this window is showing
         bool      pathOk = true;
         const int root = ResolveBagPath(bundle, a_w.path, pathOk);
-        if (!pathOk) return false;   // the nested bag is no longer there
+        if (!pathOk) {
+            std::string path;
+            for (const auto& st : a_w.path) {
+                path += fmt::format(" {:06X}@{},{}", st.form & 0xFFFFFF, st.col, st.row);
+            }
+            SKSE::log::info("[BUNDLE] window closed -- path no longer resolves:{}", path);
+            return false;   // the nested bag is no longer there
+        }
         auto* bagObj = RE::TESForm::LookupByID<RE::TESBoundObject>(a_w.form);
         if (!bagObj) return false;
         const auto bagDef = Grid::ResolveDef(bagObj);
@@ -2248,8 +2255,13 @@ namespace
                 now += fmt::format(" #{}:{:06X}x{}@{},{}^{}", i, b.form & 0xFFFFFF,
                                    b.count, b.col, b.row, b.parentIdx);
             }
+            std::string me = a_w.spot;
+            for (const auto& st : a_w.path) {
+                me += fmt::format("/{:06X}@{},{}", st.form & 0xFFFFFF, st.col, st.row);
+            }
+            now = "win[" + me + "] " + now;
             static std::map<std::string, std::string> s_last;
-            auto& prev = s_last[a_w.spot];
+            auto& prev = s_last[me];
             if (prev != now) {
                 prev = now;
                 SKSE::log::info("[BUNDLE] {}", now);
