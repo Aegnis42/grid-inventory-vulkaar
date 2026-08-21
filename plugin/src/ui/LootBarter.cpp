@@ -1218,27 +1218,27 @@ namespace FUI::LootBarter
                 // the engine creates for itself, which is why the one listless
                 // unit was the only stolen one. Four plus one.
                 //
-                // We name a list for GI39: so the engine cannot walk out a
-                // TEMPERED spare when a plain one was asked for. With a single
-                // plain list there is no spare to confuse it with, and the name
-                // buys nothing while costing the stamp. So drop it there, and
-                // only there -- a form with several lists still needs saying
-                // which, and that case keeps its old behaviour rather than
-                // trading a wrong item for a right flag.
-                RE::ExtraDataList* takeXl = pick.xl;
-                if (g_mode == Mode::kSteal && takeXl && r.uid == 0 && r.sig == 0) {
-                    int lists = 0;
-                    if (auto* e = Grid::LiveEntryOf(source, r.obj); e && e->extraLists) {
+                // ★So we stop asking the engine to mark it, and mark it
+                // ourselves. Snapshot which lists the player already had --
+                // anything that appears after the move either came across from
+                // the shelf or was minted for the occasion, and both are things
+                // just taken out of somebody's chest.
+                //
+                // ★Dropping the NAME was the first attempt and it only covered
+                // one shape: with a single plain list there is no tempered spare
+                // to confuse the engine with, so leaving it unnamed was safe and
+                // the whole stack came over stamped. Take TWO out of five and it
+                // came apart again -- one from the list, one from the listless
+                // remainder, one stamped and one not. Which lists the engine
+                // creates and which it moves is not a thing to keep guessing at.
+                // The name goes back (GI39 wants it), and the ownership is ours
+                // to state.
+                std::set<RE::ExtraDataList*> hadBefore;
+                if (g_mode == Mode::kSteal) {
+                    if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
                         for (auto* l : *e->extraLists) {
-                            if (l) ++lists;
+                            if (l) hadBefore.insert(l);
                         }
-                    }
-                    if (lists == 1) {
-                        takeXl = nullptr;   // let the engine stamp what it moves
-                        SKSE::log::info("[STEAL] '{}' x{}: plain single list -- "
-                                        "unnamed so the engine marks it stolen",
-                                        r.obj->GetName() ? r.obj->GetName() : "?",
-                                        r.count);
                     }
                 }
                 GuardedRemove(source, r.obj,
@@ -1246,8 +1246,33 @@ namespace FUI::LootBarter
                     source->RemoveItem(r.obj, r.count,
                         g_mode == Mode::kSteal ? RE::ITEM_REMOVE_REASON::kSteal
                                                : RE::ITEM_REMOVE_REASON::kRemove,
-                        takeXl, player);
+                        pick.xl, player);
                 });
+                if (g_mode == Mode::kSteal) {
+                    // ★The container's owner, which is what makes the item
+                    // stolen: our own reader calls a unit stolen when its list
+                    // has an owner that is not the player (PoolIsStolen).
+                    // ★A list that ALREADY has an owner is left alone -- it was
+                    // stolen before it got here, and overwriting whose it is
+                    // would rewrite who the player has to answer to.
+                    auto* owner = source->GetOwner();
+                    int   marked = 0;
+                    if (owner) {
+                        if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
+                            for (auto* l : *e->extraLists) {
+                                if (!l || hadBefore.contains(l)) continue;
+                                if (l->GetOwner()) continue;
+                                l->SetOwner(owner);
+                                ++marked;
+                            }
+                        }
+                    }
+                    SKSE::log::info("[STEAL] '{}' x{} -> {} arriving list(s) marked "
+                                    "stolen (owner {})",
+                                    r.obj->GetName() ? r.obj->GetName() : "?",
+                                    r.count, marked,
+                                    owner ? owner->GetName() : "none");
+                }
                 ClearOut(r.obj, r.uid, r.sig, r.count);   // engine moved it
                 itemSound(r.obj, true);
                 // ★(1.3.0) SHELF USE MODE. The unit is in the player's pack as
