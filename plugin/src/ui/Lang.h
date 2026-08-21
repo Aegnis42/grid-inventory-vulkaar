@@ -60,6 +60,9 @@ namespace FUI::Lang
         X(SelectHint, "click an item to edit")                                                              \
         X(Damage, "Damage")   /* tooltip stats (I1) */                                                      \
         X(Armor, "Armor")                                                                                   \
+        X(ArmorLight, "Light Armor")   /* tooltip armour class (feedback ⑪) */                              \
+        X(ArmorHeavy, "Heavy Armor")                                                                        \
+        X(ArmorClothing, "Clothing")                                                                        \
         X(Weight, "Weight")                                                                                 \
         X(Value, "Value")                                                                                   \
         X(SlotHead, "Head")                                                                                 \

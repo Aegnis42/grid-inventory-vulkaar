@@ -9746,13 +9746,50 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     break;
                 }
             }
-            ImGui::TextColored(Theme::TipSub(), "%s %d", Lang::T(Lang::Str::Armor), arm);
+            // ★The CLASS, beside the rating (user report ⑪: vanilla's card
+            // says light/heavy/clothing and ours did not -- the one stat that
+            // decides which perk tree an armour belongs to). GetArmorType is
+            // the engine's own answer, so a modded piece is classed by the
+            // same rule as a vanilla one. Shields and jewellery answer
+            // clothing/light like any other ARMO; the label is the record's,
+            // not a guess from the slot.
+            const char* cls = nullptr;
+            switch (armo->GetArmorType()) {
+            case RE::BIPED_MODEL::ArmorType::kLightArmor:
+                cls = Lang::T(Lang::Str::ArmorLight);
+                break;
+            case RE::BIPED_MODEL::ArmorType::kHeavyArmor:
+                cls = Lang::T(Lang::Str::ArmorHeavy);
+                break;
+            default:
+                cls = Lang::T(Lang::Str::ArmorClothing);
+                break;
+            }
+            ImGui::TextColored(Theme::TipSub(), "%s %d  %s",
+                Lang::T(Lang::Str::Armor), arm, cls);
             diffText(arm);
         } else {
             RE::MagicItem* magic = a_obj->As<RE::AlchemyItem>();
-            if (!magic) magic = a_obj->As<RE::IngredientItem>();
+            // ★An INGREDIENT only tells you what you have LEARNED (user report
+            // ②: we listed all four from the start, which is the alchemy game
+            // given away). The engine keeps the discovery per ingredient FORM
+            // in gamedata.knownEffectFlags -- one bit per effect, indexed into
+            // the same effects array -- so eating one or brewing with it turns
+            // its line on by itself, with nothing for us to track. A potion is
+            // not gated: its label says what it does.
+            std::uint16_t known = 0xFFFF;
+            if (!magic) {
+                if (auto* ingr = a_obj->As<RE::IngredientItem>()) {
+                    magic = ingr;
+                    known = ingr->gamedata.knownEffectFlags;
+                }
+            }
             if (magic) {
-                for (auto* e : magic->effects) effectLine(e, Theme::TipSub());
+                std::uint16_t bit = 1;
+                for (auto* e : magic->effects) {
+                    if (known & bit) effectLine(e, Theme::TipSub());
+                    bit = static_cast<std::uint16_t>(bit << 1);
+                }
             }
         }
 
@@ -10578,12 +10615,40 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
 
         // ★XP: vanilla grants Enchanting XP by SOUL SIZE, regardless of the
-        // charge actually restored (UESP). The exact multiplier is not
-        // documented anywhere reachable -- 5% of the soul's charge points
-        // (petty 12.5 .. grand 150) sits in the "small-to-moderate" band the
-        // wiki describes. Approximation; tune on feedback.
-        p->AddSkillExperience(RE::ActorValue::kEnchanting,
-            static_cast<float>(SoulChargePoints(pick.soul)) * 0.05f);
+        // charge actually restored (UESP). What it grants PER soul was the
+        // open question, and 1.3.x answered it with an invented 5% of the
+        // soul's charge points -- 150 for a grand gem, which a user reported
+        // as levelling Enchanting far too fast (feedback ①). The comment there
+        // said "tune on feedback", so this is that.
+        //
+        // ★The number is no longer ours. Every skill carries the engine's own
+        // use formula in its AVSK record -- xp = useMult * magnitude +
+        // offsetMult, the shape Bethesda has used since Oblivion -- and the
+        // magnitude for a recharge is the soul's charge points. Reading it at
+        // runtime means we grant what the GAME says a recharge is worth, and a
+        // rebalance mod that edits the Enchanting AVIF (Ordinator and friends
+        // all do) moves our grant with it instead of fighting it.
+        //
+        // The old approximation survives only as the fallback for a record
+        // with no AVSK block at all, where there is nothing to read.
+        {
+            const float mag = static_cast<float>(SoulChargePoints(pick.soul));
+            float       xp = mag * 0.05f;
+            const char* how = "fallback 5%";
+            if (auto* avl = RE::ActorValueList::GetSingleton()) {
+                if (auto* info = avl->GetActorValue(RE::ActorValue::kEnchanting);
+                    info && info->skill) {
+                    xp = info->skill->useMult * mag + info->skill->offsetMult;
+                    how = "AVSK";
+                }
+            }
+            // A negative or absurd record must not hand out (or take away) a
+            // level: clamp to the sane band the old constant lived in.
+            xp = std::clamp(xp, 0.0f, mag * 0.05f);
+            p->AddSkillExperience(RE::ActorValue::kEnchanting, xp);
+            SKSE::log::info("[RECHARGE] enchanting xp {:.2f} ({}, soul mag {:.0f})",
+                xp, how, mag);
+        }
         p->PlayPickUpSound(gemObj, false, false);
         SKSE::log::info("[RECHARGE] '{}' {:.0f} -> {:.0f} (+{:.0f}, soul {})",
             obj->GetName() ? obj->GetName() : "?", cur, next, next - cur,
