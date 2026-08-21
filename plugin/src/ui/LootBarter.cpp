@@ -2380,9 +2380,81 @@ namespace
         // entry never was one.
         if (takeIdx >= 0 && takeObj &&
             takeIdx < static_cast<int>(bundle.size())) {
-            bundle.erase(bundle.begin() + takeIdx);
+            // ★★A NESTED BAG LEAVES WITH ITS BRANCH.
+            //
+            // Reported: opening a stored bag in a chest and right-clicking a bag
+            // INSIDE it brought that bag home empty, and everything under it
+            // stayed behind -- to spill out only when the outer bag was taken
+            // too. Storing already moves a subtree (S-3-4); taking one out of a
+            // bundle was the half that still moved a single entry.
+            //
+            // The descendants come out of the parent's manifest and become a
+            // manifest of their own, re-rooted: what pointed at the bag now
+            // points at nothing, because the bag IS the root of the new one.
+            // Parent-first order survives the copy, so the indices still point
+            // backwards and the claim on the other side needs no sorting.
+            std::vector<int>          subtree;   // parent-first, the bag excluded
+            std::vector<BundleItem>   carried;
+            if (Grid::ResolveDef(takeObj).bag != 0) {
+                std::vector<int> gen{ takeIdx };
+                for (int i = 0; i < static_cast<int>(bundle.size()); ++i) {
+                    if (std::find(gen.begin(), gen.end(), bundle[i].parentIdx) !=
+                        gen.end()) {
+                        gen.push_back(i);
+                        subtree.push_back(i);
+                    }
+                }
+                // old manifest index -> index in the new one
+                std::map<int, int> remap;
+                for (int i : subtree) {
+                    remap[i] = static_cast<int>(carried.size());
+                    BundleItem b = bundle[i];
+                    const auto pi = remap.find(b.parentIdx);
+                    b.parentIdx = (b.parentIdx == takeIdx || pi == remap.end())
+                                      ? -1 : pi->second;
+                    carried.push_back(std::move(b));
+                }
+            }
+            // ★Highest first: erasing shifts everything after it.
+            std::vector<int> dead = subtree;
+            dead.push_back(takeIdx);
+            std::sort(dead.begin(), dead.end(), std::greater<int>());
+            for (int i : dead) bundle.erase(bundle.begin() + i);
+            // ★And the entries that stayed have to follow the shift too, or a
+            // survivor would point at whatever slid into its parent's place.
+            for (auto& b : bundle) {
+                if (b.parentIdx < 0) continue;
+                int shift = 0;
+                for (int i : dead) {
+                    if (i < b.parentIdx) ++shift;
+                }
+                b.parentIdx -= shift;
+            }
+
             g_actingSpot.clear();
             RequestTake(takeObj, takeCount, 0, takeSig);
+            if (!carried.empty()) {
+                if (auto* src = SourceRef()) {
+                    auto inv = src->GetInventory();
+                    for (const auto& b : carried) {
+                        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(b.form);
+                        if (!obj) continue;
+                        int present = 0;
+                        if (const auto ei = inv.find(obj); ei != inv.end()) {
+                            present = ei->second.first;
+                        }
+                        const int take = (std::min)(b.count, present);
+                        if (take > 0) RequestTake(obj, take, 0, b.sig, false);
+                    }
+                }
+                SKSE::log::info("[LOOT] nested bag taken, {} entr(ies) follow",
+                                carried.size());
+                g_incomingBundles.push_back({ 0, takeObj->GetFormID(),
+                                              std::move(carried) });
+                if (g_incomingBundles.size() > 8) {
+                    g_incomingBundles.erase(g_incomingBundles.begin());
+                }
+            }
         }
 
         // ★(1.3.2) drop ghost, the same one both boards draw: green = the
