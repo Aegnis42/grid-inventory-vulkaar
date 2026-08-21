@@ -3336,31 +3336,24 @@ namespace
                         if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
                             Editor::Select(it.obj, Grid::DefKeyOf(it.obj));
                         }
-                    // ★★P2/3-5c: GOLD DRAGS OUT OF A CONTAINER TOO.
+                    // ★★P2/3-5c: GOLD LIFTS LIKE ANYTHING ELSE ON THIS BOARD.
                     //
-                    // Every other cell here lifts onto the cursor and is taken
-                    // when it lands; gold was excluded outright, so a chest full
-                    // of septims could only be emptied by right-clicking it and
-                    // letting the mirror decide where the coins went.
+                    // The first attempt gave gold a road of its own -- take the
+                    // band on click, hand back a pinned purse -- and it was
+                    // wrong for a reason the ordinary carry has always known:
+                    // a lift is not a TAKE. Picking a coin cell up to move it
+                    // one square left inside the chest took the money into the
+                    // player's inventory, and dropping it back stored it again,
+                    // so the log showed 11 G leaving and returning in a loop
+                    // (measured: 663 -> 652 -> 663, once a second).
                     //
-                    // Gold cannot ride the ordinary partner carry: that carry
-                    // holds an ITEM until it lands, and a coin tile is not an
-                    // item -- it is a face the gold ledger wears. So this takes
-                    // the band NOW and hands the player a PINNED PURSE instead,
-                    // which is the same thing withdrawing from a pouch already
-                    // does (CarryWithdrawnGold). From there the purse is an
-                    // ordinary gold fragment: drop it on a cell, merge it into
-                    // another purse, cancel it back -- all roads that exist.
-                    // ★The credit is queued by the take on this same frame, so
-                    // the pin's subtraction has something to subtract from.
+                    // On this side of the window gold IS an item -- it is
+                    // Gold001 in a container, not the ledger's face -- so it can
+                    // ride the same carry as everything else, and the whole
+                    // grammar comes with it: drop it back on the partner grid to
+                    // rearrange, drop it on your own board to take it.
                     } else if (!ImGui::GetIO().KeyShift &&
-                        ImGui::IsItemClicked(ImGuiMouseButton_Left) &&
-                        it.obj->IsGold() && IsLootMode(g_mode)) {
-                        g_actingSpot = it.spotKey;   // GI20: retire THIS band's slot
-                        RequestTake(it.obj, it.count);
-                        Grid::CarryWithdrawnGold(it.count);
-                    } else if (!ImGui::GetIO().KeyShift &&
-                        ImGui::IsItemClicked(ImGuiMouseButton_Left) && !it.obj->IsGold()) {
+                        ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
                         if (it.locked) {
                             // F6b: worn without Perfect Touch / GI42: unnameable
                             Sfx::FailNote(Lang::T(it.unnameable
