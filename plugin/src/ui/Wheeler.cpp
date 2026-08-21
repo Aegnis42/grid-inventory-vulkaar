@@ -2772,6 +2772,51 @@ namespace FUI::Wheeler
     }
 
     // ---- input ---------------------------------------------------------------
+    // ★★THE WHEEL YIELDS. One question, asked of every press that would open
+    // it: is this key even MINE right now?
+    //
+    // MENU. The favourites key belongs to whatever UI owns the keyboard. The
+    // old gate asked GameIsPaused() and then named two menus -- and a list of
+    // names is only as good as its last edit. Quest Journal Overhaul binds Q
+    // inside the journal and the wheel was still listening (user report ⑯):
+    // a custom menu need not pause the game, so nothing on the list matched.
+    // kUsesMenuContext is the ENGINE'S OWN word for "this menu has taken the
+    // input context", which is exactly the question -- and it covers the two
+    // named menus (ours sets the same flag, see GridMenu) for free.
+    // ★Name the BIT, never the accessor: CommonLibSSE-NG has IMenu::UsesCursor()
+    // returning kUsesMenuContext and UsesMenuContext() returning
+    // kUsesMovementToDirection -- the two are swapped in the header, so the
+    // readable-looking call is the wrong one.
+    //
+    // BEAST FORM. A werewolf or vampire lord reverts through the VANILLA
+    // favourites menu, where the revert power lives. Our wheel is built from
+    // starred items, worn gear and loadout presets -- a beast has none of the
+    // three -- so eating the key offered nothing and locked the player in the
+    // form (user report ⑬). The test is the RACE being unplayable, which is
+    // what a transformation IS, so modded forms ride the same answer.
+    bool SomethingElseOwnsTheKey()
+    {
+        if (auto* ui = RE::UI::GetSingleton()) {
+            if (ui->GameIsPaused()) return true;
+            for (const auto& m : ui->menuStack) {
+                if (m && m->menuFlags.all(RE::UI_MENU_FLAGS::kUsesMenuContext)) {
+                    return true;
+                }
+            }
+        }
+        if (auto* p = RE::PlayerCharacter::GetSingleton()) {
+            if (auto* race = p->GetRace(); race && !race->GetPlayable()) {
+                // Rare and worth measuring: which races actually land here
+                // (the plan asks whether modded transformations do).
+                SKSE::log::info("[WHEEL] yielding the favourites key -- "
+                                "transformed into '{}' (unplayable race)",
+                    race->GetName() ? race->GetName() : "?");
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool OnButton(const RE::ButtonEvent* a_event)
     {
         if (!a_event) return false;
@@ -2968,11 +3013,7 @@ namespace FUI::Wheeler
         if (g_open && id != g_openedBy && !a_event->IsUp()) return false;
 
         if (a_event->IsDown() && !g_open && ComboComplete(pad)) {
-            auto* ui = RE::UI::GetSingleton();
-            if (ui && (ui->GameIsPaused() || ui->IsMenuOpen("GridInventoryMenu"sv) ||
-                       ui->IsMenuOpen(RE::Console::MENU_NAME))) {
-                return false;
-            }
+            if (SomethingElseOwnsTheKey()) return false;
             LoadTextures();
             // ★Ask for a re-read rather than trusting the event stream. This
             // costs one inventory scan per open and removes a whole class of

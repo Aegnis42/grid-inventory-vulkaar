@@ -845,8 +845,27 @@ namespace FUI::Grid
             });
         }
 
-        // Phase 7: a quest object cannot be dropped, sold or stored -- the engine
-        // API does not block it, so we must.
+        // ★THE QUEST-OBJECT POLICY, in one place (1.4.0, feedback ⑤⑭).
+        //
+        // A quest object may CHANGE CONTAINERS -- a chest, a follower's pack --
+        // but may never be DESTROYED or SOLD. Phase 7 wrote the stricter rule
+        // ("never leaves the inventory") and it broke vanilla quests that are
+        // FINISHED by putting the item in a container: Arniel's warped soul gem
+        // into the Dwemer convector, Klimmek's supplies into the chest outside
+        // High Hrothgar. Both work in the vanilla menu; both were dead ends with
+        // this mod installed (user reports).
+        //
+        // The engine does not enforce the old rule -- we invented it -- so the
+        // exits that LOSE the item keep their guard and the ones that merely
+        // MOVE it open up:
+        //   blocked  world drop (R / void), sell, trash, pickpocket PLANT
+        //   allowed  store into a container, hand to a follower
+        // The plant stays blocked deliberately: a mark wanders off with it in a
+        // way a chest never does, and no report asks for it.
+        //
+        // The detection itself is the ENGINE'S OWN -- HasQuestObjectAlias is
+        // exactly what InventoryEntryData::IsQuestObject walks -- so this was
+        // never a matter of flagging too much, only of forbidding too much.
         bool PoolIsQuest(RE::InventoryEntryData* a_entry, std::uint16_t a_uid,
                          std::uint16_t a_sig)
         {
@@ -3196,9 +3215,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // via the container sink).
                             const RE::FormID fid = it.obj->GetFormID();
                             if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
-                                if (it.quest) {   // Phase 7: locked
-                                    Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
-                                } else if (!LootBarter::PartnerHasRoomFor(it.obj, it.count)) {
+                                // (no quest guard: storing CHANGES CONTAINERS,
+                                // which the policy at PoolIsQuest allows)
+                                if (!LootBarter::PartnerHasRoomFor(it.obj, it.count)) {
                                     Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));   // (1.3.3)
                                 } else if (it.count > 1) {
                                     LootBarter::OpenSlider(it.obj, it.count,
@@ -3229,7 +3248,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // onto the mark (engine roll on the Tick)
                             const RE::FormID fid = it.obj->GetFormID();
                             if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
-                                if (it.quest) {
+                                if (it.quest) {   // planted = lost on a mark
                                     Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
                                 } else if (it.count > 1) {
                                     LootBarter::OpenSlider(it.obj, it.count,
@@ -11259,13 +11278,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return true;
         }
 
-        bool FragQuestCancel(Held& a_held)
+        // Phase 7 / 1.4.0: one line, used by every fragment row that would
+        // LOSE a quest object (sell, world drop, plant). The fragment cancels
+        // back to its spot -- the source tile is short by N since the split and
+        // the rebuild's reconciler restores it (ACQUIRE), same as a refusal.
+        bool QuestFragBlocked(Held& a_held)
         {
-            // Phase 7: quest items can't leave the inventory — an unresolved
-            // quest fragment cancels back to its spot (Rebuild restores)
             if (!a_held.quest) return false;
             Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
             g_held.reset();
+            RequestRebuild();
             return true;
         }
 
@@ -11291,6 +11313,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // second slider. The source tile is short by N since the split,
             // so a refusal (reset) restores it via ACQUIRE.
             const RE::FormID fid = a_held.obj->GetFormID();
+            if (QuestFragBlocked(a_held)) return true;   // never sold
             const int val = TileValue(a_held.obj,                          // GI43
                 HeldUidOf(a_held.key, a_held.uid), a_held.sig);
             if (!LootBarter::MerchantBuys(a_held.obj, a_held.stolen)) {
@@ -11319,6 +11342,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         bool StackFragToVoid(Held& a_held)
         {
             if (LootBarter::CurrentMode() == LootBarter::Mode::kNormal) {
+                if (QuestFragBlocked(a_held)) return true;   // never discarded
                 if (g_dropWorld) {
                     g_dropWorld(a_held.obj, a_held.count,   // GI36
                         ResolveExitUnit(a_held.obj, a_held.uid, a_held.sig, a_held.count,
@@ -11642,9 +11666,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     return true;
                 }
             }
-            if (a_held.quest) {   // Phase 7: can't store
-                Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
-            } else if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count)) {
+            // (no quest guard: storing CHANGES CONTAINERS -- see PoolIsQuest)
+            if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count)) {
                 // (1.3.3) a follower's pack is 10 x 8 -- keep carrying
                 Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
             } else if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
@@ -11758,7 +11781,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         bool WholePickStore(Held& a_held)
         {
             const RE::FormID fid = a_held.obj->GetFormID();
-            if (a_held.quest) {   // quest items never leave
+            if (a_held.quest) {   // planted = lost on a wandering mark
                 Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
             } else if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
                 // coins are mirror artefacts (gold planting isn't supported);
@@ -11783,6 +11806,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // a split fragment plants its quantity (no tile key: the source
             // count already dropped at split time; a lost roll force-closes
             // and the reconciler restores the units)
+            if (QuestFragBlocked(a_held)) return true;   // the mark walks off with it
             LootBarter::RequestPickStore(a_held.obj, a_held.count, a_held.uid, a_held.sig, {},
                                          a_held.fav, a_held.xlIdx);
             g_held.reset();
@@ -12120,7 +12144,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             { DropWhere::kTrashArea, StackFragIntoTrash },   // F2 (before kEmptyCell)
             { DropWhere::kEmptyCell, StackFragOnEmptyCell },
             { DropWhere::kBlockerSingle, StackFragOnBlocker },
-            { DropWhere::kAlways, FragQuestCancel },   // unresolved quest frag: cancel
+            // ★No blanket quest cancel here any more. A kAlways row fires for
+            // EVERY destination, so a split quest fragment could not reach the
+            // store row below -- the fragment half of feedback ⑤⑭. The guard
+            // now sits in the rows that actually lose the item (sell, void,
+            // plant); the trash row has always asked TrashIntakeAllowed.
             { DropWhere::kPartnerLoot, StackFragStore },
             { DropWhere::kPartnerBarter, StackFragSell },
             { DropWhere::kPartnerPickpocket, FragPickStore },   // F6b
