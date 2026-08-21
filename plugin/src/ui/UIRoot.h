@@ -134,8 +134,9 @@ namespace FUI::UIRoot
     // device event: the OS cursor's POSITION is useless as a signal here,
     // because the game parks and re-warps it while a pad is driving.
     void NoteMouseInput();
-    // Should GridMenu keep asking for the vanilla Cursor Menu? False only when
-    // we have taken over the pointer ourselves (see PadCursorMode).
+    // Should GridMenu keep asking for the vanilla Cursor Menu? False whenever a
+    // pad is driving: we draw the pointer ourselves then, and asking for the
+    // game's as well would strand a second arrow on screen.
     [[nodiscard]] bool WantsGameCursor();
 
     // ---- control hints -----------------------------------------------------
@@ -162,15 +163,12 @@ namespace FUI::UIRoot
     };
     [[nodiscard]] const char* KeyLabel(Act a_act);
 
-    // ★Hand the engine's OWN Cursor Menu the real thumbstick event so it moves
-    // its own arrow — `CursorMenu` is a MenuEventHandler with a ProcessThumbstick
-    // of its own (that is how the world map's pad cursor works). Our menu is not
-    // in MenuControls' handler list, so the event never reaches it by itself.
-    // Poking MenuCursor::cursorPos* instead does NOT work: the arrow only
-    // re-reads that pair when an input event arrives, so it just teleported on
-    // the next button press. We pass the live event straight through — no
-    // synthesised event, no vtable games.
-    void FeedEngineCursor(RE::ThumbstickEvent* a_event);
+    // ⛔FeedEngineCursor is GONE. It handed the engine's own Cursor Menu the
+    // live thumbstick event so its arrow would move, which existed only to make
+    // "does the engine drive its own cursor?" measurable -- and that question
+    // is no longer asked. On a pad this menu draws the pointer itself, always;
+    // see the note in UIRoot.cpp for why the measurement could never be
+    // trusted. Nothing pokes the engine's cursor handler any more.
 
     // ★True while the game's own Book Menu is up on top of us (right-click on
     // a book / note). Our overlay renders LAST, so it would paint straight

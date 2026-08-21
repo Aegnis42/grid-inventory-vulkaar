@@ -524,8 +524,6 @@ namespace
                     if (FUI::UIRoot::IsBookOpen()) continue;   // the book has input
                     if (auto* ts = e->AsThumbstickEvent()) {
                         FUI::UIRoot::NotePadStick(ts->IsRight(), ts->xValue, ts->yValue);
-                        // let the engine's cursor move itself (see the header)
-                        FUI::UIRoot::FeedEngineCursor(ts);
                     } else if (auto* gb = e->AsButtonEvent()) {
                         // held state, not the down EDGE: the UI needs press and
                         // release both (click-drag, the shift modifier)
