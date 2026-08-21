@@ -611,22 +611,23 @@ namespace FUI::GoldCoins
         }
     }
 
+    // ★★What the nth coin tile is WORTH -- and with one coin the answer is
+    // the only one that can be: fill each tile to the cap in turn, and the
+    // last one holds what is left.
+    //
+    // ★This is where retiring the tiers went wrong the first time and made the
+    // gold VANISH. The tile COUNT was changed to follow the cap while this
+    // still asked which BAND the remainder fell in -- so 663 G, now living in
+    // one tier-0 tile, was asked "is the remainder between 1 and 4?", answered
+    // no, and was valued at zero. A tile worth nothing draws nothing. Count and
+    // value are one rule and have to move together.
     int InstanceValue(RE::FormID a_form, int a_index)
     {
-        const int tier = TierOf(a_form);
-        if (tier < 0) return 0;
+        if (TierOf(a_form) < 0 || a_index < 0) return 0;
         const int walking = WalkingGold();
         if (walking <= 0) return 0;
-        const int full = walking / 1000;
-        const int rem = walking % 1000;
-        switch (tier) {
-        case 3:
-            if (a_index < full) return 1000;
-            return rem >= 100 ? rem : 0;
-        case 2: return (rem >= 10 && rem <= 99) ? rem : 0;
-        case 1: return (rem >= 5 && rem <= 9) ? rem : 0;
-        default: return (rem >= 1 && rem <= 4) ? rem : 0;
-        }
+        const int left = walking - a_index * kCoinCap;
+        return left > 0 ? (std::min)(left, kCoinCap) : 0;
     }
 
     int CoinTileCount(RE::FormID a_form)
@@ -634,34 +635,21 @@ namespace FUI::GoldCoins
         // Tiles this coin form should show, from WALKING gold (pending drops
         // already subtracted) — NOT the live item count, which lags a tick
         // behind a drop and would let the rebuild self-refill the dropped cell.
-        const int tier = TierOf(a_form);
-        if (tier < 0) return 0;
-        const int walking = WalkingGold();
-        if (walking <= 0) return 0;
-        const int full = walking / 1000;
-        const int rem = walking % 1000;
-        switch (tier) {
-        case 3:  return full + (rem >= 100 ? 1 : 0);
-        case 2:  return (rem >= 10 && rem <= 99) ? 1 : 0;
-        case 1:  return (rem >= 5 && rem <= 9) ? 1 : 0;
-        default: return (rem >= 1 && rem <= 4) ? 1 : 0;
-        }
+        // ★One coin means one form carries every tile, and the retired three
+        // carry none -- a save that still holds tiles keyed to them draws them
+        // down to nothing on the next mirror pass, which is the migration.
+        if (TierOf(a_form) != 0) return 0;
+        return CoinTilesFor(WalkingGold());
     }
 
     int WalkingGoldValue() { return WalkingGold(); }
 
     int CoinTilesFor(int a_walking)
     {
-        // Same tier breakdown as CoinTileCount, summed over every tier, for an
-        // arbitrary walking-gold amount (not the live value).
+        // One tile per capful, plus one for the remainder -- the same rule
+        // Desired() uses, said once so the two cannot drift apart again.
         if (a_walking <= 0) return 0;
-        const int full = a_walking / 1000;
-        const int rem = a_walking % 1000;
-        int n = full + (rem >= 100 ? 1 : 0);   // tier 3 (100..1000, one per 1000)
-        n += (rem >= 10 && rem <= 99) ? 1 : 0;  // tier 2
-        n += (rem >= 5 && rem <= 9) ? 1 : 0;    // tier 1
-        n += (rem >= 1 && rem <= 4) ? 1 : 0;    // tier 0
-        return n;
+        return (a_walking + kCoinCap - 1) / kCoinCap;
     }
 
     // ---- G4: pinned gold purses ------------------------------------------
