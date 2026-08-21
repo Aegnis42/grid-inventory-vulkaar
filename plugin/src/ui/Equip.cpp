@@ -839,6 +839,42 @@ namespace FUI::Equip
         return true;
     }
 
+    bool RingWantsSecondSlot(RE::TESBoundObject* a_obj)
+    {
+        auto* ringIn = a_obj ? a_obj->As<RE::TESObjectARMO>() : nullptr;
+        if (!ringIn || !Grid::IsRing(ringIn) || DualRing::IsCarrier(ringIn)) {
+            return false;
+        }
+        // ★The routing, unchanged (user spec): a second ring JOINS the first
+        // when it brings something the first does not; where both slots are
+        // taken the duplicate names its own victim, and everything else trades
+        // with the first as it always did. Reading the board BEFORE anyone
+        // clears it is the whole reason this runs where it does -- the
+        // conflict pass downstream strips everything on kRing, so asking after
+        // it would always answer "no first ring".
+        auto* firstObj = WornObjectAt("ringR");
+        auto* first = firstObj ? firstObj->As<RE::TESObjectARMO>() : nullptr;
+        if (first && !Grid::IsRing(first)) first = nullptr;
+        auto* second = DualRing::Second();
+        bool  toSecond = false;
+        if (first && !second) {
+            toSecond = !DualRing::SharesEffect(first, ringIn);
+        } else if (first && second) {
+            toSecond = DualRing::SharesEffect(second, ringIn) &&
+                       !DualRing::SharesEffect(first, ringIn);
+        }
+        // ★[RING] every routed click, decision and state -- the "all my rings
+        // ended up worn" report needs the router's own words, not a
+        // reconstruction.
+        SKSE::log::info("[RING] route '{}': first='{}' second='{}' "
+                        "toSecond={} carrierCarry={}",
+            ringIn->GetName(),
+            first ? first->GetName() : "-",
+            second ? second->GetName() : "-",
+            toSecond ? 1 : 0, Grid::CarrierCarryActive() ? 1 : 0);
+        return toSecond;
+    }
+
     void RequestWear(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
                      std::uint16_t a_sig, int a_hand, int a_count, bool a_second)
     {
@@ -1014,26 +1050,11 @@ namespace FUI::Equip
             if (act.slotId.empty()) {
                 if (auto* ringIn = obj->As<RE::TESObjectARMO>();
                     ringIn && Grid::IsRing(ringIn) && !DualRing::IsCarrier(ringIn)) {
-                    auto* firstObj = WornObjectAt("ringR");
-                    auto* first = firstObj ? firstObj->As<RE::TESObjectARMO>() : nullptr;
-                    if (first && !Grid::IsRing(first)) first = nullptr;
-                    auto* second = DualRing::Second();
-                    bool  toSecond = false;
-                    if (first && !second) {
-                        toSecond = !DualRing::SharesEffect(first, ringIn);
-                    } else if (first && second) {
-                        toSecond = DualRing::SharesEffect(second, ringIn) &&
-                                   !DualRing::SharesEffect(first, ringIn);
-                    }
-                    // ★[RING] every routed click, decision and state -- the
-                    // "all my rings ended up worn" report needs the router's
-                    // own words, not a reconstruction.
-                    SKSE::log::info("[RING] rclick '{}': first='{}' second='{}' "
-                                    "toSecond={} carrierCarry={}",
-                        obj->GetName(),
-                        first ? first->GetName() : "-",
-                        second ? second->GetName() : "-",
-                        toSecond ? 1 : 0, Grid::CarrierCarryActive() ? 1 : 0);
+                    // ★O-1b: the decision itself moved to RingWantsSecondSlot
+                    // so a click can aim with it. What stays here is the
+                    // FALLBACK for callers that have no board to aim from --
+                    // the wheel, which equips slotless while our menu is shut.
+                    const bool toSecond = RingWantsSecondSlot(ringIn);
                     if (toSecond && DualRing::Wear(ringIn, nullptr)) {
                         Grid::ForgetTile(act.srcKey);   // rule 13, same as the drop path
                         Grid::NoteFormSeen(obj);
@@ -1176,14 +1197,27 @@ namespace FUI::Equip
                         // in its old tile instead of the first free one --
                         // unlike every other piece of gear in the inventory.
                         Grid::ForgetTile(act.srcKey);
+                        // ★B4-4: one tile's exit, not a repaint -- the tail
+                        // rebuild here ran in the middle of the ring2 exclusion
+                        // handoff (the deferred blink's window). Both callers
+                        // have already taken the tile off the display by now
+                        // (the lift for a drag, WholeUse for a click), so this
+                        // is expected to be a no-op -- O-6 removes it once the
+                        // log has confirmed that.
+                        Grid::DropTileDisplay(act.srcKey, obj);
+                        continue;
                     }
-                    // ★B4-4: one tile's exit, not a repaint -- the tail
-                    // rebuild here ran in the middle of the ring2 exclusion
-                    // handoff (the deferred blink's window). The doll-drop
-                    // path removed the display at lift, so this is a no-op
-                    // there; the router path drops its tile now.
-                    Grid::DropTileDisplay(act.srcKey, obj);
-                    continue;
+                    // ★★A REFUSED Wear must NOT eat the ring. This branch used
+                    // to drop the tile and `continue` whatever Wear answered,
+                    // so a ring the carrier would not take (same effect, no
+                    // free biped slot) was neither worn NOR shown -- gone until
+                    // the pending-equip TTL put it back two seconds later. The
+                    // slotless router has always fallen through to the engine's
+                    // own first-slot swap on a refusal; this is the same
+                    // answer, and O-1b needs it because the click now aims
+                    // HERE instead of at that router.
+                    SKSE::log::info("[EQUIP] second ring slot refused '{}' -- "
+                                    "falling through to the first", obj->GetName());
                 }
             }
             // ★★...and the reverse. Equipping a ring NORMALLY while the carrier

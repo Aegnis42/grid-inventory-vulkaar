@@ -11785,8 +11785,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // in the inventory" did nothing at all (AddItemMenu).
             // count: what THIS tile holds. Ammo goes on by the tileful
             // (EquipCountFor); everything else ignores it and takes one.
-            if (!Equip::UseItem(a_held.obj, a_held.uid, a_held.xlIdx, a_held.sig,
-                                a_held.key, a_held.count)) {
+            // ★O-1b: a ring bound for the SECOND slot is AIMED, not left to a
+            // router downstream. Aiming puts the click in the same targeted
+            // branch a drag onto that slot uses -- and that branch names the
+            // exact unit (it resolves srcList) where the router hands the
+            // engine a null list and lets it pick. One road, and the better of
+            // the two. A refusal there falls through to the first slot, so
+            // nothing is lost by aiming.
+            const bool queued =
+                Equip::RingWantsSecondSlot(a_held.obj)
+                    ? Equip::EquipItem(a_held.obj, "ringL", a_held.uid,
+                                       a_held.xlIdx, a_held.sig, a_held.key,
+                                       a_held.count)
+                    : Equip::UseItem(a_held.obj, a_held.uid, a_held.xlIdx,
+                                     a_held.sig, a_held.key, a_held.count);
+            if (!queued) {
                 return false;   // refused at our own gate: straight back
             }
             RE::TESBoundObject* const obj = a_held.obj;
