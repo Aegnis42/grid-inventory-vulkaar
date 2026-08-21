@@ -1395,14 +1395,6 @@ namespace FUI::Grid
         // the use/equip legacy). drained: NotePendingRemove already adjusted
         // the LAYOUT count (store/sell paths) -- the partial must then sync
         // only the display, or the stack would be drained twice.
-        struct ClickRemove
-        {
-            std::string key;
-            RE::FormID  form = 0;
-            int         take = 0;
-            bool        drained = false;
-        };
-        std::optional<ClickRemove> g_clickRemove;
 
         // ★ONE PATH: the right-clicked tile and where it is bound, waiting for
         // FinishFrame.
@@ -1419,7 +1411,7 @@ namespace FUI::Grid
         // route pointer: the click site sits a few thousand lines above the
         // handlers, and naming the road it wants is clearer than reaching for
         // a function it cannot see yet.
-        enum class ClickRoute : std::uint8_t { kUse, kStore };
+        enum class ClickRoute : std::uint8_t { kUse, kStore, kSell, kPlant };
         struct ClickAction
         {
             std::string key;
@@ -3278,18 +3270,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                    LootBarter::Mode::kPickpocket) {
                             // F6b: right-click = reverse-pickpocket this tile
                             // onto the mark (engine roll on the Tick)
+                            // ★ONE PATH / O-3: the plant's own copy retires.
+                            // Quest guard, slider, roll request -- all of it is
+                            // WholePickStore, written once for the drag.
                             const RE::FormID fid = it.obj->GetFormID();
                             if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
-                                if (it.quest) {   // planted = lost on a mark
-                                    Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
-                                } else if (it.count > 1) {
-                                    LootBarter::OpenSlider(it.obj, it.count,
-                                        LootBarter::XferDir::kPickStore, it.key, 0, it.uid, it.sig,
-                                        false, it.fav);
-                                } else {
-                                    LootBarter::RequestPickStore(it.obj, 1, it.uid, it.sig, it.key,
-                                                                 it.fav, it.xlIdx);
-                                }
+                                g_clickAction =
+                                    ClickAction{ it.key, ClickRoute::kPlant };
                             }
                         } else if (LootBarter::CurrentMode() == LootBarter::Mode::kBarter) {
                             // Phase 5: SELL this tile to the merchant. A stack
@@ -3297,40 +3284,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // once. Coins excluded (mirror); the pouch sells via
                             // the gold-travel path (§2-C). Blocked when the
                             // merchant can't afford it.
+                            // ★ONE PATH / O-3: likewise -- the price check,
+                            // the merchant's purse, the star's confirm and the
+                            // slider all live in WholeSell now, and the star's
+                            // confirm reached the drag for the first time on
+                            // the way (it had only ever guarded this click).
                             const RE::FormID fid = it.obj->GetFormID();
                             if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
-                                const int val = TileValue(it.obj, it.uid, it.sig);   // GI43
-                                // Phase 7: quest items can't be sold
-                                if (it.quest) {
-                                    Sfx::FailNote(Lang::T(Lang::Str::QuestItemLocked));
-                                // Phase 6: merchant category / stolen restriction
-                                } else if (!LootBarter::MerchantBuys(it.obj, it.stolen)) {
-                                    Sfx::FailNote(Lang::T(Lang::Str::MerchantWontBuy));
-                                } else if (it.count > 1) {
-                                    LootBarter::OpenSlider(it.obj, it.count,
-                                        LootBarter::XferDir::kSell, it.key, val, it.uid, it.sig,
-                                        false, it.fav);
-                                } else {
-                                    const int total = (val > 0
-                                        ? LootBarter::SellPrice(it.obj, val) : 0);
-                                    if (total > 0 && LootBarter::MerchantGold() < total) {
-                                        Sfx::FailNote(Lang::T(Lang::Str::MerchantNoGold));
-                                    } else if (it.fav) {
-                                        LootBarter::AskSellConfirm(it.obj, 1, total, val, it.key,
-                                                                   it.uid, it.sig,
-                                                                   it.fav, it.xlIdx);   // favorite: confirm
-                                    } else {
-                                        LootBarter::RequestSell(it.obj, 1, total, val,
-                                                                it.uid, it.sig, it.fav,
-                                                                it.xlIdx, it.key);
-                                        NotePendingRemove(it.obj, it.key, 1, it.xlIdx);
-                                        // ★1.4: one unit leaves the display
-                                        // now; the layout is already drained.
-                                        g_clickRemove = ClickRemove{
-                                            it.key, it.obj->GetFormID(),
-                                            1, /*drained=*/true };
-                                    }
-                                }
+                                g_clickAction =
+                                    ClickAction{ it.key, ClickRoute::kSell };
                             }
                         } else if (auto* bk = it.obj->As<RE::TESObjectBOOK>();
                                    bk && !bk->TeachesSpell()) {
@@ -3404,7 +3366,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             g_clickAction =
                                 ClickAction{ it.key, ClickRoute::kUse };
                         }
-                        if (!g_clickRemove && !g_clickAction) RequestRebuild();
+                        if (!g_clickAction) RequestRebuild();
                     }
                 }
             }
@@ -7536,8 +7498,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_pendingEquip.clear();
         // same lifetime: a click queued in the frame the menu closed has no
         // board to act on any more
-        g_clickRemove.reset();
-        g_clickAction.reset();   // ONE PATH: same lifetime
+        g_clickAction.reset();
     }
 
     void ReleaseAppliedPendingEquip(std::uint32_t a_form)
@@ -11962,6 +11923,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // Bags/pouch sell only this way (right-click = manage). The
             // bag's contents reflow to main only here, on the real sale.
             const RE::FormID fid = a_held.obj->GetFormID();
+            int queued = 0;   // O-3: how many units actually left
             if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
                 const int val = TileValue(a_held.obj,                          // GI43
                     HeldUidOf(a_held.key, a_held.uid), a_held.sig);
@@ -11978,10 +11940,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     const int total = val > 0 ? LootBarter::SellPrice(a_held.obj, val) : 0;
                     if (total > 0 && LootBarter::MerchantGold() < total) {
                         Sfx::FailNote(Lang::T(Lang::Str::MerchantNoGold));
+                    } else if (a_held.fav) {
+                        // ★ONE PATH / O-3: THE STAR ASKS FIRST, on both roads.
+                        // This popup lived only on the right-click, so dragging
+                        // a favourite onto the merchant sold it outright while
+                        // clicking the same item asked -- one item, two answers,
+                        // and the silent one was the dangerous half. Unifying
+                        // the paths is what made the difference visible; the
+                        // safer answer wins.
+                        LootBarter::AskSellConfirm(a_held.obj, 1, total, val, a_held.key,
+                                                   a_held.uid, a_held.sig,
+                                                   a_held.fav, a_held.xlIdx);
                     } else {
                         LootBarter::RequestSell(a_held.obj, 1, total, val, a_held.uid, a_held.sig,
                                                 a_held.fav, a_held.xlIdx, a_held.key);
                         NotePendingRemove(a_held.obj, a_held.key, 1, a_held.xlIdx);
+                        queued = 1;   // O-3: one unit really is leaving
                         if (a_held.isBag) {   // contents reflow to main on sale (E4)
                             g_openBags.erase(a_held.key);
                             for (auto& [k, le] : g_layout) {
@@ -11991,8 +11965,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     }
                 }
             }
+            // ★ONE PATH / O-3: same tail as the store's -- a synthetic carry
+            // never reached the screen, so a sale that happened takes its own
+            // unit off the display, and a sale that did not (no gold, a slider,
+            // a star waiting on its popup) leaves a board that never changed.
+            const bool                transient = a_held.transient;
+            const std::string         key = a_held.key;
+            RE::TESBoundObject* const obj = a_held.obj;
             g_held.reset();
-            RequestRebuild();
+            if (!transient) {
+                RequestRebuild();
+            } else if (queued > 0 &&
+                       !TryUseClickPartialRemove(key, obj, queued, /*drained=*/true)) {
+                RequestRebuild();
+            }
             return true;
         }
 
@@ -12015,8 +12001,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                                  a_held.fav, a_held.xlIdx);
                 }
             }
+            // ★ONE PATH / O-3: NOTHING has left yet on this road -- the plant
+            // is a ROLL, and the pending-remove is noted on the win, inside the
+            // Tick. So a synthetic carry leaves a board that has not changed,
+            // and repainting it would be a rebuild spent on nothing. (The old
+            // click paid exactly that one, every plant.)
+            const bool transient = a_held.transient;
             g_held.reset();
-            RequestRebuild();
+            if (!transient) RequestRebuild();
             return true;
         }
 
@@ -12578,23 +12570,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 switch (ca.route) {
                 case ClickRoute::kUse:   RunSyntheticRoute(WholeUse); break;
                 case ClickRoute::kStore: RunSyntheticRoute(WholeStore); break;
+                case ClickRoute::kSell:  RunSyntheticRoute(WholeSell); break;
+                case ClickRoute::kPlant: RunSyntheticRoute(WholePickStore); break;
                 }
             } else {
                 SKSE::log::info("[ONEPATH] click '{}' -- tile gone, nothing to do",
                     ca.key);
             }
         }
-        if (g_clickRemove) {
-            const ClickRemove cr = *g_clickRemove;
-            g_clickRemove.reset();
-            auto* form = RE::TESForm::LookupByID(cr.form);
-            auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
-            if (!obj || !TryUseClickPartialRemove(cr.key, obj, cr.take, cr.drained)) {
-                SKSE::log::info("[B3] use click partial declined ('{}') -- "
-                                "full rebuild", cr.key);
-                g_needRebuild.store(true, std::memory_order_release);
-            }
-        }
+
         if (g_needRebuild.exchange(false, std::memory_order_acq_rel)) {
             Rebuild();
         }
