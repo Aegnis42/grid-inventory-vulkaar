@@ -11267,7 +11267,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // happens to put a newly visible unit: the front gap.
                     // A plain partner carry does own a cell, and moves it.
                     const bool fromBundle = LootBarter::IsBundleCarry();
-                    LootBarter::ConsumeBundleCarry(a_held.obj, a_held.count);
+                    // ★staying in the container: the branch goes to the cell
+                    // this drop is creating, not to the player
+                    LootBarter::ConsumeBundleCarry(a_held.obj, a_held.count,
+                                                   /*toPlayer=*/false);
                     if (fromBundle) {
                         LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
                                                     sd.col, sd.row, a_held.rot,

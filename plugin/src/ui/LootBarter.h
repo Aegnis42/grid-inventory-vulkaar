@@ -172,7 +172,12 @@ namespace FUI::LootBarter
     // units from the bundle -- which is what lets their engine item's cell
     // surface. Returns false when no bundle carry is active / form differs.
     [[nodiscard]] bool IsBundleCarry();
-    bool ConsumeBundleCarry(RE::TESBoundObject* a_obj, int a_count);
+    // a_toPlayer: is this carry ending up in the PLAYER's hands, or back on
+    // the shelf? A bag leaves with its branch either way, but the branch has
+    // two different destinations -- home with it, or onto the shelf cell it is
+    // becoming -- and only the caller knows which.
+    bool ConsumeBundleCarry(RE::TESBoundObject* a_obj, int a_count,
+                            bool a_toPlayer = true);
     // ★(1.3.2a) the shelf POUCH banks like the player's: right-click opens
     // its withdraw window (DrawShelfPouch, top level), and gold dropped on
     // its cell deposits. DepositOnHoveredPouch banks into the hovered pouch

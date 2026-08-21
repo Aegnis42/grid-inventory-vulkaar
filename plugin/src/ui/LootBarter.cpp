@@ -2082,7 +2082,7 @@ namespace
 
     bool IsBundleCarry() { return g_bundleCarry.active; }
 
-    bool ConsumeBundleCarry(RE::TESBoundObject* a_obj, int a_count)
+    bool ConsumeBundleCarry(RE::TESBoundObject* a_obj, int a_count, bool a_toPlayer)
     {
         if (!g_bundleCarry.active || !a_obj ||
             a_obj->GetFormID() != g_bundleCarry.form) {
@@ -2113,7 +2113,25 @@ namespace
             const int idx = static_cast<int>(it - bundle.begin());
             if (Grid::ResolveDef(a_obj).bag != 0) {
                 auto branch = CutBranch(bundle, idx);
-                SendBranchHome(a_obj, std::move(branch));
+                if (a_toPlayer) {
+                    SendBranchHome(a_obj, std::move(branch));
+                } else if (!branch.empty()) {
+                    // ★★ONTO THE SHELF, NOT HOME. Dropping a nested bag onto the
+                    // container's own grid makes it a shelf CELL, and its branch
+                    // belongs to that cell -- not in the player's pack. This
+                    // sent it home regardless, so putting bag B out on the shelf
+                    // posted its contents to the inventory instead (reported).
+                    //
+                    // The queue the store side already uses is the right place:
+                    // the cell being born claims it (PlaceStoredCell ->
+                    // TakePendingBundle), which is the same door a bag stored
+                    // from the player's board comes through.
+                    if (auto* pref = Partner()) {
+                        g_pendingBundles.push_back({ pref->GetFormID(),
+                                                     a_obj->GetFormID(),
+                                                     std::move(branch) });
+                    }
+                }
             } else {
                 it->count -= a_count;
                 if (it->count <= 0) {
@@ -2194,12 +2212,18 @@ namespace
         // THIS window is excluded entirely -- its cells free up while it
         // rides the cursor, and a cancel simply re-seats it (colliding
         // anchors refit, nothing is lost).
+        // ★★THE CARRIED ENTRY IS THE ONE THAT MATCHES, and it says which level
+        // it is on itself. Comparing a REMEMBERED index against this window's
+        // root was one index too many: the carry stores the root it was lifted
+        // from, and any renumbering between the lift and the next frame made
+        // the two disagree -- so the entry drew in its old square while also
+        // riding the cursor. Two copies of one thing.
         const bool carryOut = g_bundleCarry.active &&
                               g_bundleCarry.spot == a_w.spot &&
-                              g_bundleCarry.root == root &&
                               g_bundleCarry.cont == p->GetFormID();
         auto isCarried = [&](const BundleItem& a_b) {
-            return carryOut && a_b.form == g_bundleCarry.form &&
+            return carryOut && a_b.parentIdx == root &&
+                   a_b.form == g_bundleCarry.form &&
                    a_b.col == g_bundleCarry.col && a_b.row == g_bundleCarry.row;
         };
         auto dimsOf = [&](const BundleItem& a_b, RE::TESBoundObject* a_obj,
@@ -2678,10 +2702,14 @@ namespace
                 // the SLOT this move would retire); a player item answers to
                 // HeldShelfStorable. Typed bags keep their filter -- a move
                 // from ANOTHER bag answers to it too.
+                // ★★A BAG MAY GO IN, which it could not while a bundle was one
+                // flat list -- "no nesting" was a statement about the data, not
+                // a rule anyone chose. The data is a tree now. What stays
+                // refused is a coin or a pouch: its gold lives on the SLOT this
+                // move would retire, so there is nowhere for the amount to go.
                 const bool intakeOk =
                     bundleRe ||
-                    (fromPartner ? !(Grid::ResolveDef(hobj).bag != 0 ||
-                                     GoldCoins::IsCoinForm(hfid))
+                    (fromPartner ? !GoldCoins::IsCoinForm(hfid)
                                  : Grid::HeldShelfStorable() != nullptr);
                 const bool filterOk = sameBag || bagDef.accept.empty() ||
                                       BagFilter::FilterOf(hobj) == bagDef.accept;
@@ -2760,6 +2788,25 @@ namespace
                                         // three fields leaves every index in
                                         // the vector exactly where it was.
                                         if (&srcB == &bundle) {
+                                            // ★★AND ANY WINDOW ON IT FOLLOWS.
+                                            // A window is named by the way down
+                                            // to it, and a step is the bag's
+                                            // SQUARE -- so moving a bag renamed
+                                            // it and its own window stopped
+                                            // resolving and closed. Moving
+                                            // something is not closing it.
+                                            for (auto& w : g_shelfBags) {
+                                                if (w.spot != a_w.spot) continue;
+                                                for (auto& st : w.path) {
+                                                    if (st.form == bit->form &&
+                                                        st.col == bit->col &&
+                                                        st.row == bit->row) {
+                                                        st.col = dropC;
+                                                        st.row = dropR;
+                                                        break;
+                                                    }
+                                                }
+                                            }
                                             bit->col = dropC;
                                             bit->row = dropR;
                                             bit->rot = hrot & 3;
@@ -2832,7 +2879,7 @@ namespace
                             // C4: the occupant rides the cursor in its place
                             g_bundleCarry = { true, p->GetFormID(), a_w.spot,
                                               lifted.form, lifted.sig,
-                                              lifted.col, lifted.row };
+                                              lifted.col, lifted.row, root };
                             g_carryGlow = lifted.glow;   // (1.3.2)
                             g_carryStolen = lifted.stolen;
                             Grid::BeginPartnerCarry(liftedObj, lifted.count, 0,
