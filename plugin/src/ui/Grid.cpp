@@ -9434,6 +9434,31 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             NotePendingRemove(book, {}, 1, -1);
             RequestRebuild();
         }
+        // ★★★AND THE READ IS ANNOUNCED. Measured, vanilla against ours, the
+        // same two books in one session:
+        //
+        //   vanilla  [BOOKSREAD] 'Shadowmarks'           skillBook=0
+        //            [BOOKSREAD] 'Elder Scroll (Dragon)' skillBook=0
+        //   ours     nothing at all
+        //
+        // This is the engine's own "a book was read" event, and everything
+        // that reacts to reading listens on it. Ours never fired, so nothing
+        // hung off it ever ran -- which is the whole of the Elder Scroll
+        // report: vanilla closes the inventory, goes first person and unfurls
+        // the scroll, and every bit of that is a script answering an event we
+        // were not sending.
+        //
+        // The record could not have told us: the scroll's shape is an ordinary
+        // book's, down to the flag byte. It was never about what the thing is.
+        if (auto* src = RE::BooksRead::GetEventSource()) {
+            RE::BooksRead::Event e{};
+            e.book = book;
+            e.skillBook = book->TeachesSkill();
+            src->SendEvent(&e);
+            SKSE::log::info("[BOOK] read announced (skillBook={})",
+                            e.skillBook ? 1 : 0);
+        }
+
         // the page is owed only if the engine raises none of its own
         g_pageOwed = req;
         // ⓔⓖ PROBE. Two reports say our reading is not the game's reading: the

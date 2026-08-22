@@ -108,6 +108,47 @@ namespace
         }
     };
 
+    // ★★★ⓔ LISTEN: BooksRead, the engine's own "a book was read".
+    //
+    // The scroll's record is the same shape as an ordinary book's, so vanilla
+    // is not branching on the record -- a script reacts to it being read. This
+    // is the event source that reading raises, and Papyrus's OnRead very
+    // likely rides it. Listening settles the question in one round: if it
+    // fires in the vanilla inventory and never through ours, then our reading
+    // is simply never announced, and announcing it is the fix.
+    class BooksReadWatch : public RE::BSTEventSink<RE::BooksRead::Event>
+    {
+    public:
+        static BooksReadWatch* GetSingleton()
+        {
+            static BooksReadWatch s;
+            return &s;
+        }
+
+        RE::BSEventNotifyControl ProcessEvent(const RE::BooksRead::Event* a_event,
+            RE::BSTEventSource<RE::BooksRead::Event>*) override
+        {
+            if (a_event) {
+                logger::info("[BOOKSREAD] '{}' ({:08X}) skillBook={}",
+                    a_event->book && a_event->book->GetName()
+                        ? a_event->book->GetName() : "?",
+                    a_event->book ? a_event->book->GetFormID() : 0,
+                    a_event->skillBook ? 1 : 0);
+            }
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        static void Install()
+        {
+            if (auto* src = RE::BooksRead::GetEventSource()) {
+                src->AddEventSink(GetSingleton());
+                logger::info("[BOOKSREAD] listening");
+            } else {
+                logger::warn("[BOOKSREAD] no event source");
+            }
+        }
+    };
+
     // ★★★ⓔⓖ WATCH: TESObjectBOOK::Activate, the engine's own door.
     //
     // Two doors we could name came back empty. OpenBookMenu APPLIES the book
@@ -2233,6 +2274,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     UpdateHook::Install();
     PickUpHook::Install();                                        // capacity: world pickup
     BookActivateWatch::Install();                                 // ⓔⓖ observation
+    BooksReadWatch::Install();                                    // ⓔ observation
     HarvestHook<RE::TESFlora>::Install(RE::VTABLE_TESFlora[0]);   // capacity: plants
     HarvestHook<RE::TESObjectTREE>::Install(RE::VTABLE_TESObjectTREE[0]);   // capacity: trees
     SackActivateHook::Install();   // G2: coin sack -> gold, silent to loot HUDs
