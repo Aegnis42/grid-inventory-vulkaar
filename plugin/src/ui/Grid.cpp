@@ -9353,7 +9353,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         auto* xl = ExtraForPool(LiveEntryOf(player, a_book), a_uid, a_sig);
         RE::BSString desc;
         a_book->GetDescription(desc, a_book);
-        RE::BookMenu::OpenBookMenu(desc, xl, nullptr, a_book,
+        // ★★★THE READER IS A REFERENCE, and ours was null.
+        //
+        // Measured: the Elder Scroll's record is the same shape as an ordinary
+        // book's -- same flags, same type, same everything but the length of
+        // its text -- so the engine is not branching on the record. What
+        // differs is that a script reacts to the scroll being read, and
+        // Papyrus delivers that event through a REFERENCE. With none named,
+        // there is nobody for the read to belong to and no script hears it.
+        //
+        // The player is the reference doing the reading. Passing them costs
+        // nothing for an ordinary book (the page is unchanged) and is the only
+        // argument we were leaving empty.
+        RE::BookMenu::OpenBookMenu(desc, xl, player, a_book,
                                    RE::NiPoint3{}, RE::NiMatrix3{}, 1.0f, true);
     }
 
