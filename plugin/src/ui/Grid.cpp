@@ -9324,6 +9324,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // tick later: a menu is raised through the UI queue, never
         // synchronously, so "did the engine open one?" cannot be asked now.
         std::optional<PendingRead> g_pageOwed;
+        int g_pageOwedWait = 0;
         // ⓔⓖ PROBE: the book the page was raised for, so the CLOSE can report
         // whether anything actually registered as a read.
         RE::FormID g_probeBook = 0;
@@ -9361,6 +9362,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     {
         // ---- the page we may still owe, one tick after the engine read ----
         if (g_pageOwed) {
+            // ★the engine's Use is QUEUED, so give it frames to land before
+            // deciding it raised nothing
+            if (--g_pageOwedWait > 0) return;
             const auto req = *g_pageOwed;
             g_pageOwed.reset();
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -9399,15 +9403,32 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             ui && ui->IsMenuOpen(RE::BookMenu::MENU_NAME)) {
             return;
         }
-        // ★★★READ IT THROUGH THE ENGINE'S OWN DOOR. Everything a player and
-        // their mods expect of reading -- a skill gate, a quest fragment, the
-        // tome being spent -- hangs off this, and we were never opening it.
+        // ★★★HAND IT TO THE ENGINE THE WAY "USE" DOES.
+        //
+        // Measured, in order, and each step ruled one thing out:
+        //   OpenBookMenu   applies the book and keeps it -- neither read nor equip
+        //   Read()         works for tomes only; 0 and no change on anything else
+        //   Activate       never fires, not even in the vanilla inventory
+        //   BooksRead      fires from our path now, and the scroll still does
+        //                  nothing -- so it is a tally, not the trigger
+        //
+        // What vanilla offers on a book is USE, and Use here already means
+        // ActorEquipManager::EquipObject. For a book that is how Skyrim reads
+        // one, and for the Elder Scroll it is the unfurl that was reported:
+        // the inventory closes, the view goes first person, the scroll opens.
         auto* spell = book->GetSpell();
         const bool hadSpell = spell ? player->HasSpell(spell) : false;
         int heldBefore = 0;
         if (auto* e0 = LiveEntryOf(player, book)) heldBefore = e0->countDelta;
 
         const bool took = book->Read(player);
+        // Read settles a TOME (it teaches; the spending is below). Anything it
+        // refuses is handed to the engine's Use instead, which is the door the
+        // rest of the world's books go through.
+        if (!took) {
+            Equip::UseItem(book, req.uid, -1, req.sig, {}, 1);
+            SKSE::log::info("[BOOK] handed to the engine's Use");
+        }
 
         const bool hasSpell = spell ? player->HasSpell(spell) : false;
         int heldAfter = 0;
@@ -9434,33 +9455,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             NotePendingRemove(book, {}, 1, -1);
             RequestRebuild();
         }
-        // ★★★AND THE READ IS ANNOUNCED. Measured, vanilla against ours, the
-        // same two books in one session:
-        //
-        //   vanilla  [BOOKSREAD] 'Shadowmarks'           skillBook=0
-        //            [BOOKSREAD] 'Elder Scroll (Dragon)' skillBook=0
-        //   ours     nothing at all
-        //
-        // This is the engine's own "a book was read" event, and everything
-        // that reacts to reading listens on it. Ours never fired, so nothing
-        // hung off it ever ran -- which is the whole of the Elder Scroll
-        // report: vanilla closes the inventory, goes first person and unfurls
-        // the scroll, and every bit of that is a script answering an event we
-        // were not sending.
-        //
-        // The record could not have told us: the scroll's shape is an ordinary
-        // book's, down to the flag byte. It was never about what the thing is.
-        if (auto* src = RE::BooksRead::GetEventSource()) {
-            RE::BooksRead::Event e{};
-            e.book = book;
-            e.skillBook = book->TeachesSkill();
-            src->SendEvent(&e);
-            SKSE::log::info("[BOOK] read announced (skillBook={})",
-                            e.skillBook ? 1 : 0);
-        }
-
         // the page is owed only if the engine raises none of its own
         g_pageOwed = req;
+        g_pageOwedWait = 8;
         // ⓔⓖ PROBE. Two reports say our reading is not the game's reading: the
         // Dawnguard Elder Scroll does nothing at all, and a spell tome skips
         // the "you lack the skill" gate. Both would follow if OpenBookMenu
