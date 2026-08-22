@@ -9,6 +9,7 @@ This repository holds the **plugin source**. The mod itself (esp, meshes,
 sounds, icon pak) is distributed on Nexus Mods.
 
 - Feature overview: [README_EN.md](README_EN.md) · [README_KO.md](README_KO.md)
+- For mod authors — costume state signal: [API_COSTUME.md](API_COSTUME.md) · [API_COSTUME_KO.md](API_COSTUME_KO.md)
 
 ## Building
 
