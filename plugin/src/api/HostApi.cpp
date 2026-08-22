@@ -185,6 +185,17 @@ namespace FUI::HostApi
             GridInvAPI::kMsgCostumeState, &st, sizeof(st), nullptr);
         logger::info("[API] costume state broadcast: tab {} ({} piece(s))",
                      a_tab, st.pieceCount);
+        // ★★NAME THEM. The count alone cannot be checked against anything --
+        // "7 piece(s)" is true whether we sent the right seven or seven of
+        // something else, and the FormIDs are the part a listener acts on.
+        // Asked directly ("is it really sending which items?"), and the honest
+        // answer was that the log could not show it.
+        for (const auto& k : s_pieces) {
+            const auto* form = RE::TESForm::LookupByID(k.base);
+            const char* name = form ? form->GetName() : nullptr;
+            logger::info("[API]   {:08X} '{}'", k.base,
+                         (name && *name) ? name : "?");
+        }
     }
 
     std::uint32_t ProviderCount()

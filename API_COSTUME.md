@@ -1,54 +1,91 @@
-# Costume state signal
+# Costume signal (for mod authors)
 
-Grid Inventory announces the player's **costume** — an appearance-only outfit —
-to any SKSE plugin that cares to listen. This document is the contract.
+Grid Inventory tells other SKSE plugins when the player **puts on, switches or
+takes off a costume** — and which pieces it is made of.
 
-A costume makes the body show the set held by one loadout tab while the stats
-keep coming from whatever is really equipped. **Equipment cannot answer "what
-does the player look like"**, because a costume changes the look without
-changing what is worn. That is what this signal is for.
-
-Added in **1.4.1**. Requires no ABI change and no registration: a plugin that
-does not listen for it simply never sees it.
+Added in **1.4.1**.
 
 ---
 
-## 1. The message
+## What goes out
 
-```cpp
-namespace GridInvAPI
-{
-    inline constexpr std::uint32_t kABIVersion     = 1;
-    inline constexpr std::uint32_t kMsgCostumeState = 0x47494353;  // 'GICS'
+Put a costume on, and this is what is sent:
 
-    struct ItemKey                 // 16 bytes, unchanged since ABI v1
-    {
-        std::uint32_t owner;       // container REFR FormID; the player is 0x14
-        std::uint32_t base;        // TESBoundObject FormID
-        std::uint16_t uid;         // ExtraUniqueID, 0 = plain stack unit
-        std::uint16_t _pad0;
-        std::uint32_t _pad1;
-    };
-
-    struct CostumeState            // 24 bytes
-    {
-        std::uint32_t  structSize;   // = sizeof(CostumeState)
-        std::uint32_t  abiVersion;   // = kABIVersion
-        std::int32_t   tab;          // loadout tab supplying the look; -1 = none
-        std::uint32_t  pieceCount;   // 0 when tab is -1
-        const ItemKey* pieces;       // BORROWED — see §4
-    };
-}
+```
+tab 2 · 7 pieces
+    0001B39F  Steel Armor
+    0001B3A2  Steel Helmet
+    0001B3A4  Steel Gauntlets
+    0001B3A6  Steel Boots
+    000261C0  Amulet of Talos
+    ...
 ```
 
-The full header is [`plugin/src/api/GridInventoryAPI.h`](plugin/src/api/GridInventoryAPI.h).
-Copy it into your project; it has no dependencies beyond `<cstdint>`.
+Take it off:
+
+```
+no tab · 0 pieces
+```
+
+So there are two things in every message:
+
+| | |
+|---|---|
+| **The tab** | The loadout tab supplying the look. `-1` means no costume |
+| **The pieces** | FormIDs of the armour that actually reaches the body |
+
+A FormID is all you need — `TESForm::LookupByID` gives you the name, model and
+slots from there.
+
+The same thing is written to `GridInventory.log`, so you can confirm what left
+our side:
+
+```
+[API] costume state broadcast: tab 2 (7 piece(s))
+[API]   0001B39F 'Steel Armor'
+[API]   0001B3A2 'Steel Helmet'
+```
 
 ---
 
-## 2. Listening
+## Weapons are not included
+
+A loadout tab holds weapons, a shield and a quiver too, but **a costume never
+touches those** — they are held, not worn.
+
+So the list contains only what is genuinely visible on the body. A tab with 15
+items may well send 14 pieces.
+
+---
+
+## When it arrives
+
+Not only when the player presses something — on **every** change of state:
+
+| Situation | What you get |
+|---|---|
+| Costume put on | tab number + pieces |
+| Switched to another tab | new tab + new pieces |
+| Costume taken off | tab `-1`, 0 pieces |
+| The tab a costume used was deleted | tab `-1`, 0 pieces |
+| A save with a costume is loaded | tab number + pieces |
+| Reverting to a new game | tab `-1`, 0 pieces |
+| First moment of a session | whatever the state is |
+
+**Loading a save re-sends even when the tab is unchanged.** Whatever you were
+holding did not survive the load either, so telling you "nothing changed"
+would leave your side wrong.
+
+Every message means the state **actually moved**. The same state never arrives
+twice in a row, so you can simply apply each one.
+
+---
+
+## Receiving it
 
 ```cpp
+#include "GridInventoryAPI.h"   // plugin/src/api/GridInventoryAPI.h
+
 static void OnApiMessage(SKSE::MessagingInterface::Message* a_msg)
 {
     if (!a_msg || a_msg->type != GridInvAPI::kMsgCostumeState) return;
@@ -58,12 +95,12 @@ static void OnApiMessage(SKSE::MessagingInterface::Message* a_msg)
     if (st->abiVersion != GridInvAPI::kABIVersion) return;
 
     if (st->tab < 0) {
-        // No costume: the player looks like whatever is equipped.
+        // no costume
         return;
     }
     for (std::uint32_t i = 0; i < st->pieceCount; ++i) {
-        const RE::FormID armor = st->pieces[i].base;
-        // ...copy what you need before returning (see §4)
+        const RE::FormID id = st->pieces[i].base;
+        // copy anything you need right here (see ★ below)
     }
 }
 
@@ -75,116 +112,105 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 }
 ```
 
-### The `nullptr` matters
+### ★ Do not leave out the `nullptr`
 
-`RegisterListener(cb)` is shorthand for `RegisterListener("SKSE", cb)`, which
-filters out everything a *plugin* sends — including this. **Register with an
-explicit `nullptr` sender** to receive it.
-
-If you also handle SKSE lifecycle messages, register **two** listeners:
+This one detail makes the difference between working and receiving nothing at
+all. It is the most common mistake.
 
 ```cpp
-RegisterListener(OnLifecycle);            // == RegisterListener("SKSE", ..)
-RegisterListener(nullptr, OnApiMessage);  // no filter
+RegisterListener(cb);            // ✗ receives nothing
+RegisterListener(nullptr, cb);   // ✓ works
 ```
 
-One unfiltered listener cannot serve both, because **message type numbers live
-in the sender's namespace**. Another plugin's "type 1" is indistinguishable
-from `kPostLoad`, so lifecycle handling would fire at random.
+The one-argument form is shorthand for `RegisterListener("SKSE", cb)`, and
+that **filters out everything sent by a plugin**. Our log still says the
+signal went out while nothing happens on your side, which makes this
+particularly hard to diagnose.
+
+If you also handle SKSE's own messages (game loaded, and so on), register
+**two** listeners. One cannot serve both: message numbers belong to whoever
+sent them, so another plugin's "type 1" is indistinguishable from SKSE's.
 
 ---
 
-## 3. When it arrives
+## Three rules
 
-The signal is sent on **every transition**, not only the ones a player causes:
+### 1. The piece list is borrowed
 
-| Cause | What you get |
-|---|---|
-| Player checks a loadout tab as costume | `tab = N`, the pieces |
-| Player switches to a different tab | `tab = M`, the new pieces |
-| Player unchecks / clears the costume | `tab = -1`, `pieceCount = 0` |
-| The tab a costume pointed at is deleted | `tab = -1`, `pieceCount = 0` |
-| A save that had a costume is loaded | `tab = N`, the pieces |
-| Reverting to a new game | `tab = -1`, `pieceCount = 0` |
-| First tick of a session | the current state, whatever it is |
+`pieces` points into Grid Inventory's own array. It is **invalid once your
+callback returns**, and the next signal overwrites it. Copy what you need
+while you are still inside the callback.
 
-**A load always re-announces, even when the tab is unchanged.** Your own state
-did not survive the load either, so "nothing changed" would be the wrong thing
-to tell you.
+### 2. It arrives on the game thread
 
-Each message means the state **actually moved**. You will not receive the same
-state twice in a row within one session, so you may treat every message as a
-change without comparing.
+Sent from a per-frame tick. Do not hold it up, and do not call anything that
+opens or closes a menu.
+
+### 3. The tab number is a position, not a name
+
+It is where the loadout tab currently sits. Delete a tab below it and the
+number shifts. You get a fresh signal when that happens, so the value is never
+stale — but do not save it and trust it later.
 
 ---
 
-## 4. Rules
+## What this is not
 
-### `pieces` is borrowed
-
-It points into Grid Inventory's own buffer and is valid **for the duration of
-your callback and no longer**. Copy what you need before returning. The buffer
-is reused on the next broadcast.
-
-### It arrives on the game thread
-
-Sent from Grid Inventory's per-frame tick. Do not block, and do not call
-anything that can open or close a menu.
-
-### Armour only
-
-A loadout tab holds a full kit — weapons, shield and quiver included. **A
-costume never touches those**, because they are held rather than worn. Only
-pieces that actually reach the body are listed, so every entry is something
-the player is now *seen* in.
-
-This means `pieceCount` is normally smaller than the tab's item count.
-
-### A piece is a form, not a stack unit
-
-`base` is the armour's `FormID`; `owner` is the player (`0x14`); `uid` is
-always `0`. A costume names **what to look like**, not one particular copy in
-the inventory. Do not expect `uid` to identify an instance here.
-
-### `tab` is an index, not an identity
-
-It is the loadout tab's current position. Tabs renumber when one below them is
-deleted — and when that happens you receive a fresh message, so the value is
-never stale. Do not persist it across sessions.
+- **Not an equipment signal.** What the player wears has not changed. Read
+  equipment for stats; a costume only changes the look.
+- **Not something you can answer.** The signal only goes outward. There is no
+  way to block or alter a costume through it.
+- **Not per-frame.** It fires on change. If you need the current state at an
+  arbitrary moment, keep the last one you received.
 
 ---
 
-## 5. Versioning
+## The structs
 
-Check `abiVersion` and **ignore the message if it does not match**. Grid
-Inventory refuses any provider whose version disagrees, and you should be as
-strict in the other direction.
+```cpp
+namespace GridInvAPI
+{
+    inline constexpr std::uint32_t kABIVersion      = 1;
+    inline constexpr std::uint32_t kMsgCostumeState = 0x47494353;  // 'GICS'
 
-`structSize` is there so the struct can grow. If a later version appends
-fields, `dataLen` and `structSize` grow with it while everything above stays
-where it is — comparing `dataLen >= sizeof(CostumeState)` against **your**
-copy of the header keeps working.
+    struct ItemKey                 // 16 bytes
+    {
+        std::uint32_t owner;       // the player = 0x14
+        std::uint32_t base;        // ★the armour's FormID -- this is "which item"
+        std::uint16_t uid;         // always 0 for a costume
+        std::uint16_t _pad0;
+        std::uint32_t _pad1;
+    };
+
+    struct CostumeState            // 24 bytes
+    {
+        std::uint32_t  structSize;   // = sizeof(CostumeState)
+        std::uint32_t  abiVersion;   // = kABIVersion; ignore the message if it differs
+        std::int32_t   tab;          // tab number, -1 = no costume
+        std::uint32_t  pieceCount;   // 0 when there is no costume
+        const ItemKey* pieces;       // the array (borrowed)
+    };
+}
+```
+
+`uid` is always `0` here. A costume names **what to look like**, not one
+particular copy in the inventory.
+
+`structSize` exists so fields can be appended later without breaking existing
+code — nothing above ever moves, so comparing sizes against your own copy of
+the header keeps working.
 
 ---
 
-## 6. What this is not
+## When it does not work
 
-- **Not an equipment signal.** What the player wears has not changed; only how
-  they look. Read equipment for stats.
-- **Not a request channel.** Nothing you return is read. This message runs
-  outward only; there is no way to veto or alter a costume through it.
-- **Not per-frame.** It fires on transitions. If you need the current state at
-  an arbitrary moment, cache the last message.
-
----
-
-## 7. Reporting problems
-
-Open an issue with the `GridInventory.log` line that should have appeared:
+Check `GridInventory.log` for this line first:
 
 ```
 [API] costume state broadcast: tab 2 (7 piece(s))
 ```
 
-If that line is present and your listener did not fire, the cause is almost
-always the filtered-listener trap in §2.
+**Line present, callback never fires** → almost certainly the `nullptr` above.
+
+**No line at all** → either the costume state did not actually change, or the
+problem is on our side. Send the log along with the report.
