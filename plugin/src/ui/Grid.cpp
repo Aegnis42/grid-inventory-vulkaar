@@ -9353,8 +9353,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         auto* xl = ExtraForPool(LiveEntryOf(player, book), req.uid, req.sig);
         RE::BSString desc;
         book->GetDescription(desc, book);
+        // ⓔⓖ PROBE 2. The state that actually moves, sampled either side of
+        // the one call -- IsRead() is a BASE-FORM flag and read back 1 on
+        // every book tested, so it can tell us nothing.
+        auto* spell = book->GetSpell();
+        const bool hadSpell = (spell && player) ? player->HasSpell(spell) : false;
+        int heldBefore = 0;
+        if (auto* e0 = LiveEntryOf(player, book)) heldBefore = e0->countDelta;
+
         RE::BookMenu::OpenBookMenu(desc, xl, nullptr, book,
                                    RE::NiPoint3{}, RE::NiMatrix3{}, 1.0f, true);
+
+        const bool hasSpell = (spell && player) ? player->HasSpell(spell) : false;
+        int heldAfter = 0;
+        if (auto* e1 = LiveEntryOf(player, book)) heldAfter = e1->countDelta;
+        if (spell) {
+            SKSE::log::info("[BOOK] ...across OpenBookMenu: spell {} -> {}, held {} -> {}",
+                hadSpell ? 1 : 0, hasSpell ? 1 : 0, heldBefore, heldAfter);
+        } else {
+            SKSE::log::info("[BOOK] ...across OpenBookMenu: held {} -> {}",
+                heldBefore, heldAfter);
+        }
         // ⓔⓖ PROBE. Two reports say our reading is not the game's reading: the
         // Dawnguard Elder Scroll does nothing at all, and a spell tome skips
         // the "you lack the skill" gate. Both would follow if OpenBookMenu
@@ -9390,9 +9409,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (player) {
             if (auto* e = LiveEntryOf(player, book)) held = e->countDelta;
         }
-        SKSE::log::info("[BOOK] closed '{}' ({:08X}) read={} held={}",
+        auto* spell = book->GetSpell();
+        SKSE::log::info("[BOOK] closed '{}' ({:08X}) read={} held={} spellKnown={}",
             book->GetName() ? book->GetName() : "?", form,
-            book->IsRead() ? 1 : 0, held);
+            book->IsRead() ? 1 : 0, held,
+            (spell && player) ? (player->HasSpell(spell) ? 1 : 0) : -1);
     }
 
     std::string DefKeyOf(RE::TESForm* a_form)
