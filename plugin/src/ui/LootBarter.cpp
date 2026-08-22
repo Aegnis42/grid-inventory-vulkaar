@@ -242,7 +242,8 @@ namespace FUI::LootBarter
             if (a_baseTotal <= 0) return 0.0f;
             float useMult = 0.55f, offset = 0.0f;   // vanilla Speech AVSK defaults
             if (auto* list = RE::ActorValueList::GetSingleton()) {
-                if (auto* info = list->GetActorValue(RE::ActorValue::kSpeech);
+                if (auto* info = RE::ActorValueList::GetActorValueInfo(
+                        RE::ActorValue::kSpeech);
                     info && info->skill) {
                     useMult = info->skill->useMult;
                     offset = info->skill->offsetMult;

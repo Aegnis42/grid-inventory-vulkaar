@@ -8835,7 +8835,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const float t = player->GetActorValueModifier(
                     RE::ACTOR_VALUE_MODIFIER::kTemporary, RE::ActorValue::kCarryWeight);
                 if (std::fabs(t) > 2000.0f) {
-                    avo->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary,
+                    avo->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary,
                         RE::ActorValue::kCarryWeight, -t);
                     SKSE::log::info("[GRID] cleared legacy CW modifier ({:+.0f})", t);
                 }
@@ -8859,7 +8859,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                           : invW + kBuffer;
         const float delta = target - cw;
         if (std::fabs(delta) > 0.5f) {
-            avo->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary,
+            avo->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary,
                 RE::ActorValue::kCarryWeight, delta);
         }
     }
@@ -9385,8 +9385,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         auto* xl = ExtraForPool(LiveEntryOf(player, a_book), a_uid, a_sig);
         RE::BSString desc;
         a_book->GetDescription(desc, a_book);
-        RE::BookMenu::OpenBookMenu(desc, xl, nullptr, a_book,
-                                   RE::NiPoint3{}, RE::NiMatrix3{}, 1.0f, true);
+        // ★★The NG line declares BookMenu::OpenBookMenu and never defines it,
+        // so the call is made here through the same address-library id
+        // CommonLib itself used. Same function, same arguments -- only the
+        // hop through the library is ours now.
+        using open_t = void(const RE::BSString&, const RE::ExtraDataList*,
+                            RE::TESObjectREFR*, RE::TESObjectBOOK*,
+                            const RE::NiPoint3&, const RE::NiMatrix3&, float, bool);
+        static REL::Relocation<open_t> openBook{ RELOCATION_ID(50122, 51053) };
+        openBook(desc, xl, nullptr, a_book,
+                 RE::NiPoint3{}, RE::NiMatrix3{}, 1.0f, true);
     }
 
     void ProcessBookRead()
@@ -10146,7 +10154,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 arm = static_cast<int>(std::lroundf(pc->GetArmorValue(&e)));
             }
             if (wantCmp && pc && player) {
-                const auto hmask = static_cast<std::uint32_t>(armo->GetSlotMask());
+                const auto hmask = static_cast<std::uint32_t>(armo->GetSlotMask().get());
                 auto winv = player->GetInventory();
                 for (auto& [o2, d2] : winv) {
                     auto* e2 = d2.second.get();
@@ -10157,7 +10165,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (Costume::IsAnchor(o2)) continue;
                     auto* wa = o2->As<RE::TESObjectARMO>();
                     if (!wa) continue;
-                    if ((static_cast<std::uint32_t>(wa->GetSlotMask()) & hmask) == 0) continue;
+                    if ((static_cast<std::uint32_t>(wa->GetSlotMask().get()) & hmask) == 0) continue;
                     RE::InventoryEntryData ee(wa, 1);
                     cmpObj = wa;
                     cmpVal = static_cast<int>(std::lroundf(pc->GetArmorValue(&ee)));
@@ -10744,8 +10752,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const int i = static_cast<int>(a_lv) - 1;
             if (i < 0 || i > 4) return 0;
             if (auto* gs = RE::GameSettingCollection::GetSingleton()) {
-                if (auto* s = gs->GetSetting(kNames[i]); s && s->GetSInt() > 0) {
-                    return s->GetSInt();
+                if (auto* s = gs->GetSetting(kNames[i]); s && s->GetInteger() > 0) {
+                    return s->GetInteger();
                 }
             }
             return kFallback[i];
@@ -10989,7 +10997,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             xc->charge = next;
         }
         if (g_rechargeUI.worn) {
-            p->AsActorValueOwner()->RestoreActorValue(
+            p->AsActorValueOwner()->ModActorValue(
                 RE::ACTOR_VALUE_MODIFIER::kDamage,
                 g_rechargeUI.hand == 2 ? RE::ActorValue::kLeftItemCharge
                                        : RE::ActorValue::kRightItemCharge,

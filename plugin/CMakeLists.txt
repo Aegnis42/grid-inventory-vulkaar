@@ -22,12 +22,38 @@ find_package(imgui CONFIG REQUIRED)
 # CommonLibSSE-NG expects RAPIDCSV_INCLUDE_DIRS (header-only rapidcsv from vcpkg).
 find_path(RAPIDCSV_INCLUDE_DIRS "rapidcsv.h")
 
-# --- CommonLibSSE-NG from source (main branch) ---
+# --- CommonLibSSE-NG from source -----------------------------------------
+# ★★★MOVED OFF CharmedBaryon FOR SKYRIM 1.7.99.
+#
+# That tree decides the runtime from the MINOR version with a switch:
+#
+#     case 4: VR    case 6: AE    default: SE
+#
+# so 1.7.99 is classified SE. Two things follow and both are fatal: the
+# address library is looked for under the SE name (version-1-7-99-0.bin
+# instead of versionlib-...), which is the "failed to open address library
+# file" every 1.7.99 player is reporting, and every RELOCATION_ID(se, ae)
+# picks the SE id -- the wrong address for every call we make.
+#
+# Upstream main has not shipped a fix (checked: origin/main is the same commit
+# we already had, latest tag v3.7.0). alandtse's NG line has:
+#
+#     if (v[1] == 4) VR; else if (v[1] >= 6) AE; else SE;
+#
+# and it reads the address library's FORMAT from the file rather than assuming
+# it from the runtime -- which is what Address Library v12 needs.
+#
+# ★Pinned to a COMMIT, not to `ng`. A moving branch would put code we have not
+# looked at into the next build of a plugin whose failure mode is a crash on
+# someone else's machine. Bump it deliberately.
+#
+# Same project name and target (CommonLibSSE::CommonLibSSE), same licence
+# (GPL-3.0). It brings one new dependency: directxtk.
 include(FetchContent)
 FetchContent_Declare(
     CommonLibSSE
-    GIT_REPOSITORY https://github.com/CharmedBaryon/CommonLibSSE-NG.git
-    GIT_TAG main
+    GIT_REPOSITORY https://github.com/alandtse/CommonLibVR.git
+    GIT_TAG 0e167dd4c3981d586a53953e2c1a608e2c4ccedf   # ng @ 2026-08-21
 )
 FetchContent_MakeAvailable(CommonLibSSE)
 

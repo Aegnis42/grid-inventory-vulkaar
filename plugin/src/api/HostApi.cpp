@@ -1,3 +1,4 @@
+#include "ui/Sfx.h"
 #include "PCH.h"
 
 #include "api/HostApi.h"
@@ -78,7 +79,7 @@ namespace FUI::HostApi
 
         void Notify(const char* a_text)
         {
-            RE::DebugNotification(a_text);
+            FUI::Sfx::Notify(a_text);
         }
 
         void OnRegisterProvider(SKSE::MessagingInterface::Message* a_msg)

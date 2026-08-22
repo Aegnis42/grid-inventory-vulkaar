@@ -1378,12 +1378,12 @@ namespace FUI::Wheeler
                         // after us, and if it is the hotkey the wheel can never
                         // open again.
                         if (n >= 16) continue;
-                        saved[n++] = { b, b->value };
-                        b->value = 0.0f;
+                        saved[n++] = { b, b->Value() };
+                        b->GetRuntimeData().value = 0.0f;
                     }
                 }
                 const auto r = _ProcessEvent(a_this, a_event, a_src);
-                for (int i = 0; i < n; ++i) saved[i].b->value = saved[i].v;
+                for (int i = 0; i < n; ++i) saved[i].b->GetRuntimeData().value = saved[i].v;
                 for (int i = 0; i < nt; ++i) {
                     savedT[i].t->xValue = savedT[i].x;
                     savedT[i].t->yValue = savedT[i].y;
@@ -1473,12 +1473,12 @@ namespace FUI::Wheeler
                             if (!InCombo(pad, b->GetIDCode())) continue;
                         }
                         if (n >= 16) continue;   // see InputLock: no blank without a restore
-                        saved[n++] = { b, b->value };
-                        b->value = 0.0f;
+                        saved[n++] = { b, b->Value() };
+                        b->GetRuntimeData().value = 0.0f;
                     }
                 }
                 const auto r = _ProcessEvent(a_this, a_event, a_src);
-                for (int i = 0; i < n; ++i) saved[i].b->value = saved[i].v;
+                for (int i = 0; i < n; ++i) saved[i].b->GetRuntimeData().value = saved[i].v;
                 return r;
             }
             static void Install()
@@ -1636,7 +1636,7 @@ namespace FUI::Wheeler
             // Runs as a draw callback, just before the full-screen image.
             static void CaptureCB(const ImDrawList*, const ImDrawCmd*)
             {
-                auto* data = RE::BSGraphics::Renderer::GetRendererData();
+                auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
                 auto* dev = data ? reinterpret_cast<ID3D11Device*>(data->forwarder) : nullptr;
                 auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
                 if (!dev || !ctx) { failed = true; return; }
@@ -1752,7 +1752,7 @@ namespace FUI::Wheeler
 
             static void RestoreCB(const ImDrawList*, const ImDrawCmd*)
             {
-                auto* data = RE::BSGraphics::Renderer::GetRendererData();
+                auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
                 auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
                 if (ctx) ctx->PSSetShader(prevPs, nullptr, 0);
                 if (prevPs) { prevPs->Release(); prevPs = nullptr; }
@@ -3117,7 +3117,7 @@ namespace FUI::Wheeler
             // release a key it was already holding instead of holding it
             // forever. heldDownSecs is deliberately left alone -- it is the
             // thing that tells those two cases apart.
-            b->value = 0.0f;
+            b->GetRuntimeData().value = 0.0f;
             return;
         }
         if (auto* m = a_event->AsMouseMoveEvent()) {

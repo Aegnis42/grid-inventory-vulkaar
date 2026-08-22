@@ -32,7 +32,7 @@ namespace FUI::Sfx
         auto* am = RE::BSAudioManager::GetSingleton();
         if (!descr || !am) return;
         RE::BSSoundHandle handle;
-        if (am->BuildSoundDataFromDescriptor(handle, descr) && handle.IsValid()) {
+        if (am->GetSoundHandle(handle, descr) && handle.IsValid()) {
             // WORLD (3D) descriptors like the sack open/close are silent
             // without a position — attach to the player; UI (2D) sounds
             // ignore the follow target, so this is safe for both kinds
@@ -69,7 +69,7 @@ namespace FUI::Sfx
         auto* am = RE::BSAudioManager::GetSingleton();
         if (!descr || !am) return false;
         RE::BSSoundHandle handle;
-        if (!am->BuildSoundDataFromDescriptor(handle, descr) || !handle.IsValid()) {
+        if (!am->GetSoundHandle(handle, descr) || !handle.IsValid()) {
             return false;
         }
         if (auto* player = RE::PlayerCharacter::GetSingleton()) {
@@ -95,11 +95,25 @@ namespace FUI::Sfx
     inline void Focus()     { if (!PlayCustom(kSndFocus))     PlayUI("UIMenuFocus"); }
     // rejection blip (quest-locked / not enough gold / inventory full ...)
     inline void Fail()      { if (!PlayCustom(kSndFail))      PlayUI("UIActivateFail"); }
-    // corner notification + the rejection blip in one call — replaces the
-    // old RE::DebugNotification(msg, "UIActivateFail") pattern
+    // ★★THE CORNER NOTIFICATION, made here rather than called for.
+    //
+    // CommonLibSSE-NG used to expose this as RE::DebugNotification. The NG
+    // line we build against for Skyrim 1.7.99 dropped it, so the same engine
+    // function is reached the same way it always was -- through the address
+    // library, by the id CommonLib itself used -- rather than by hand-rolling
+    // a HUD message and hoping it lands the same.
+    inline void Notify(const char* a_msg, const char* a_sound = nullptr)
+    {
+        if (!a_msg || !*a_msg) return;
+        using func_t = void(const char*, const char*, bool);
+        static REL::Relocation<func_t> func{ RELOCATION_ID(52050, 52933) };
+        func(a_msg, a_sound, true);
+    }
+
+    // corner notification + the rejection blip in one call
     inline void FailNote(const char* a_msg)
     {
-        RE::DebugNotification(a_msg);
+        Notify(a_msg);
         Fail();
     }
 

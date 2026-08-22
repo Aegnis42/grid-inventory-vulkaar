@@ -421,7 +421,7 @@ namespace FUI
                                   std::uint32_t a_fmt, bool a_makeGlow,
                                   IconCache::Icon& a_out)
     {
-        auto* data = RE::BSGraphics::Renderer::GetRendererData();
+        auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         if (!data) return false;
         auto* device = reinterpret_cast<ID3D11Device*>(data->forwarder);
         if (!device) return false;
@@ -2277,7 +2277,7 @@ namespace FUI
         if (w <= 0 || h <= 0) { giveUp("empty crop"); return; }
 
         auto* srcTex = pv->GetTexture();
-        auto* data = RE::BSGraphics::Renderer::GetRendererData();
+        auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         if (!srcTex || !data) { giveUp("no texture"); return; }
         auto* device  = reinterpret_cast<ID3D11Device*>(data->forwarder);
         auto* context = reinterpret_cast<ID3D11DeviceContext*>(data->context);

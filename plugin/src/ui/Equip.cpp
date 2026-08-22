@@ -1007,7 +1007,7 @@ namespace FUI::Equip
                 auto* spell = book->GetSpell();
                 if (spell && !player->HasSpell(spell)) {
                     player->AddSpell(spell);
-                    RE::DebugNotification(spell->GetName(), "UISpellLearned");
+                    FUI::Sfx::Notify(spell->GetName(), "UISpellLearned");
                     // GI36: name the copy being consumed instead of letting the
                     // engine pick, and let rule 58 take its star with it.
                     auto* bxl = Grid::ExtraForInstance(
@@ -1079,7 +1079,7 @@ namespace FUI::Equip
             // the player is left wearing NEITHER: "slot conflict: unequip"
             // followed by "refused: kNoFirstRing" in the log.
             if (auto* armo = obj->As<RE::TESObjectARMO>(); armo && act.slotId != "ringL") {
-                const auto mask = static_cast<std::uint32_t>(armo->GetSlotMask());
+                const auto mask = static_cast<std::uint32_t>(armo->GetSlotMask().get());
                 auto worn = player->GetInventory(
                     [](RE::TESBoundObject& o) { return o.Is(RE::FormType::Armor); });
                 for (auto& [o2, d2] : worn) {
@@ -1107,7 +1107,7 @@ namespace FUI::Equip
                     // system raises and drops them, and the next Apply already
                     // removes any that stopped being needed.
                     if (Costume::IsAnchor(o2)) continue;
-                    if (static_cast<std::uint32_t>(a2->GetSlotMask()) & mask) {
+                    if (static_cast<std::uint32_t>(a2->GetSlotMask().get()) & mask) {
                         em->UnequipObject(player, o2,
                             Grid::WornExtraOf(Grid::LiveEntryOf(player, o2)), 1, nullptr,
                             false, false, false, true);
@@ -1735,7 +1735,7 @@ namespace FUI::Equip
 
         const auto* biped = a_obj->As<RE::BGSBipedObjectForm>();
         if (!biped) return {};
-        const auto mask = static_cast<std::uint32_t>(biped->GetSlotMask());
+        const auto mask = static_cast<std::uint32_t>(biped->GetSlotMask().get());
         if (mask == 0) return {};
 
         // bit N is slot 30+N (BGSBipedObjectForm::BipedObjectSlot)

@@ -509,7 +509,7 @@ namespace FUI::GoldCoins
         float days = 2.0f;
         if (auto* gs = RE::GameSettingCollection::GetSingleton()) {
             if (auto* set = gs->GetSetting("iDaysToRespawnVendor")) {
-                days = static_cast<float>(set->GetSInt());
+                days = static_cast<float>(set->GetInteger());
             }
         }
         // ★Read the setting, never hardcode 2: merchant overhauls routinely

@@ -64,7 +64,7 @@ namespace FUI::UIRoot
 
         void FillLightBlendCB(const ImDrawList*, const ImDrawCmd*)
         {
-            auto* data = RE::BSGraphics::Renderer::GetRendererData();
+            auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
             auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
             if (ctx && g_fillBlend) {
                 const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -84,7 +84,7 @@ namespace FUI::UIRoot
 
         void MipSamplerCB(const ImDrawList*, const ImDrawCmd*)
         {
-            auto* data = RE::BSGraphics::Renderer::GetRendererData();
+            auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
             auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
             if (ctx && g_mipSampler) {
                 ctx->PSSetSamplers(0, 1, &g_mipSampler);
@@ -161,7 +161,7 @@ namespace FUI::UIRoot
 
         void SilhouetteOnCB(const ImDrawList*, const ImDrawCmd*)
         {
-            auto* data = RE::BSGraphics::Renderer::GetRendererData();
+            auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
             auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
             if (!ctx || !g_silPS) return;
             // ★Hand the backend's own shader back afterwards rather than
@@ -173,7 +173,7 @@ namespace FUI::UIRoot
 
         void SilhouetteOffCB(const ImDrawList*, const ImDrawCmd*)
         {
-            auto* data = RE::BSGraphics::Renderer::GetRendererData();
+            auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
             auto* ctx = data ? reinterpret_cast<ID3D11DeviceContext*>(data->context) : nullptr;
             if (ctx) ctx->PSSetShader(g_prevPS, nullptr, 0);
             if (g_prevPS) {   // PSGetShader AddRef'd it
@@ -2049,7 +2049,8 @@ namespace FUI::UIRoot
                 return p->AsActorValueOwner()->GetActorValue(RE::ActorValue::kUnarmedDamage);
             }
             using func_t = float(RE::PlayerCharacter*, RE::InventoryEntryData*);
-            static REL::Relocation<func_t> func{ RE::Offset::PlayerCharacter::GetDamage };
+            // ★RE::Offset is gone from the NG line; this is the id it held
+            static REL::Relocation<func_t> func{ RELOCATION_ID(39179, 40253) };
             return func(p, entry);
         }
 
@@ -3253,7 +3254,7 @@ namespace FUI::UIRoot
     {
         if (g_initialized.load()) return true;
 
-        auto* data = RE::BSGraphics::Renderer::GetRendererData();
+        auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         if (!data || !data->forwarder || !data->context) {
             SKSE::log::warn("[UI] TryInitD3D: renderer data unavailable");
             return false;

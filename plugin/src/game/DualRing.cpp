@@ -125,7 +125,7 @@ namespace FUI::DualRing
                      [](RE::TESBoundObject& o) { return o.IsArmor(); })) {
                 if (data.first <= 0 || !data.second || !data.second->IsWorn()) continue;
                 if (auto* a = obj->As<RE::TESObjectARMO>()) {
-                    used |= static_cast<std::uint32_t>(a->GetSlotMask());
+                    used |= static_cast<std::uint32_t>(a->GetSlotMask().get());
                     // ★★THE ADDONS TOO. A modded helmet often draws through an
                     // ArmorAddon that covers slots its ARMO mask never names
                     // (hair physics on 60 is the classic). The ARMO mask alone
@@ -135,7 +135,7 @@ namespace FUI::DualRing
                     // invisible over a bald head (user report -- the preset
                     // cycling that "healed" it was removing the second ring).
                     for (auto* arma : a->armorAddons) {
-                        if (arma) used |= static_cast<std::uint32_t>(arma->GetSlotMask());
+                        if (arma) used |= static_cast<std::uint32_t>(arma->GetSlotMask().get());
                     }
                 }
             }
@@ -478,7 +478,7 @@ namespace FUI::DualRing
         auto* ring = RingById(g_ringId);
         if (!p || !c || !ring) { g_ringId = 0; return; }
         g_lent = {};   // whatever we recorded belongs to the previous session
-        const auto mask = static_cast<std::uint32_t>(c->GetSlotMask());
+        const auto mask = static_cast<std::uint32_t>(c->GetSlotMask().get());
         Lend(c, ring, mask ? mask : (1u << 30));
         SKSE::log::info("[DUALRING] load: re-lent '{}' to the carrier", NameOf(ring));
     }

@@ -471,7 +471,7 @@ namespace FUI::Costume
                     slots += std::format("{} ", i);
                     if (donor[i] || !CoversSlot(s)) continue;
                     donor[i] = arma;
-                    donorMask[i] = static_cast<std::uint32_t>(armo->GetSlotMask());
+                    donorMask[i] = static_cast<std::uint32_t>(armo->GetSlotMask().get());
                 }
                 // ★Log BOTH masks. They disagree far more often than they look
                 // like they should, and every "the costume did nothing" bug so
@@ -479,8 +479,8 @@ namespace FUI::Costume
                 SKSE::log::info("[COSTUME]   src '{}' covers slots: {} (armo 0x{:08X}, "
                                 "addon 0x{:08X})",
                     armo->GetName(), slots.empty() ? "(none)" : slots,
-                    static_cast<std::uint32_t>(armo->GetSlotMask()),
-                    static_cast<std::uint32_t>(arma->GetSlotMask()));
+                    static_cast<std::uint32_t>(armo->GetSlotMask().get()),
+                    static_cast<std::uint32_t>(arma->GetSlotMask().get()));
             }
         }
         auto* skin = player->GetSkin();
@@ -529,7 +529,7 @@ namespace FUI::Costume
                 // must not treat it as gear occupying a slot.
                 if (ai < kAnchorCount) {
                     anc[ai].held = true;
-                    anc[ai].mask = static_cast<std::uint32_t>(a->GetSlotMask());
+                    anc[ai].mask = static_cast<std::uint32_t>(a->GetSlotMask().get());
                     if (data.second->IsWorn()) { anc[ai].worn = true; worn.push_back(a); }
                 }
                 continue;
@@ -538,7 +538,7 @@ namespace FUI::Costume
             worn.push_back(a);
             // ★wornMask answers "would an anchor displace something?", so the
             // anchors themselves must not count -- they would look like rivals.
-            wornMask |= static_cast<std::uint32_t>(a->GetSlotMask());
+            wornMask |= static_cast<std::uint32_t>(a->GetSlotMask().get());
         }
 
         // ---- anchors: fill the slots the costume wants and nothing occupies --
@@ -646,7 +646,7 @@ namespace FUI::Costume
                                       std::uint32_t a_mask) {
             if (std::none_of(edits.begin(), edits.end(),
                              [&](const MaskEdit& e) { return e.form == a_form; })) {
-                edits.push_back({ a_form, a_form->GetSlotMask() });
+                edits.push_back({ a_form, a_form->GetSlotMask().get() });
             }
             a_form->bipedModelData.bipedObjectSlots = static_cast<Slot>(a_mask);
         };
@@ -696,7 +696,7 @@ namespace FUI::Costume
                     // the skin is only here to keep a limb from vanishing.
                     // Restored with every other mask edit by RestoreAll.
                     if (want) {
-                        const auto sm = static_cast<std::uint32_t>(want->GetSlotMask());
+                        const auto sm = static_cast<std::uint32_t>(want->GetSlotMask().get());
                         if (sm & dressed) {
                             reclaim(want, sm & ~dressed);
                             SKSE::log::info("[COSTUME]     skin addon fenced: 0x{:08X} -> "
@@ -715,7 +715,7 @@ namespace FUI::Costume
                     fromCostume ? std::format("costume @{}", at)
                                 : (want ? std::format("skin @{}", at)
                                         : std::string("claim withdrawn (no skin here)")));
-                const auto full = static_cast<std::uint32_t>(armo->GetSlotMask());
+                const auto full = static_cast<std::uint32_t>(armo->GetSlotMask().get());
                 if (!want) {
                     // ★★Withdraw the claim, do not hide the node. A culled slot
                     // is still OCCUPIED, and an occupied Hair slot stops the
@@ -748,7 +748,7 @@ namespace FUI::Costume
                 // lending it to a Circlet-only crown produced nothing at all:
                 // the swap "succeeded", the log said redressed, and the head
                 // stayed empty. Widen the addon to the carrier for this call.
-                const auto armaMask = static_cast<std::uint32_t>(want->GetSlotMask());
+                const auto armaMask = static_cast<std::uint32_t>(want->GetSlotMask().get());
                 if ((armaMask & covered) == 0) {
                     reclaim(want, armaMask | covered);
                     SKSE::log::info("[COSTUME]     addon slots 0x{:08X} widened to 0x{:08X} "

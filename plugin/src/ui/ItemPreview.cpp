@@ -296,7 +296,7 @@ namespace FUI
     {
         static int s_probes = 0;
         if (s_probes >= 8) return;   // a handful of icons, then silence
-        auto* data = RE::BSGraphics::Renderer::GetRendererData();
+        auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         auto* dev = data ? reinterpret_cast<ID3D11Device*>(data->forwarder) : nullptr;
         if (!dev) return;
 
@@ -402,7 +402,9 @@ namespace FUI
     {
         if (m_initialized) return true;
 
-        auto* data = RE::BSGraphics::Renderer::GetRendererData();
+        // ★the member accessor is versioned now; the singleton is the one
+        // that still answers statically
+        auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         if (!data) return false;
         auto* device = reinterpret_cast<ID3D11Device*>(data->forwarder);
         if (!device) return false;
@@ -1103,7 +1105,7 @@ namespace FUI
             }
         }
 
-        auto* data = RE::BSGraphics::Renderer::GetRendererData();
+        auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         if (!data) return;
         auto* context = reinterpret_cast<ID3D11DeviceContext*>(data->context);
         if (!context) return;

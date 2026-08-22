@@ -54,10 +54,10 @@ namespace
     RE::TESObjectREFR* HandleToRef(RE::RefHandle a_handle)
     {
         if (a_handle == 0) return nullptr;
+        // ★the NG line exposes this as a free function; it used to be reached
+        // through RE::Offset, which no longer exists there
         RE::NiPointer<RE::TESObjectREFR> ptr;
-        using func_t = bool(RE::RefHandle&, RE::NiPointer<RE::TESObjectREFR>&);
-        static REL::Relocation<func_t> func{ RE::Offset::LookupReferenceByHandle };
-        func(a_handle, ptr);
+        RE::LookupReferenceByHandle(a_handle, ptr);
         return ptr.get();
     }
 
@@ -1581,12 +1581,15 @@ namespace
     bool HandleLockpickAutoReopen(const RE::MenuOpenCloseEvent& a_event)
     {
         if (a_event.menuName != RE::LockpickingMenu::MENU_NAME) return false;
+        // ★GetTargetReference hands back a smart pointer on the NG line
         if (a_event.opening) {
-            auto* target = RE::LockpickingMenu::GetTargetReference();
+            const auto tp = RE::LockpickingMenu::GetTargetReference();
+            auto* target = tp.get();
             g_pickTarget = target ? target->CreateRefHandle() : RE::ObjectRefHandle{};
             return false;   // observation only
         }
-        auto* target = RE::LockpickingMenu::GetTargetReference();
+        const auto tp = RE::LockpickingMenu::GetTargetReference();
+        auto* target = tp.get();
         if (!target) target = g_pickTarget.get().get();
         g_pickTarget = {};
         if (target && !target->IsLocked() && target->GetBaseObject() &&
