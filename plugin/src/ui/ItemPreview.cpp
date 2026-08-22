@@ -317,7 +317,13 @@ namespace FUI
 
         D3D11_MAPPED_SUBRESOURCE map = {};
         if (SUCCEEDED(a_ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
+            // ★a0/a255/aMid answer the one question that decides the fix for
+            // the purple-alpha report: did the engine leave us usable alpha?
+            //   aMid > 0            -> real alpha survives; key it instead
+            //   a0 high, aMid 0     -> alpha is binary; still better than chroma
+            //   a255 = 100%         -> the engine forces opaque; needs 2 passes
             int total = 0, pure = 0, keyed = 0;
+            int a0 = 0, a255 = 0, aMid = 0;
             auto at = [&](int x, int y) {
                 const auto* p = static_cast<const std::uint8_t*>(map.pData) +
                                 static_cast<size_t>(y) * map.RowPitch + static_cast<size_t>(x) * 4;
@@ -331,19 +337,46 @@ namespace FUI
                     // order the surface uses -- both ends are 255, middle is 0.
                     if (c[0] == 255 && c[1] == 0 && c[2] == 255) ++pure;
                     if (c[0] > 200 && c[2] > 200 && c[1] < 60) ++keyed;
+                    if (c[3] == 0)        ++a0;
+                    else if (c[3] == 255) ++a255;
+                    else                  ++aMid;
                 }
             }
             const auto tl = at(1, 1);
             const auto br = at((std::max)(0, a_w - 2), (std::max)(0, a_h - 2));
             const auto mid = at(a_w / 2, a_h / 2);
+            // ★★SAMPLE THE BLEND ITSELF. RGB alone cannot say how a
+            // half-transparent pixel got its colour: un-blending the magenta
+            // needs the alpha that produced it, and the first attempt at the
+            // arithmetic came out negative -- which means an assumption is
+            // wrong, not that it is impossible. These are the first few pixels
+            // whose alpha is neither 0 nor 255, printed whole.
+            {
+                std::string s;
+                int shown = 0;
+                for (int y = 0; y < a_h && shown < 6; y += 7) {
+                    for (int x = 0; x < a_w && shown < 6; x += 7) {
+                        const auto c = at(x, y);
+                        if (c[3] == 0 || c[3] == 255) continue;
+                        s += std::format(" {:02X}{:02X}{:02X}/a{:02X}",
+                                         c[0], c[1], c[2], c[3]);
+                        ++shown;
+                    }
+                }
+                if (shown) SKSE::log::info("[ICONDIAG]   blended:{}", s);
+            }
             a_ctx->Unmap(staging, 0);
             ++s_probes;
             SKSE::log::info("[ICONDIAG] {} rect=({},{}) {}x{} pure={:.1f}% keyed={:.1f}% "
+                            "| alpha 0={:.1f}% mid={:.1f}% 255={:.1f}% "
                             "| corner {:02X}{:02X}{:02X}/{:02X}{:02X}{:02X} "
                             "mid {:02X}{:02X}{:02X}",
                 a_when, a_box.left, a_box.top, a_w, a_h,
                 total ? 100.0 * pure / total : 0.0,
                 total ? 100.0 * keyed / total : 0.0,
+                total ? 100.0 * a0 / total : 0.0,
+                total ? 100.0 * aMid / total : 0.0,
+                total ? 100.0 * a255 / total : 0.0,
                 tl[0], tl[1], tl[2], br[0], br[1], br[2], mid[0], mid[1], mid[2]);
         }
         staging->Release();

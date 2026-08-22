@@ -32,11 +32,30 @@ namespace FUI
         // Fallback model scale when Request() is passed a negative scale
         static constexpr float kDefaultModelScale = 0.85f;
 
-        // Background painted behind the model before capture: chroma magenta,
-        // keyed to transparency by IconCache so tall/wide icons can overflow
-        // their footprint without covering neighbouring cells. Symmetric in
-        // R/B, so BGRA-vs-RGBA channel order never matters.
-        static constexpr float kCaptureBg[4] = { 1.0f, 0.0f, 1.0f, 1.0f };
+        // Background painted behind the model before capture, so tall/wide
+        // icons can overflow their footprint without covering neighbouring
+        // cells.
+        //
+        // ★★★THE ALPHA IS THE POINT; the magenta is only a fallback tint.
+        //
+        // This used to be alpha 1.0, and IconCache found transparency by
+        // looking for magenta. That works until an item has an alpha texture:
+        // a half-transparent pixel comes back blended with the backdrop, so it
+        // is neither the model's colour nor pure magenta, and it was kept as
+        // an opaque purple sheet (reported -- a bridal veil).
+        //
+        // Clearing alpha to 0 instead let us ask whether the engine writes
+        // real alpha. It does:
+        //
+        //   after-clear   alpha 0=100.0%  mid=0.0%  255=0.0%
+        //   after-model   alpha 0=94.1%   mid=5.3%  255=0.5%
+        //
+        // So IconCache reads transparency rather than guessing at it. The RGB
+        // stays magenta because a blended pixel still carries the backdrop's
+        // cast, and min(R,B)-G is exactly how much of it to remove -- being
+        // symmetric in R/B, that arithmetic never has to care whether the
+        // surface is BGRA or RGBA.
+        static constexpr float kCaptureBg[4] = { 1.0f, 0.0f, 1.0f, 0.0f };
 
         static ItemPreview* GetSingleton();
 

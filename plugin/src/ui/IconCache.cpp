@@ -29,19 +29,50 @@ namespace FUI
     // unlike the fail list which is never retried
     static constexpr const char* kSlowPath = "Data/SKSE/Plugins/GridInventory_iconslow.txt";
     static constexpr const char* kPakTmp  = "Data/SKSE/Plugins/GridInventory_icons.pak.tmp";
-    // 'FIC5': v5 = rotation-verified captures — v4 files may hold the engine's
-    // default pose from the landing-frame race (older files re-capture)
-    static constexpr std::uint32_t kIconMagic = 0x35434946;
-    // 'FIC6': v6 stored the ROOT's extra rotation — measured identity for
-    // every item (the hidden rotation lives BELOW the root, on engine-touched
-    // child nodes), so v6 rotation data is meaningless. Entries stay readable
-    // as pixels; their rotation field is ignored.
-    static constexpr std::uint32_t kIconMagicRot6 = 0x36434946;
-    // 'FIC7': records the FIRST GEOMETRY's world.rotate at capture (9 f32
+    // ★★★v8/v9 ARE WRITTEN; v5/v6/v7 ARE STILL READ.
+    //
+    // Everything before v8 was chroma-keyed, and those pixels are wrong
+    // wherever an item had an alpha texture: the magenta backdrop is blended
+    // INTO them and was then declared opaque. A veil stored as a solid purple
+    // sheet cannot be repaired by reading it differently.
+    //
+    // But refusing them outright would throw away every icon pak a player has
+    // built or been given, to fix items most paks do not contain. So the old
+    // magics stay readable and only new captures are written as v8/v9. A
+    // player who wants the fix applied to icons they already have deletes
+    // GridInventory_icons.pak and lets them re-capture.
+    //
+    // 'FIC8': no rotation field.
+    static constexpr std::uint32_t kIconMagic = 0x38434946;
+    // 'FIC9': records the FIRST GEOMETRY's world.rotate at capture (9 f32
     // row-major) — the transform the renderer actually draws with, wherever
     // the engine hid its extra rotation. The offline tool combines it with
     // the capture def + its own nif chain for an EXACT preview orientation.
-    static constexpr std::uint32_t kIconMagicRot = 0x37434946;
+    static constexpr std::uint32_t kIconMagicRot = 0x39434946;
+
+    // ---- read-only: the chroma-keyed generations -------------------------
+    // 'FIC5' no rotation · 'FIC6' meaningless rotation (the root's, measured
+    // identity for every item) · 'FIC7' the geometry's rotation, same field
+    // layout as FIC9.
+    static constexpr std::uint32_t kIconMagicV5 = 0x35434946;
+    static constexpr std::uint32_t kIconMagicV6 = 0x36434946;
+    static constexpr std::uint32_t kIconMagicV7 = 0x37434946;
+
+    [[nodiscard]] inline bool IsKnownIconMagic(std::uint32_t a_m)
+    {
+        return a_m == kIconMagic || a_m == kIconMagicRot ||
+               a_m == kIconMagicV5 || a_m == kIconMagicV6 || a_m == kIconMagicV7;
+    }
+    // Which records carry the 9-float rotation block, whatever it means.
+    [[nodiscard]] inline bool IconMagicHasRotField(std::uint32_t a_m)
+    {
+        return a_m == kIconMagicRot || a_m == kIconMagicV6 || a_m == kIconMagicV7;
+    }
+    // ...and which of those rotations is the one worth using.
+    [[nodiscard]] inline bool IconMagicRotUsable(std::uint32_t a_m)
+    {
+        return a_m == kIconMagicRot || a_m == kIconMagicV7;
+    }
 
     // ---- single-pak disk cache ----
     // One append-only file instead of thousands of per-item .fic files:
@@ -188,16 +219,15 @@ namespace FUI
                         std::uint64_t key = 0;
                         float rot[9] = {};
                         if (!in.read(reinterpret_cast<char*>(&magic), 4) ||
-                            (magic != kIconMagic && magic != kIconMagicRot &&
-                                magic != kIconMagicRot6) ||
+                            !IsKnownIconMagic(magic) ||
                             !in.read(reinterpret_cast<char*>(&key), 8) ||
                             !in.read(reinterpret_cast<char*>(&w), 4) ||
                             !in.read(reinterpret_cast<char*>(&h), 4) ||
                             !in.read(reinterpret_cast<char*>(&fmt), 4)) {
                             break;   // clean EOF or truncated tail — stop
                         }
-                        const bool rotField = magic != kIconMagic;
-                        const bool hasRot = magic == kIconMagicRot;   // v7 only
+                        const bool rotField = IconMagicHasRotField(magic);
+                        const bool hasRot = IconMagicRotUsable(magic);
                         if (rotField &&
                             !in.read(reinterpret_cast<char*>(rot), 36)) {
                             break;
@@ -1328,8 +1358,7 @@ namespace FUI
         // append garbage the scanner then trips over
         std::uint32_t magic = 0;
         if (!in.read(reinterpret_cast<char*>(&magic), 4) ||
-            (magic != kIconMagic && magic != kIconMagicRot &&
-             magic != kIconMagicRot6)) {
+            !IsKnownIconMagic(magic)) {
             SKSE::log::error("[ICONS] preset pak rejected (bad magic)");
             return false;
         }
@@ -2370,13 +2399,17 @@ namespace FUI
                         std::memcpy(dst, row, static_cast<size_t>(w) * 4);
                     }
                     for (int x = 0; x < w; ++x) {
-                        // content = anything that is not chroma magenta
-                        // (symmetric in R/B, so BGRA vs RGBA never matters)
+                        // ★★★CONTENT IS ALPHA, NOT COLOUR. The background is
+                        // cleared to alpha 0 and the engine writes real alpha
+                        // where it draws (measured: after-clear 0=100%, and
+                        // after-model 0=94.1% mid=5.3% on a lace veil). A
+                        // colour test could not see a half-transparent pixel
+                        // at all -- it reads as magenta because it IS mostly
+                        // magenta -- so a veil was trimmed away as background.
                         // ★Read from dst, not the raw row: on a 10-bit surface
-                        // those are different numbers, and the magenta the key
-                        // looks for only exists after the unpack.
-                        const bool bg = dst[x * 4 + 0] > 200 && dst[x * 4 + 2] > 200 &&
-                                        dst[x * 4 + 1] < 60;
+                        // those are different numbers, and alpha only means
+                        // this after the unpack.
+                        const bool bg = dst[x * 4 + 3] == 0;
                         if (!bg) {
                             ++nonBg;
                             minX = (std::min)(minX, x);
@@ -2458,53 +2491,58 @@ namespace FUI
             trimH = (std::min)(h - 1, maxY + 2) - trimY + 1;
         }
 
-        // Trim + chroma key into the final sprite buffer. Keyed pixels get
-        // RGB zeroed so bilinear sampling can't bleed magenta at draw time.
+        // ★★★THE ALPHA THE ENGINE GAVE US, NOT A COLOUR GUESS.
+        //
+        // This used to be a chroma key: paint magenta behind the model, then
+        // call every pure-magenta pixel transparent. It cannot work on an item
+        // with an alpha texture. A half-transparent pixel comes back as model
+        // BLENDED with magenta -- it is neither the model's colour nor pure
+        // magenta -- so the key kept it, marked it opaque, and a bridal veil
+        // arrived as a solid purple sheet (reported, [COCO] Deliciously Bride).
+        // The old defringe could not save it either: that only touched pixels
+        // ADJACENT to transparency, deliberately, so interior purples like
+        // potions and enchant glows would survive. A veil is interior.
+        //
+        // Measured instead of argued. Clearing the background to alpha 0 and
+        // reading the rect back:
+        //
+        //   after-clear   alpha 0=100.0%  mid=0.0%  255=0.0%
+        //   after-model   alpha 0=94.1%   mid=5.3%  255=0.5%
+        //
+        // The engine writes REAL alpha. So transparency is simply read, and
+        // the three cases are exact rather than inferred:
+        //
+        //   a == 0     background          -> clear (RGB zeroed so bilinear
+        //                                     sampling cannot bleed magenta)
+        //   a == 255   opaque model pixel  -> ITS OWN COLOUR, untouched. This
+        //                                     is what keeps a purple potion
+        //                                     purple.
+        //   otherwise  blended with the background. Sampled pairs:
+        //                 940B92/a38   8D0F8B/a40   FF65F5/a28
+        //              every one is R≈B≫G, which is the magenta cast, and
+        //              min(R,B)-G is exactly how much of it there is.
+        //              940B92 -> spill 135 -> (13,11,11): grey lace, correct.
+        //
+        // Defringe is gone with the key. Its whole job was guessing at edges
+        // what alpha now states outright, and running both would darken and
+        // fade the same pixel twice.
         std::vector<std::uint8_t> sprite(static_cast<size_t>(trimW) * trimH * 4);
         for (int y = 0; y < trimH; ++y) {
             const auto* src = pixels.data() + (static_cast<size_t>(trimY + y) * w + trimX) * 4;
             auto* dst = sprite.data() + static_cast<size_t>(y) * trimW * 4;
             std::memcpy(dst, src, static_cast<size_t>(trimW) * 4);
             for (int x = 0; x < trimW; ++x) {
-                const bool key = dst[x * 4 + 0] > 200 && dst[x * 4 + 2] > 200 &&
-                                 dst[x * 4 + 1] < 60;
-                if (key) {
-                    dst[x * 4 + 0] = 0;
-                    dst[x * 4 + 1] = 0;
-                    dst[x * 4 + 2] = 0;
-                    dst[x * 4 + 3] = 0;
-                } else {
-                    dst[x * 4 + 3] = 255;
-                }
-            }
-        }
-
-        // Defringe: anti-aliased EDGE pixels are model+magenta blends that
-        // survive the strict key and show as a purple halo. Only for pixels
-        // touching transparency (interior purples — potions, enchant glows —
-        // stay untouched): strip the magenta cast (min(R,B)-G) and fade alpha
-        // by the spill amount.
-        {
-            std::vector<std::uint8_t> mask(static_cast<size_t>(trimW) * trimH);
-            for (int i = 0; i < trimW * trimH; ++i) mask[i] = sprite[i * 4 + 3];
-            auto alphaAt = [&](int x, int y) -> std::uint8_t {
-                if (x < 0 || y < 0 || x >= trimW || y >= trimH) return 0;
-                return mask[static_cast<size_t>(y) * trimW + x];
-            };
-            for (int y = 0; y < trimH; ++y) {
-                for (int x = 0; x < trimW; ++x) {
-                    auto* px = sprite.data() + (static_cast<size_t>(y) * trimW + x) * 4;
-                    if (px[3] == 0) continue;
-                    const bool edge =
-                        alphaAt(x - 1, y) == 0 || alphaAt(x + 1, y) == 0 ||
-                        alphaAt(x, y - 1) == 0 || alphaAt(x, y + 1) == 0;
-                    if (!edge) continue;
-                    const int spill = (std::min)(static_cast<int>(px[0]),
-                                          static_cast<int>(px[2])) - px[1];
-                    if (spill <= 0) continue;
-                    px[0] = static_cast<std::uint8_t>(px[0] - spill);
-                    px[2] = static_cast<std::uint8_t>(px[2] - spill);
-                    px[3] = static_cast<std::uint8_t>((std::max)(0, 255 - spill * 2));
+                auto* px = dst + x * 4;
+                const int a = px[3];
+                if (a == 0) {
+                    px[0] = px[1] = px[2] = 0;
+                } else if (a < 255) {
+                    const int spill =
+                        (std::min)(static_cast<int>(px[0]), static_cast<int>(px[2])) - px[1];
+                    if (spill > 0) {
+                        px[0] = static_cast<std::uint8_t>((std::max)(0, px[0] - spill));
+                        px[2] = static_cast<std::uint8_t>((std::max)(0, px[2] - spill));
+                    }
                 }
             }
         }
