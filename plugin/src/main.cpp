@@ -108,89 +108,6 @@ namespace
         }
     };
 
-    // ★★★ⓔ LISTEN: BooksRead, the engine's own "a book was read".
-    //
-    // The scroll's record is the same shape as an ordinary book's, so vanilla
-    // is not branching on the record -- a script reacts to it being read. This
-    // is the event source that reading raises, and Papyrus's OnRead very
-    // likely rides it. Listening settles the question in one round: if it
-    // fires in the vanilla inventory and never through ours, then our reading
-    // is simply never announced, and announcing it is the fix.
-    class BooksReadWatch : public RE::BSTEventSink<RE::BooksRead::Event>
-    {
-    public:
-        static BooksReadWatch* GetSingleton()
-        {
-            static BooksReadWatch s;
-            return &s;
-        }
-
-        RE::BSEventNotifyControl ProcessEvent(const RE::BooksRead::Event* a_event,
-            RE::BSTEventSource<RE::BooksRead::Event>*) override
-        {
-            if (a_event) {
-                logger::info("[BOOKSREAD] '{}' ({:08X}) skillBook={}",
-                    a_event->book && a_event->book->GetName()
-                        ? a_event->book->GetName() : "?",
-                    a_event->book ? a_event->book->GetFormID() : 0,
-                    a_event->skillBook ? 1 : 0);
-            }
-            return RE::BSEventNotifyControl::kContinue;
-        }
-
-        static void Install()
-        {
-            if (auto* src = RE::BooksRead::GetEventSource()) {
-                src->AddEventSink(GetSingleton());
-                logger::info("[BOOKSREAD] listening");
-            } else {
-                logger::warn("[BOOKSREAD] no event source");
-            }
-        }
-    };
-
-    // ★★★ⓔⓖ WATCH: TESObjectBOOK::Activate, the engine's own door.
-    //
-    // Two doors we could name came back empty. OpenBookMenu APPLIES the book
-    // and leaves it in the pack (measured: spell 0 -> 1, held 2 -> 2), and
-    // TESObjectBOOK::Read returns 0 and moves nothing at all. So the reading a
-    // player gets in the vanilla menu goes through something else, and rather
-    // than guess a third time this listens to the one entry point that is
-    // virtual and therefore listenable.
-    //
-    // Observation only -- the call is passed straight through. What it writes
-    // down is the SHAPE of the vanilla call (which refs, which counts) so ours
-    // can be made the same.
-    struct BookActivateWatch
-    {
-        static bool thunk(RE::TESObjectBOOK* a_this, RE::TESObjectREFR* a_target,
-                          RE::TESObjectREFR* a_activator, std::uint8_t a_arg3,
-                          RE::TESBoundObject* a_object, std::int32_t a_count)
-        {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            auto* spell = a_this ? a_this->GetSpell() : nullptr;
-            const bool had = (spell && player) ? player->HasSpell(spell) : false;
-            const bool ok = func(a_this, a_target, a_activator, a_arg3, a_object, a_count);
-            const bool has = (spell && player) ? player->HasSpell(spell) : false;
-            logger::info("[BOOKWATCH] Activate('{}') target={} activator={} arg3={} "
-                         "obj={} count={} -> {}; spell {} -> {}",
-                a_this && a_this->GetName() ? a_this->GetName() : "?",
-                a_target ? "ref" : "null",
-                a_activator == player ? "player" : (a_activator ? "ref" : "null"),
-                static_cast<int>(a_arg3),
-                a_object ? "obj" : "null", a_count, ok ? 1 : 0,
-                had ? 1 : 0, has ? 1 : 0);
-            return ok;
-        }
-        static inline REL::Relocation<decltype(thunk)> func;
-
-        static void Install()
-        {
-            REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_TESObjectBOOK[0] };
-            func = vtbl.write_vfunc(0x37, thunk);
-        }
-    };
-
     // ---- Capacity system (Mabinogi rule): no free cells -> no pickup ----
     // PlayerCharacter::PickUpObject vtable hook (index 0xCC): the manual
     // world-pickup path. Scripted/quest AddItem is deliberately NOT blocked
@@ -1839,12 +1756,6 @@ namespace
                 }
                 // one handler per menu concern; true = event fully handled
                 HandleLockpickAutoReopen(*a_event);   // observation only
-                // ⓔⓖ PROBE: the Book Menu closing is where "was it read?"
-                // becomes answerable -- observation only, no branch taken.
-                if (!a_event->opening &&
-                    a_event->menuName == RE::BookMenu::MENU_NAME) {
-                    FUI::Grid::ProbeBookClosed();
-                }
                 HandleMessageBoxAside(*a_event) ||
                     HandleTextInputHotkeyBlock(*a_event) ||
                     HandleFavoritesMenuIntercept(*a_event) ||
@@ -2273,8 +2184,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     // no trampoline: every hook here is a vtable swap (write_vfunc)
     UpdateHook::Install();
     PickUpHook::Install();                                        // capacity: world pickup
-    BookActivateWatch::Install();                                 // ⓔⓖ observation
-    BooksReadWatch::Install();                                    // ⓔ observation
     HarvestHook<RE::TESFlora>::Install(RE::VTABLE_TESFlora[0]);   // capacity: plants
     HarvestHook<RE::TESObjectTREE>::Install(RE::VTABLE_TESObjectTREE[0]);   // capacity: trees
     SackActivateHook::Install();   // G2: coin sack -> gold, silent to loot HUDs

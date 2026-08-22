@@ -9359,9 +9359,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             return true;
         }
-        // ⓔⓖ PROBE: the book the page was raised for, so the CLOSE can report
-        // whether anything actually registered as a read.
-        RE::FormID g_probeBook = 0;
     }
 
     void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig)
@@ -9486,16 +9483,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // Read settles a TOME (it teaches; the spending is below). Anything it
         // refuses is handed to the engine's Use instead, which is the door the
         // rest of the world's books go through.
-        if (!took) {
-            Equip::UseItem(book, req.uid, -1, req.sig, {}, 1);
-            SKSE::log::info("[BOOK] handed to the engine's Use");
-        }
+        if (!took) Equip::UseItem(book, req.uid, -1, req.sig, {}, 1);
 
         const bool hasSpell = spell ? player->HasSpell(spell) : false;
         int heldAfter = 0;
         if (auto* e1 = LiveEntryOf(player, book)) heldAfter = e1->countDelta;
-        SKSE::log::info("[BOOK] Read -> {}; spell {} -> {}, held {} -> {}",
-            took ? 1 : 0, hadSpell ? 1 : 0, hasSpell ? 1 : 0, heldBefore, heldAfter);
 
         // ★★★AND THE TOME IS SPENT. Read() is the engine's door and it does
         // teach -- measured: `Read -> 1; spell 0 -> 1` on a spell the player
@@ -9530,56 +9522,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // this measures the current path instead of guessing at theirs: if
         // IsRead() is still false after the page closes, our reading never
         // counted as one, and that is the whole bug.
-        // ⓔ PROBE 3: the record's own shape. Vanilla does not read the Elder
-        // Scroll at all -- it closes the inventory, goes first person and
-        // unfurls it, which is an EQUIP. The engine therefore tells it apart
-        // from a book somewhere in here, and one of these fields is where.
-        {
-            RE::BSString d;
-            book->GetDescription(d, book);
-            SKSE::log::info(
-                "[BOOK] shape '{}' flags=0x{:02X} type={} canTake={} tome={} "
-                "note={} descLen={} invModel={} keywords={}",
-                book->GetName() ? book->GetName() : "?",
-                static_cast<int>(book->data.flags.underlying()),
-                static_cast<int>(book->data.type.underlying()),
-                book->CanBeTaken() ? 1 : 0,
-                book->IsBookTome() ? 1 : 0,
-                book->IsNoteScroll() ? 1 : 0,
-                d.c_str() ? std::strlen(d.c_str()) : 0,
-                book->inventoryModel ? 1 : 0,
-                book->GetNumKeywords());
-        }
-        g_probeBook = req.form;
-        SKSE::log::info("[BOOK] read '{}' ({:08X}) type={} spell={} skill={} wasRead={}",
+        SKSE::log::info("[BOOK] read '{}' ({:08X})",
             DisplayNameOf(book, ExtraForPool(LiveEntryOf(player, book), req.uid, req.sig)),
-            req.form,
-            book->IsNoteScroll() ? "note/scroll" : "tome",
-            book->TeachesSpell() ? 1 : 0, book->TeachesSkill() ? 1 : 0,
-            book->IsRead() ? 1 : 0);
-    }
-
-    // ⓔⓖ PROBE: called when the Book Menu closes (main.cpp's menu sink).
-    void ProbeBookClosed()
-    {
-        if (g_probeBook == 0) return;
-        const RE::FormID form = g_probeBook;
-        g_probeBook = 0;
-        auto* book = RE::TESForm::LookupByID<RE::TESObjectBOOK>(form);
-        if (!book) {
-            SKSE::log::info("[BOOK] closed ({:08X}) -- the form is gone", form);
-            return;
-        }
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        int held = 0;
-        if (player) {
-            if (auto* e = LiveEntryOf(player, book)) held = e->countDelta;
-        }
-        auto* spell = book->GetSpell();
-        SKSE::log::info("[BOOK] closed '{}' ({:08X}) read={} held={} spellKnown={}",
-            book->GetName() ? book->GetName() : "?", form,
-            book->IsRead() ? 1 : 0, held,
-            (spell && player) ? (player->HasSpell(spell) ? 1 : 0) : -1);
+            req.form);
     }
 
     std::string DefKeyOf(RE::TESForm* a_form)
