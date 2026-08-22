@@ -9447,6 +9447,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // this measures the current path instead of guessing at theirs: if
         // IsRead() is still false after the page closes, our reading never
         // counted as one, and that is the whole bug.
+        // ⓔ PROBE 3: the record's own shape. Vanilla does not read the Elder
+        // Scroll at all -- it closes the inventory, goes first person and
+        // unfurls it, which is an EQUIP. The engine therefore tells it apart
+        // from a book somewhere in here, and one of these fields is where.
+        {
+            RE::BSString d;
+            book->GetDescription(d, book);
+            SKSE::log::info(
+                "[BOOK] shape '{}' flags=0x{:02X} type={} canTake={} tome={} "
+                "note={} descLen={} invModel={} keywords={}",
+                book->GetName() ? book->GetName() : "?",
+                static_cast<int>(book->data.flags.underlying()),
+                static_cast<int>(book->data.type.underlying()),
+                book->CanBeTaken() ? 1 : 0,
+                book->IsBookTome() ? 1 : 0,
+                book->IsNoteScroll() ? 1 : 0,
+                d.c_str() ? std::strlen(d.c_str()) : 0,
+                book->inventoryModel ? 1 : 0,
+                book->GetNumKeywords());
+        }
         g_probeBook = req.form;
         SKSE::log::info("[BOOK] read '{}' ({:08X}) type={} spell={} skill={} wasRead={}",
             DisplayNameOf(book, ExtraForPool(LiveEntryOf(player, book), req.uid, req.sig)),
