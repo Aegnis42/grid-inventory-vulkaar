@@ -9432,7 +9432,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 return;
             }
             if (!HasReadableText(d.c_str())) {
-                SKSE::log::info("[BOOK] nothing to read -- no page");
+                // ★★AND WE GET OUT OF THE WAY. With no page to raise, the
+                // engine's Use is the whole action -- for the Elder Scroll it
+                // is the unfurl, and the script behind it waits for the menus
+                // to be gone before it plays. Vanilla's inventory closes on a
+                // Use like this; ours stayed open, so the player had to close
+                // it by hand before anything happened.
+                SKSE::log::info("[BOOK] nothing to read -- the engine has it");
+                UIRoot::Close();
                 return;
             }
             // a tome whose spell we now know has said everything it has to say
