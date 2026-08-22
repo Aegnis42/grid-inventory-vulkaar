@@ -9325,6 +9325,40 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // synchronously, so "did the engine open one?" cannot be asked now.
         std::optional<PendingRead> g_pageOwed;
         int g_pageOwedWait = 0;
+
+        // ★★★IS THERE ANYTHING TO READ? Measured, side by side:
+        //
+        //   Shadowmarks           desc = "[pagebreak]..."   (4481 chars)
+        //   Elder Scroll (Dragon) desc = "<Cool graphic>"   (14)
+        //
+        // `<Cool graphic>` is Bethesda's own note that this book's content is
+        // a picture rather than text -- the scroll has no page, which is why
+        // the one we raised was blank and why it stood in front of the unfurl
+        // the engine had already started.
+        //
+        // The test is the meaning, not the length: a description that is
+        // empty, or that is nothing but one bracketed marker, has no reader to
+        // open. Real book text carries [pagebreak] or is simply prose, and
+        // both pass.
+        bool HasReadableText(const char* a_desc)
+        {
+            if (!a_desc) return false;
+            const char* b = a_desc;
+            while (*b && std::isspace(static_cast<unsigned char>(*b))) ++b;
+            if (!*b) return false;
+            std::string t(b);
+            while (!t.empty() &&
+                   std::isspace(static_cast<unsigned char>(t.back()))) {
+                t.pop_back();
+            }
+            if (t.empty()) return false;
+            // one bracketed marker and nothing else -- "<Cool graphic>"
+            if (t.front() == '<' && t.back() == '>' &&
+                t.find('>') == t.size() - 1) {
+                return false;
+            }
+            return true;
+        }
         // ⓔⓖ PROBE: the book the page was raised for, so the CLOSE can report
         // whether anything actually registered as a read.
         RE::FormID g_probeBook = 0;
@@ -9393,10 +9427,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             RE::BSString d;
             book->GetDescription(d, book);
             const bool worn = entry->IsWorn();
-            SKSE::log::info("[BOOK] page check: worn={} desc='{}'",
-                            worn ? 1 : 0, d.c_str() ? d.c_str() : "");
             if (worn) {
                 SKSE::log::info("[BOOK] the engine is using it -- no page");
+                return;
+            }
+            if (!HasReadableText(d.c_str())) {
+                SKSE::log::info("[BOOK] nothing to read -- no page");
                 return;
             }
             // a tome whose spell we now know has said everything it has to say
