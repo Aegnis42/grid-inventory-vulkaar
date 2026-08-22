@@ -7389,24 +7389,61 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             for (auto& [pool, want] : pools) {
                 int delta = want - sumByPool[pool];
                 if (delta <= 0) continue;
-                // top up partial tiles in position order, like the reconciler
+                // ★★★THE TILE THE PLAYER DROPPED ON IS TOPPED UP FIRST.
+                //
+                // Fills ran in board order (row, then col). That is right for
+                // an arrival nobody aimed -- a pickup from the world has no
+                // cell behind it. A DROP is the opposite: the whole gesture
+                // names a cell, and topping up some OTHER tile instead is
+                // exactly what "it went to the wrong stack" means.
+                //
+                // Reported as items scattering. Drop three arrows onto a stack
+                // of forty-six and the three landed on whichever arrow tile
+                // sat highest on the board; the tile under the cursor never
+                // moved, and the rest of the pile appeared to jump elsewhere.
+                //
+                // The hint was already consulted a few lines below -- but only
+                // when MINTING a new tile, never when filling an existing one,
+                // which is the case a merge always takes.
                 auto& idxs = tilesByPool[pool];
-                std::sort(idxs.begin(), idxs.end(), [](int a, int b) {
+                const bool hinted =
+                    g_dropHint.Wants(baseKey, pool) && g_dropHint.bag.empty();
+                const int hc = hinted ? g_dropHint.col : -1;
+                const int hr = hinted ? g_dropHint.row : -1;
+                std::sort(idxs.begin(), idxs.end(), [&](int a, int b) {
                     const auto& x = g_items[static_cast<std::size_t>(a)];
                     const auto& y = g_items[static_cast<std::size_t>(b)];
+                    const bool xh = hinted && x.inBag.empty() &&
+                                    x.col == hc && x.row == hr;
+                    const bool yh = hinted && y.inBag.empty() &&
+                                    y.col == hc && y.row == hr;
+                    if (xh != yh) return xh;   // ★the dropped-on tile leads
                     if (x.inBag != y.inBag) return x.inBag < y.inBag;
                     if (x.row != y.row) return x.row < y.row;
                     return x.col < y.col;
                 });
+                bool hintSpentByFill = false;
                 for (int i : idxs) {
                     if (delta <= 0) break;
-                    const int room = cap - g_items[static_cast<std::size_t>(i)].count;
+                    const auto& t = g_items[static_cast<std::size_t>(i)];
+                    const int room = cap - t.count;
                     const int take = (std::min)(room, delta);
                     if (take > 0) {
+                        if (hinted && t.inBag.empty() &&
+                            t.col == hc && t.row == hr) {
+                            hintSpentByFill = true;
+                        }
                         fills.push_back({ i, take });
                         delta -= take;
                     }
                 }
+                // ★A MERGE SPENDS THE HINT TOO. The note further down already
+                // says the hint belongs to the ARRIVAL rather than to a minted
+                // tile -- but the code only cleared it when a tile was minted.
+                // Left armed after a merge, it fires on the NEXT pickup of this
+                // form and teleports it to a cell the player chose for
+                // something else.
+                if (hintSpentByFill) g_dropHint = {};
                 // whatever the saved tiles cannot hold becomes fresh tiles --
                 // the pool prefix carries the identity the new slot records
                 while (delta > 0) {
@@ -10202,6 +10239,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     cmpIsWeap = true;
                 }
             }
+            // ★DIAG: "all weapon tooltips show damage as 0" (reported, not
+            // reproducible here). We do not compute this -- GetDamage is the
+            // engine's own routine, reached by address, so a 0 means the engine
+            // returned one. Logging the RECORD's damage beside it says which:
+            // base 0 too means the weapon record itself is empty, base non-zero
+            // means the engine's adjusted value collapsed. Once per form, so a
+            // hover cannot flood the log.
+            if (dmg == 0) {
+                static std::unordered_set<RE::FormID> s_said;
+                if (s_said.insert(a_obj->GetFormID()).second) {
+                    SKSE::log::warn("[TIP] weapon damage 0: '{}' ({:08X}) base={} pc={}",
+                        a_obj->GetName(), a_obj->GetFormID(),
+                        weap->GetAttackDamage(), pc ? "y" : "n");
+                }
+            }
             ImGui::TextColored(Theme::TipSub(), "%s %d", Lang::T(Lang::Str::Damage), dmg);
             diffText(dmg);
         } else if (auto* armo = a_obj->As<RE::TESObjectARMO>()) {
@@ -11771,11 +11823,31 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // ★...and how many. A drag has already said the amount;
                     // the hint carries it so the aimed units are PLACED rather
                     // than left to whatever the fill pass did not want.
-                    // (A stack that opened the quantity slider commits its own
-                    // number on confirm, so cnt is the right answer there too.)
+                    //
+                    // ★★★BUT NOT WHEN THE SLIDER IS STILL OPEN. The line above
+                    // used to claim "a stack that opened the quantity slider
+                    // commits its own number on confirm, so cnt is right here
+                    // too". It is not: OpenSlider only ASKS, and this runs
+                    // immediately with cnt still holding the whole dragged
+                    // stack. Confirming a smaller number never reached the
+                    // hint.
+                    //
+                    // Measured -- 15 on a corpse, 50 in the pack, 7 confirmed:
+                    //
+                    //   [FLICK] ...01397D stack 0 -> 50   15x[6,5] 35x[-1,-1]
+                    //
+                    // The hint reserved FIFTEEN units of the dropped-on cell,
+                    // so fifteen of the player's own fifty sat there and the
+                    // other thirty-five were pushed out to a free square. That
+                    // is the "it scattered" report, and the 15 is the corpse's
+                    // count leaking into a board it never belonged to.
+                    //
+                    // 0 means "whatever arrives", which is exactly right for an
+                    // amount nobody has chosen yet.
+                    const int hintCount = (cnt > 1) ? 0 : cnt;
                     g_dropHint = { hintBase, hintPool,
                                    g_target.col, g_target.row, v.bagKey, a_held.rot,
-                                   cnt };
+                                   hintCount };
                     if (swapDisp) {
                         // free the displaced tile's spot for the incoming item
                         // and put it on the cursor (same as the C4 swap)

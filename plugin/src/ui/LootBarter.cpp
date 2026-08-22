@@ -1075,6 +1075,42 @@ namespace FUI::LootBarter
             return Grid::PoolChoice(entry, a_uid, a_sig, /*nameWorn*/ false,
                                     WornExportLegal());
         }
+
+        // ★★★WHY A REFUSAL HAPPENED, not just that it did.
+        //
+        // Reported: left-clicking an item on a corpse answers "can't tell it
+        // apart from the worn copy" and refuses, while R (take all) and
+        // right-click both work. Not reproducible here, and the code alone
+        // leaves a contradiction: the only path to this refusal with a uid or
+        // sig in hand is LiveEntryOf returning nothing -- but that reads the
+        // changes list, which GetInventoryChanges CREATES when absent, and a
+        // worn item has to be in it to be worn at all.
+        //
+        // So the state is recorded rather than guessed at. Whichever of these
+        // is false in a real report is the answer:
+        //   entry=n            the changes list does not hold this form
+        //   lists=0            it holds it, but with no extra data at all
+        //   uid/sig non-zero   the board named a unit the source cannot show
+        void LogRefusal(const char* a_where, RE::TESBoundObject* a_obj,
+                        std::uint16_t a_uid, std::uint16_t a_sig, bool a_fromWorn)
+        {
+            auto* src   = SourceRef();
+            auto* entry = (src && a_obj) ? Grid::LiveEntryOf(src, a_obj) : nullptr;
+            int   lists = 0, worn = 0;
+            if (entry && entry->extraLists) {
+                for (auto* xl : *entry->extraLists) {
+                    if (!xl) continue;
+                    ++lists;
+                    if (xl->HasType<RE::ExtraWorn>() ||
+                        xl->HasType<RE::ExtraWornLeft>()) ++worn;
+                }
+            }
+            SKSE::log::warn("[LOOT] {} refused '{}' uid={:04X} sig={:04X} fromWorn={} "
+                            "| src={} entry={} lists={} wornLists={} mode={} wornLegal={}",
+                a_where, a_obj ? a_obj->GetName() : "?", a_uid, a_sig, a_fromWorn,
+                src ? "y" : "n", entry ? "y" : "n", lists, worn,
+                static_cast<int>(g_mode), WornExportLegal());
+        }
     }
 
     bool RequestTake(RE::TESBoundObject* a_obj, int a_count,
@@ -1085,6 +1121,7 @@ namespace FUI::LootBarter
             // GI42: refuse BEFORE arming any suppression -- a transfer that will
             // not run must not leave the board and the engine disagreeing.
             if (!ResolveSource(a_obj, a_uid, a_sig, a_fromWorn).ok()) {
+                LogRefusal("take", a_obj, a_uid, a_sig, a_fromWorn);
                 Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
                 return false;
             }
@@ -1134,6 +1171,7 @@ namespace FUI::LootBarter
         // spot, so the next purchase landed on a cell it was not given)
         if (a_obj && a_count > 0) {
             if (!ResolveSource(a_obj, a_uid, a_sig, false).ok()) {   // GI42
+                LogRefusal("buy", a_obj, a_uid, a_sig, false);
                 Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
                 return;
             }
@@ -1164,6 +1202,7 @@ namespace FUI::LootBarter
         // was queued -- a rejected request stole the next cell's placement)
         if (a_obj && a_count > 0) {
             if (!ResolveSource(a_obj, a_uid, a_sig, a_fromWorn).ok()) {   // GI42
+                LogRefusal("request", a_obj, a_uid, a_sig, a_fromWorn);
                 Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
                 return;
             }
