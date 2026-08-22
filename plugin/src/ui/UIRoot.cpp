@@ -842,9 +842,82 @@ namespace FUI::UIRoot
             g_padLabelReady = true;
         }
 
+        // ★★★THE POINTER IS OURS WHILE OUR WINDOW IS UP.
+        //
+        // The game's arrow is drawn by CursorMenu, and its depthPriority is 13
+        // against our 11 (measured, [UI] CursorMenu depthPriority=13) -- so it
+        // lands on top of everything we draw, tooltips included, and the first
+        // line of a tooltip is the item's NAME.
+        //
+        // ImGui cannot place a tooltip clear of a cursor whose size it does not
+        // know, and every cursor replacer ships a different one; 1.4.1 tried a
+        // fixed clearance and it was either too small on one machine or absurd
+        // on another. So the cursor becomes ours instead: the engine's movie is
+        // hidden and ImGui draws its own, which is exactly the size ImGui's
+        // tooltip placement was designed around.
+        //
+        // ★Draw ORDER is untouched -- no depthPriority is changed here, so the
+        // console and message boxes keep their standing above us.
+        //
+        // ★Called every frame on purpose: CursorMenu can open AFTER we do (our
+        // kUsesCursor flag is what opens it), so hiding once at OnShow misses.
+        // No string is built here -- MENU_NAME is already a BSFixedString
+        // (원칙 3).
+        void SetGameCursorVisible(bool a_visible)
+        {
+            auto* ui = RE::UI::GetSingleton();
+            if (!ui) return;
+            if (const auto menu = ui->GetMenu(RE::CursorMenu::MENU_NAME);
+                menu && menu->uiMovie) {
+                menu->uiMovie->SetVisible(a_visible);
+            }
+        }
+
+        // ★★★THE POINTER ITSELF -- "Bone", picked from the mockups.
+        //
+        // Four corners and no tail: tip, heel, notch, shoulder. The body is
+        // split along the tip-to-notch edge so the left face sits a shade
+        // darker than the right, which is the whole of its relief.
+        //
+        // ★The keyline is deliberately heavy. A white pointer on parchment and
+        // a white pointer on snow are both invisible without it -- Skyrim is
+        // half snowfield, and that is the case this weight is paying for.
+        //
+        // Drawn on the FOREGROUND list, so it sits over every window we own
+        // without touching any depthPriority.
+        constexpr ImU32 kPtrBody   = IM_COL32(255, 255, 255, 255);
+        constexpr ImU32 kPtrShade  = IM_COL32(222, 216, 201, 255);
+        constexpr ImU32 kPtrEdge   = IM_COL32( 26,  23,  20, 255);
+        // ★Height in px at scale 1.0, and everything else is derived from it --
+        // the keyline thickens with the body rather than staying hairline on a
+        // grown arrow. 22 was the first build and read too small in game; this
+        // is that × 1.5, still well under the engine cursor it replaced.
+        constexpr float kPtrHeight = 33.0f;
+
+        void DrawPointer()
+        {
+            const ImGuiIO& io = ImGui::GetIO();
+            const ImVec2   m  = io.MousePos;
+            // ImGui parks an unknown position far off screen; do not draw there
+            if (m.x < -1000.0f || m.y < -1000.0f) return;
+
+            const float s = (kPtrHeight / 20.0f) * Theme::Scale();
+            const ImVec2 tip  (m.x,                m.y);
+            const ImVec2 heel (m.x,                m.y + 20.0f * s);
+            const ImVec2 notch(m.x +  5.9f * s,    m.y + 14.0f * s);
+            const ImVec2 shld (m.x + 13.3f * s,    m.y + 13.6f * s);
+
+            auto* dl = ImGui::GetForegroundDrawList();
+            dl->AddTriangleFilled(tip, heel, notch, kPtrShade);
+            dl->AddTriangleFilled(tip, notch, shld, kPtrBody);
+            const ImVec2 poly[4] = { tip, heel, notch, shld };
+            dl->AddPolyline(poly, 4, kPtrEdge, ImDrawFlags_Closed, 2.1f * s);
+        }
+
         void MouseHandler()
         {
             auto& io = ImGui::GetIO();
+            SetGameCursorVisible(false);   // ★ours for as long as we are up
 
             // ★Who owns the pointer is decided by the ENGINE's input mode and by
             //  real device events — NEVER by watching the OS cursor position.
@@ -921,16 +994,21 @@ namespace FUI::UIRoot
                 }
 
                 if (g_padCursorMode == PadCursorMode::kEngine) {
-                    // The game's arrow IS the pointer; just follow it.
+                    // ★★★THE ENGINE DRIVES THE POSITION, NOT THE DRAWING.
+                    //
+                    // This branch used to set MouseDrawCursor = false and let
+                    // the game's arrow BE the pointer. When the engine moved
+                    // that cursor but never drew it, the position was right and
+                    // the screen was empty -- which is what pad players meant
+                    // by "there is no cursor". Now every branch draws.
                     g_padCursor = ImVec2(mc->cursorPosX, mc->cursorPosY);
-                    io.MouseDrawCursor = false;
                 } else {
                     const float dt = std::clamp(io.DeltaTime, 1.0f / 240.0f, 1.0f / 20.0f);
                     g_padCursor.x += mx * kPadCursorSpeed * dt;
                     g_padCursor.y += my * kPadCursorSpeed * dt;
                     g_padCursor.x = std::clamp(g_padCursor.x, 0.0f, io.DisplaySize.x - 1.0f);
                     g_padCursor.y = std::clamp(g_padCursor.y, 0.0f, io.DisplaySize.y - 1.0f);
-                    io.MouseDrawCursor = true;
+                    // ★DrawPointer draws it; ImGui's own arrow stays off.
                     // Keep the game's frozen arrow parked on top of ours, so the
                     // sync it does perform (on a button press) lands HERE rather
                     // than leaving a second arrow stranded mid-screen. Not done
@@ -949,6 +1027,8 @@ namespace FUI::UIRoot
                 return;
             }
 
+            // ★NOT ImGui's own cursor -- DrawPointer draws ours at the end of
+            // the frame. This flag would put ImGui's arrow underneath it.
             io.MouseDrawCursor = false;
             if (auto* ui = RE::UI::GetSingleton()) {
                 if (ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)) {
@@ -3724,6 +3804,10 @@ namespace FUI::UIRoot
         if (ImGui::GetCurrentContext()) {
             ImGui::GetIO().ClearInputKeys();
         }
+        // ★★GIVE THE CURSOR BACK, unconditionally and last. A cursor left
+        // hidden is a game the player cannot click, so this runs on every exit
+        // from the menu -- not only the tidy ones.
+        SetGameCursorVisible(true);
         SKSE::log::info("[UI] menu hidden");
     }
 
@@ -4083,6 +4167,11 @@ namespace FUI::UIRoot
         // already up when we look. Recording the order is the whole reason
         // I/ESC can close things in the order they were opened.
         TrackLayers();
+        // ★★LAST THING DRAWN. The engine's own arrow is hidden while we are up
+        // (SetGameCursorVisible), so this IS the pointer -- for mouse and pad
+        // alike. Drawn after every window and after the prompt bar, on the
+        // foreground list, so nothing can end up on top of it.
+        DrawPointer();
         ImGui::Render();
         // ★★The draw-data outline pass is GONE, and it was the answer to a
         // week of "why do these two strings look different".

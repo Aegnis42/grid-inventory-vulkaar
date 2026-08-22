@@ -135,6 +135,25 @@ namespace FUI
 
     void GridInventoryMenu::PostDisplay()
     {
+        // ★MEASURE WHILE WE ARE ACTUALLY ON SCREEN. The game's cursor is drawn
+        // by CursorMenu and lands ON TOP of us -- that is why a tooltip can end
+        // up under the arrow. Whether we could ever draw above it depends on a
+        // number the engine sets at runtime and CommonLib does not carry.
+        // Asked at registration it read "not open": the cursor menu does not
+        // exist that early. Once, from here, is the honest place to ask.
+        static bool s_depthSaid = false;
+        if (!s_depthSaid) {
+            s_depthSaid = true;
+            if (auto* ui = RE::UI::GetSingleton()) {
+                if (const auto cm = ui->GetMenu(RE::CursorMenu::MENU_NAME)) {
+                    logger::info("[UI] CursorMenu depthPriority={} (ours={})",
+                                 cm->depthPriority, depthPriority);
+                } else {
+                    logger::info("[UI] CursorMenu is not open even while we render");
+                }
+            }
+        }
+
         IconCache::GetSingleton()->PreRender();   // icon queue owns the request while busy
         ItemPreview::GetSingleton()->Render();
         IconCache::GetSingleton()->PostRender();  // harvest this frame's capture
@@ -286,6 +305,7 @@ namespace FUI
         // the vanilla InventoryMenu carries it (F5 works there), so must we
         menu->menuFlags.set(Flags::kAllowSaving);
         menu->depthPriority = 11;
+
 
         // kPausesGame is REQUIRED for the engine's item 3D preview: Modex's own
         // config notes "show3DPreview requires pauseGame; effective only when
