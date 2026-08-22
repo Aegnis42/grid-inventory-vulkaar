@@ -414,6 +414,15 @@ namespace FUI::Equip
                     std::map<RE::TESBoundObject*, int> shown;
                     for (const auto& [k, v] : rows) if (v->obj) ++shown[v->obj];
                     for (const auto& [obj, n] : shown) {
+                        // ★★AMMO IS A STACK IN ONE SLOT, and this check does not
+                        // apply to it. Fifty arrows are worn as a single quiver
+                        // and the doll shows exactly one slot for them, so
+                        // counting worn UNITS reports a mismatch that is not one
+                        // (measured: "'Steel Arrow' body wears 2 but doll shows
+                        // 1" while the doll was entirely correct). The failure
+                        // this check exists to catch -- one hand of a dual wield
+                        // drawing nothing -- is about weapons.
+                        if (obj->Is(RE::FormType::Ammo)) continue;
                         auto* e = Grid::LiveEntryOf(player, obj);
                         int wornUnits = 0;
                         if (e && e->extraLists) {
@@ -828,13 +837,33 @@ namespace FUI::Equip
         // so a use that consumes nothing does not sit in the queue expiring --
         // is what tells the next round whether the surplus event is ours or the
         // engine's.
-        // ★Ingredients (eaten on click) and spell tomes (consumed on learn)
-        // joined the list with the consume-release fix: their confirmation is
-        // what frees the suppression entry, and an unregistered consume left
-        // it to the applied-erase fallback -- one rebuild late.
+        // ★Ingredients (eaten on click) joined the list with the consume-release
+        // fix: their confirmation is what frees the suppression entry, and an
+        // unregistered consume left it to the applied-erase fallback -- one
+        // rebuild late.
+        //
+        // ★★★AND BOOKS LEFT IT AGAIN. They were here for the spell tome, which
+        // is consumed on learn -- but the tome no longer comes through this
+        // door at all. Reading moved to TESObjectBOOK::Read (ProcessBookRead),
+        // and the tome's spending is done explicitly there with its own
+        // NotePendingRemove; measured in the same log:
+        //
+        //   'Spell Tome: Ash Rune'  Read=true  Use=false   <- never reaches here
+        //   'Line and Lure'         Read=false Use=true    <- only plain books do
+        //
+        // So every reservation this line still made was for a book that is NOT
+        // consumed, and each one sat in the queue until it timed out and forced
+        // a rebuild nobody asked for:
+        //
+        //   [LEDGER] ★expired: 000F86FE -1 'use' -- 180 frames, never confirmed
+        //   [GRID] 'The Book of the Dragonborn' -1 (use) was never confirmed
+        //
+        // A mod's book that DOES vanish on use now falls back to the
+        // applied-erase path -- one rebuild late, which is the cheaper side of
+        // this trade by far: that book is rare, and reading one is not.
         if (Ledger::Enabled() &&
             (a_obj->As<RE::AlchemyItem>() || a_obj->As<RE::ScrollItem>() ||
-             a_obj->As<RE::IngredientItem>() || a_obj->As<RE::TESObjectBOOK>())) {
+             a_obj->As<RE::IngredientItem>())) {
             Ledger::Submit(a_obj->GetFormID(),
                 -EquipCountFor(a_obj, a_tileCount), "use", a_uid, a_sig);
         }

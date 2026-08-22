@@ -9361,6 +9361,36 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
     }
 
+    namespace
+    {
+        // ★★★HOW MANY OF THIS BOOK ARE HELD -- AND NOT FROM LiveEntryOf.
+        //
+        // LiveEntryOf answers from the CHANGES list, so a book nothing has
+        // ever happened to has no entry there at all and reads as zero while
+        // it sits plainly in the inventory. Grid.cpp:7301 already carries this
+        // lesson for unequipped weapons; the book path walked into it again.
+        //
+        // Measured, one press apart:
+        //   'The Book of the Dragonborn'  held 0->0   page suppressed
+        //   'Line and Lure'               held 1->1   page raised
+        // Nothing about the BOOKS differs. The fishing one was STOLEN, and
+        // that theft flag is the change that gave it an entry to be found in.
+        //
+        // GetInventory is the source the rebuild itself walks, and it counts
+        // the base container too. The returned map OWNS the entry, so it must
+        // outlive every use of it and nothing may escape the call (원칙 2).
+        [[nodiscard]] int HeldCountOf(RE::TESObjectREFR* a_owner,
+                                      RE::TESBoundObject* a_obj)
+        {
+            if (!a_owner || !a_obj) return 0;
+            auto inv = a_owner->GetInventory(
+                [&](RE::TESBoundObject& o) { return &o == a_obj; });
+            int n = 0;
+            for (auto& [o, d] : inv) n = d.first;
+            return n;
+        }
+    }
+
     void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig)
     {
         if (!a_book) return;
@@ -9414,9 +9444,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 SKSE::log::info("[BOOK] the engine raised its own page");
                 return;
             }
-            // consumed by the reading: there is nothing left to show
-            auto* entry = LiveEntryOf(player, book);
-            if (!entry || entry->countDelta <= 0) {
+            // consumed by the reading: there is nothing left to show.
+            // ★The count comes from GetInventory, NOT the changes list -- see
+            // HeldCountOf. A book with no changes entry is still a book the
+            // player is holding, and suppressing its page was the whole bug.
+            // The map is kept alive for `entry` below.
+            auto inv = player->GetInventory(
+                [&](RE::TESBoundObject& o) { return &o == book; });
+            int                     held = 0;
+            RE::InventoryEntryData* entry = nullptr;
+            for (auto& [o2, d2] : inv) {
+                held = d2.first;
+                entry = d2.second.get();
+            }
+            if (held <= 0) {
                 SKSE::log::info("[BOOK] read consumed it -- no page to raise");
                 return;
             }
@@ -9431,7 +9472,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // and it never wanted a page.
             RE::BSString d;
             book->GetDescription(d, book);
-            const bool worn = entry->IsWorn();
+            const bool worn = entry && entry->IsWorn();
             if (worn) {
                 SKSE::log::info("[BOOK] the engine is using it -- no page");
                 return;
@@ -9484,18 +9525,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // the inventory closes, the view goes first person, the scroll opens.
         auto* spell = book->GetSpell();
         const bool hadSpell = spell ? player->HasSpell(spell) : false;
-        int heldBefore = 0;
-        if (auto* e0 = LiveEntryOf(player, book)) heldBefore = e0->countDelta;
+        const int heldBefore = HeldCountOf(player, book);
 
         const bool took = book->Read(player);
         // Read settles a TOME (it teaches; the spending is below). Anything it
         // refuses is handed to the engine's Use instead, which is the door the
         // rest of the world's books go through.
-        if (!took) Equip::UseItem(book, req.uid, -1, req.sig, {}, 1);
+        bool used = false;
+        if (!took) used = Equip::UseItem(book, req.uid, -1, req.sig, {}, 1);
 
         const bool hasSpell = spell ? player->HasSpell(spell) : false;
-        int heldAfter = 0;
-        if (auto* e1 = LiveEntryOf(player, book)) heldAfter = e1->countDelta;
+        const int heldAfter = HeldCountOf(player, book);
 
         // ★★★AND THE TOME IS SPENT. Read() is the engine's door and it does
         // teach -- measured: `Read -> 1; spell 0 -> 1` on a spell the player
@@ -9530,9 +9570,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // this measures the current path instead of guessing at theirs: if
         // IsRead() is still false after the page closes, our reading never
         // counted as one, and that is the whole bug.
-        SKSE::log::info("[BOOK] read '{}' ({:08X})",
+        // ★★WHICH DOOR ANSWERED, and what moved. One report is "this one book
+        // will not open, the others do" -- and the line above could not tell a
+        // refusal from a success, because both reached it. `Read` is the tome
+        // door, `Use` is the engine's Use that everything else goes through,
+        // and the counts say whether the book or a spell actually moved. A
+        // book that opens nowhere reads `Read=false Use=false` and names
+        // itself; that is the whole diagnosis, from one press.
+        SKSE::log::info(
+            "[BOOK] read '{}' ({:08X}) -- Read={} Use={} held {}->{} spell {}->{}",
             DisplayNameOf(book, ExtraForPool(LiveEntryOf(player, book), req.uid, req.sig)),
-            req.form);
+            req.form, took, used, heldBefore, heldAfter, hadSpell, hasSpell);
     }
 
     std::string DefKeyOf(RE::TESForm* a_form)
@@ -9902,6 +9950,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         case ExtraScope::kAny:  break;
         }
 
+        // ★★THE TOOLTIP SITS WHERE ImGui PUTS IT, and that is deliberate.
+        //
+        // 1.4.1 tried pushing the box clear of the game's cursor, because the
+        // arrow was covering the item's NAME (reported). It was the wrong fix:
+        // the clearance has to be guessed from a cursor size we do not know,
+        // every cursor replacer ships a different one, and at any guess large
+        // enough to work the box floats far away from the tile it describes.
+        // Reverted on that reasoning -- a number tuned to one machine's cursor
+        // is wrong on everyone else's.
         Theme::PushTipStyle();
         ImGui::BeginTooltip();
         // ★GI61: a UNIT-scoped tile with no extra list means this unit HAS
@@ -10186,6 +10243,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // its line on by itself, with nothing for us to track. A potion is
             // not gated: its label says what it does.
             std::uint16_t known = 0xFFFF;
+            // ★★A SCROLL IS A MagicItem TOO, and its card was blank. The same
+            // omission the spell tome had: this block only ever asked about
+            // potions and ingredients, so a scroll -- an item whose entire
+            // point is the spell inside it -- listed nothing at all. Not
+            // gated like an ingredient: a scroll's label says what it does.
+            if (!magic) magic = a_obj->As<RE::ScrollItem>();
             if (!magic) {
                 if (auto* ingr = a_obj->As<RE::IngredientItem>()) {
                     magic = ingr;
@@ -10235,6 +10298,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     Lang::T(Lang::Str::Teaches), spell->GetName(),
                     known ? " (" : "", known ? Lang::T(Lang::Str::Known) : "",
                     known ? ")" : "");
+                // ★★★AND WHAT THE SPELL ACTUALLY DOES.
+                //
+                // The card named the spell and stopped there, while vanilla
+                // spells out the effect -- "Targets take 20 points of frost
+                // damage for 10 seconds, plus Stamina damage" (reported, with
+                // the vanilla card beside ours). Deciding whether a 1350-gold
+                // tome is worth buying is exactly what that line is for.
+                //
+                // A tome's DESC is not this: books are excluded from the
+                // description block below because their DESC is the book's
+                // text. The effect belongs to the SPELL, and effectLine
+                // already renders one the way vanilla does -- tags filled,
+                // hidden helpers skipped.
+                for (auto* e : spell->effects) effectLine(e, Theme::TipSub());
             }
         }
 
