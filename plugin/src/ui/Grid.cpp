@@ -9381,6 +9381,24 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 SKSE::log::info("[BOOK] read consumed it -- no page to raise");
                 return;
             }
+            // ★★★AND NOT IN FRONT OF ONE THE ENGINE TOOK OVER. The Elder Scroll
+            // is EQUIPPED by the Use -- that is the unfurl, and the scroll's
+            // script waits for the menus to be gone before it plays. Our page
+            // is the thing standing in the way: the player had to press ESC
+            // and close the inventory before anything happened.
+            //
+            // Being worn is the signal, and it is the honest one: a book the
+            // engine has put in the player's hands is being used, not read,
+            // and it never wanted a page.
+            RE::BSString d;
+            book->GetDescription(d, book);
+            const bool worn = entry->IsWorn();
+            SKSE::log::info("[BOOK] page check: worn={} desc='{}'",
+                            worn ? 1 : 0, d.c_str() ? d.c_str() : "");
+            if (worn) {
+                SKSE::log::info("[BOOK] the engine is using it -- no page");
+                return;
+            }
             // a tome whose spell we now know has said everything it has to say
             if (auto* sp = book->GetSpell(); sp && player->HasSpell(sp)) {
                 SKSE::log::info("[BOOK] spell already known -- no page to raise");
