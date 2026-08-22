@@ -21,6 +21,20 @@ namespace FUI::Editor
         Hooks               g_hooks;
         bool                g_editMode = false;
         RE::TESBoundObject* g_sel = nullptr;
+        // ★★★THE STACK CAP THE BOARD IS CURRENTLY BUILT FOR.
+        //
+        // Every other row in this editor applies as you drag, and that is the
+        // point of them -- you watch the footprint change under the cursor.
+        // The stack cap cannot work that way. It starts at 0 ("auto"), so the
+        // first value a drag enters is 1, and a cap of 1 gives every single
+        // unit its own tile: a stack of sixty potions explodes across the
+        // board the instant you touch the control, before you have said what
+        // you actually want (reported).
+        //
+        // So this row alone waits for the edit to SETTLE. The number moves
+        // under the cursor as usual; the board is only rebuilt once the value
+        // has stopped moving.
+        int g_stackApplied = 0;
         std::string         g_selKey;
 
         FullDef g_cur;                 // live-edited values
@@ -374,6 +388,7 @@ namespace FUI::Editor
         g_selKey = a_key;
         if (g_hooks.getEffective) g_cur = g_hooks.getEffective(a_obj);
         g_base = g_cur;
+        g_stackApplied = g_cur.stack;   // ★see the Stack row
         g_baseOverride = g_hooks.hasOverride ? g_hooks.hasOverride(a_obj) : false;
         g_dirty = false;
         DefToPainter();
@@ -876,10 +891,18 @@ namespace FUI::Editor
                         return ImGui::DragInt("##StackCap", &g_cur.stack, 0.25f,
                             0, 999, stackFmt);
                     })) {
-                chLayout = true;
+                // deliberately no chLayout -- see g_stackApplied
             }
-            if (!sTyping && Theme::GaugeStepInt(stAt, kTrackW * S0, stH,
-                                                "##StackCap", g_cur.stack, 1, 0, 999)) {
+            if (!sTyping) {
+                // the steppers move the number; the apply is below
+                (void)Theme::GaugeStepInt(stAt, kTrackW * S0, stH,
+                                          "##StackCap", g_cur.stack, 1, 0, 999);
+            }
+            // ★...and it lands here, once the hand is off it. Typing counts as
+            // moving too: a half-typed "20" is a 2 the moment it is entered.
+            if (g_cur.stack != g_stackApplied && !sTyping &&
+                !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                g_stackApplied = g_cur.stack;
                 chLayout = true;
             }
             ImGui::SameLine();
@@ -929,6 +952,7 @@ namespace FUI::Editor
         if (Sfx::Button(Lang::T(Lang::Str::ResetDefault))) {
             const FullDef d = g_hooks.getDefault ? g_hooks.getDefault(g_sel) : FullDef{};
             g_cur = d;
+            g_stackApplied = g_cur.stack;
             if (g_hooks.setOverride) g_hooks.setOverride(g_sel, g_cur, false);
             DefToPainter();
             Grid::RequestRebuild();
