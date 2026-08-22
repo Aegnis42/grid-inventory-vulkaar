@@ -333,6 +333,13 @@ namespace FUI
                 try { DualRing::SetSlotOverride(std::stoi(rest)); } catch (...) {}
                 continue;
             }
+            // Scancode that hands a screen to the engine and back -- a
+            // diagnostic, so it ships unassigned. 87 = 0x57 = F11. See
+            // UIRoot::SetVanillaKey.
+            if (key == "!vanillakey") {
+                try { UIRoot::SetVanillaKey(std::stoi(rest)); } catch (...) {}
+                continue;
+            }
             // Test switch, not a setting: see Grid::SetRebuildDrop.
             if (key == "!rbdrop") {
                 Grid::SetRebuildDrop(rest.c_str());
@@ -808,6 +815,9 @@ namespace FUI
         if (!Ledger::Enabled())    out << "!ledger = 0\n";
         if (DualRing::SlotOverride() >= 0) {
             out << "!ring2slot = " << DualRing::SlotOverride() << "\n";
+        }
+        if (UIRoot::VanillaKey() != 0) {
+            out << "!vanillakey = " << UIRoot::VanillaKey() << "\n";
         }
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";

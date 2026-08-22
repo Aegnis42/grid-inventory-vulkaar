@@ -4010,6 +4010,12 @@ namespace FUI::UIRoot
         return ui && ui->IsMenuOpen(RE::Console::MENU_NAME);
     }
 
+    // ★Ships as 0, which is not a key. See UIRoot.h.
+    // Written from the ini parse, read from the raw input thread.
+    std::atomic<int> g_vanillaKey{ 0 };
+    void SetVanillaKey(int a_scancode) { g_vanillaKey.store(a_scancode); }
+    int  VanillaKey() { return g_vanillaKey.load(); }
+
     void Render()
     {
         if (!g_initialized.load()) return;

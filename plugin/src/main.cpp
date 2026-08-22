@@ -61,6 +61,24 @@ namespace
     // Written from the input thread, read from the UI thread, hence atomic.
     std::atomic<bool> g_vanillaKey{ false };
 
+    // ★★★THE KEY IS UNASSIGNED UNLESS SOMEONE ASSIGNS IT.
+    //
+    // Handing the inventory to the engine mid-session is a diagnostic, not a
+    // feature: a player who hits it by accident is left wondering why their
+    // inventory suddenly looks different. So the scancode lives in
+    // GridInventory_ui.ini beside the other test switches --
+    //
+    //     !vanillakey = 87        (87 = 0x57 = F11)
+    //
+    // -- and ships as 0, which matches no key. The mechanism stays whole, so
+    // it is also something a REPORTER can be handed: "add this line, press
+    // F11, tell us whether vanilla does the same thing." That comparison is
+    // what pinned the book bug to us rather than to the engine.
+    //
+    // Read from UIRoot rather than a file: this sits on the raw input path,
+    // where a filesystem call would run on every key a player ever presses
+    // (원칙 3).
+
     // raw RefHandle -> reference (ContainerMenu/BarterMenu return a raw handle)
     RE::TESObjectREFR* HandleToRef(RE::RefHandle a_handle)
     {
@@ -572,7 +590,8 @@ namespace
                 // the inventory key and watch the OTHER screen do the same thing.
                 // The state only reads at open time, so a mid-session press
                 // never disturbs a screen already on show.
-                if (btn->GetIDCode() == 0x57) {   // DIK_F11
+                if (const int vk = FUI::UIRoot::VanillaKey();
+                    vk != 0 && btn->GetIDCode() == static_cast<std::uint32_t>(vk)) {
                     const bool on = !g_vanillaKey.load();
                     g_vanillaKey.store(on);
                     logger::warn("[INV] vanilla passthrough {} (F11)",

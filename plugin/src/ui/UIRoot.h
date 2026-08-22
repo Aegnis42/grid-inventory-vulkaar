@@ -185,6 +185,20 @@ namespace FUI::UIRoot
     // console command also filled the item search box.
     [[nodiscard]] bool IsConsoleOpen();
 
+    // ★★THE DIAGNOSTIC KEY THAT SHIPS UNASSIGNED.
+    //
+    // DirectInput scancode of the key that hands the next inventory, container
+    // or shop to the engine and the one after that back to us. 0 -- the
+    // shipped value -- matches no key, so the mechanism is whole but inert.
+    // Set from GridInventory_ui.ini beside the other test switches:
+    //
+    //     !vanillakey = 87        (87 = 0x57 = F11)
+    //
+    // Kept here rather than in main.cpp so the ini parser and the input sink
+    // can both reach it without either owning the other.
+    void               SetVanillaKey(int a_scancode);
+    [[nodiscard]] int  VanillaKey();
+
     // ★★Draw the next images as SILHOUETTES: the vertex tint supplies the
     // colour, the texture supplies only its ALPHA. Needed because an ImGui tint
     // multiplies — black collapses a sprite to its shape, white leaves the
