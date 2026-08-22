@@ -50,6 +50,17 @@ namespace
     bool g_movementOff = false;        // we disabled the movement handler (text input)
     bool g_reopenAfterMsg = false;     // we stepped aside for a MessageBox (poison confirm)
 
+    // ★★★HOP TO THE VANILLA INVENTORY AND BACK, WITHOUT LEAVING THE GAME.
+    //
+    // GridInventory_vanilla.txt already did this, but reaching it meant
+    // alt-tabbing out to touch a file. A key makes the comparison immediate:
+    // open ours, open the engine's, and the SAME log holds both -- which is
+    // the only way to tell "our path is wrong" from "the engine does this
+    // too" for a report about one particular item.
+    //
+    // Written from the input thread, read from the UI thread, hence atomic.
+    std::atomic<bool> g_vanillaKey{ false };
+
     // raw RefHandle -> reference (ContainerMenu/BarterMenu return a raw handle)
     RE::TESObjectREFR* HandleToRef(RE::RefHandle a_handle)
     {
@@ -553,6 +564,24 @@ namespace
                 // sits on top taking keystrokes, and an 'i' typed into a
                 // command would otherwise close the menu behind it.
                 if (FUI::UIRoot::IsBookOpen() || FUI::UIRoot::IsConsoleOpen()) {
+                    continue;
+                }
+                // ★★F11 hands the next inventory to the engine, and F11 again
+                // takes it back. Deliberately NOT gated on our menu being open:
+                // the point is to arm the swap while nothing is open, then press
+                // the inventory key and watch the OTHER screen do the same thing.
+                // The state only reads at open time, so a mid-session press
+                // never disturbs a screen already on show.
+                if (btn->GetIDCode() == 0x57) {   // DIK_F11
+                    const bool on = !g_vanillaKey.load();
+                    g_vanillaKey.store(on);
+                    logger::warn("[INV] vanilla passthrough {} (F11)",
+                                 on ? "ON -- the engine gets the next inventory"
+                                    : "OFF -- the grid is back");
+                    SKSE::GetTaskInterface()->AddUITask([on]() {
+                        FUI::Sfx::Notify(on ? "Vanilla inventory (F11)"
+                                            : "Grid inventory (F11)");
+                    });
                     continue;
                 }
                 // The game's Inventory key closes our menu. This sink sits
@@ -1448,6 +1477,41 @@ namespace
 
     // Vanilla InventoryMenu: swallow-then-open (our grid opens once the
     // vanilla menu finished closing).
+    // ★★★ONE PLACE DECIDES WHETHER THE ENGINE KEEPS A SCREEN.
+    //
+    // Both switches -- the F11 key and the watch file -- used to be checked in
+    // the inventory intercept alone. So F11 swapped your own bags and left the
+    // MERCHANT's window as ours (reported), which is exactly the comparison the
+    // key exists to make: a shop's stock is built by levelled lists, and the
+    // only way to prove we hide none of it is to open the same shop both ways.
+    //
+    // Every screen we take over asks here now: inventory, container, barter.
+    [[nodiscard]] bool VanillaPassthrough(const char* a_tag)
+    {
+        if (g_vanillaKey.load()) {
+            logger::warn("[{}] vanilla passthrough is ON (F11) -- "
+                         "the engine keeps this screen", a_tag);
+            return true;
+        }
+        // ★ⓔⓖ WATCH: drop a file named GridInventory_vanilla.txt beside the
+        // plugin and the vanilla screens open instead of ours, for as long as
+        // it is there. It exists so the engine's own behaviour can be watched
+        // from the same session that watches ours -- delete the file and the
+        // grid comes back, no restart.
+        std::error_code ec;
+        if (std::filesystem::exists(
+                "Data/SKSE/Plugins/GridInventory_vanilla.txt", ec)) {
+            static bool s_said = false;
+            if (!s_said) {
+                s_said = true;
+                logger::warn("[{}] GridInventory_vanilla.txt present -- "
+                             "the vanilla screens are being left alone", a_tag);
+            }
+            return true;
+        }
+        return false;
+    }
+
     bool HandleInventoryMenuIntercept(const RE::MenuOpenCloseEvent& a_event)
     {
         if (a_event.menuName != RE::InventoryMenu::MENU_NAME) return false;
@@ -1458,24 +1522,7 @@ namespace
             return true;
         }
         if (a_event.opening) {
-            // ★ⓔⓖ WATCH: drop a file named GridInventory_vanilla.txt beside the
-            // plugin and the vanilla inventory opens instead of ours, for as
-            // long as it is there. It exists so the engine's own reading can be
-            // watched from the same session that watches ours -- delete the
-            // file and the grid comes back, no restart.
-            {
-                std::error_code ec;
-                if (std::filesystem::exists(
-                        "Data/SKSE/Plugins/GridInventory_vanilla.txt", ec)) {
-                    static bool s_said = false;
-                    if (!s_said) {
-                        s_said = true;
-                        logger::warn("[INV] GridInventory_vanilla.txt present -- "
-                                     "the vanilla inventory is being left alone");
-                    }
-                    return false;
-                }
-            }
+            if (VanillaPassthrough("INV")) return false;
             // close the vanilla inventory that just opened
             if (auto* mq = RE::UIMessageQueue::GetSingleton()) {
                 mq->AddMessage(RE::InventoryMenu::MENU_NAME,
@@ -1636,6 +1683,7 @@ namespace
             return true;
         }
         if (a_event.opening) {
+            if (VanillaPassthrough("LOOT")) return false;
             auto* ui = RE::UI::GetSingleton();
             auto  menu = ui ? ui->GetMenu<RE::ContainerMenu>() : nullptr;
             if (!menu) {   // unreadable mode: leave the vanilla menu
@@ -1684,6 +1732,7 @@ namespace
             return true;
         }
         if (a_event.opening) {
+            if (VanillaPassthrough("BARTER")) return false;
             // BarterMenu::GetTargetRefHandle returns the PLAYER, not the
             // merchant — the merchant is the dialogue partner.
             RE::TESObjectREFR* ref = nullptr;
