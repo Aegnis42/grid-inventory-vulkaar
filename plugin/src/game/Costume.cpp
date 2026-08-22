@@ -1,5 +1,6 @@
 #include "game/Costume.h"
 
+#include "api/HostApi.h"
 #include "ui/Loadout.h"
 
 #include <algorithm>
@@ -19,6 +20,7 @@ namespace FUI::Costume
 
         int  g_tab = -1;          // checked tab, -1 = none
         int  g_appliedTab = -2;   // what the body is currently wearing (-2 = unknown)
+        int  g_toldApi = -2;      // what the outside world was last told (-2 = nothing yet)
 
         // ★★★HOW A REBUILD IS SEEN. Not the biped pointer -- the engine reuses
         // that (measured: the same pointer over 11s), so a rebuild is invisible
@@ -255,6 +257,11 @@ namespace FUI::Costume
 
     void NoteGameLoaded()
     {
+        // ★SAY IT AGAIN AFTER A LOAD, even when the tab happens to match what
+        // the last session ended on. A listener's own state did not survive the
+        // load either, so "unchanged" is the wrong thing to tell it -- the next
+        // tick re-announces whatever this save holds.
+        g_toldApi = -2;
         g_reapplyLeft = kReapplyTimes;
         g_reapplyAt = g_frame + kReapplyFirst;
         SKSE::log::info("[COSTUME] load: {} re-dress passes scheduled", kReapplyTimes);
@@ -853,9 +860,49 @@ namespace FUI::Costume
         // the body replacer's skin painting over the chest.
     }
 
+    // ★★★ONE PLACE WATCHES, INSTEAD OF EVERY PLACE ANNOUNCING.
+    //
+    // g_tab IS the costume state, and four separate paths move it: SetTab,
+    // OnTabRemoved, LoadRecord (a save that had one) and RevertGame. Putting a
+    // broadcast at each of those would be four chances to forget one -- and a
+    // listener that missed a single transition is silently wrong from then on,
+    // with nothing to tell it so.
+    //
+    // So the transition is DETECTED here rather than reported from four places.
+    // One integer compared per tick costs nothing, and the piece list is only
+    // built on the frames where the answer actually changed.
+    void AnnounceIfMoved()
+    {
+        if (g_tab == g_toldApi) return;
+        g_toldApi = g_tab;
+        if (g_tab < 0) {
+            HostApi::BroadcastCostume(-1, nullptr, 0);
+            return;
+        }
+        // ★★ONLY WHAT THE COSTUME ACTUALLY WEARS. A loadout tab holds the whole
+        // kit, weapons included -- but a costume is appearance and it leaves
+        // weapons, the shield and the quiver alone by design. Sending the raw
+        // tab would name pieces that never reach the body, and a listener has
+        // no way to tell which of them count. CoversArmor is the same question
+        // the dressing code asks, so the answer cannot drift from it.
+        //
+        // Built here and not held: the ABI lends this list for the length of
+        // the call, and HostApi copies it into its own buffer (원칙 2).
+        const std::vector<RE::FormID> all = FUI::Loadout::FormsOf(g_tab);
+        std::vector<RE::FormID> worn;
+        worn.reserve(all.size());
+        for (const RE::FormID id : all) {
+            auto* armo = RE::TESForm::LookupByID<RE::TESObjectARMO>(id);
+            if (armo && CoversArmor(armo)) worn.push_back(id);
+        }
+        HostApi::BroadcastCostume(g_tab, worn.data(),
+                                  static_cast<std::uint32_t>(worn.size()));
+    }
+
     void Tick()
     {
         ++g_frame;   // counted every tick, not only on the ones that rebuild
+        AnnounceIfMoved();   // ★cheap: one int compare unless the state moved
         // ★★★AFTER A LOAD, DRESS MORE THAN ONCE.
         //
         // A load finishes, the costume is applied, the log says so -- and the

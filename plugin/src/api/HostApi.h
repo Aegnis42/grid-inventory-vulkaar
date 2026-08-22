@@ -33,6 +33,18 @@ namespace FUI::HostApi
     // Called from the lifecycle handler on kPostLoad: announce the host.
     void Broadcast();
 
+    // ★★THE ONE SIGNAL THAT RUNS OUTWARD (kMsgCostumeState).
+    //
+    // Announce the costume the player is wearing the look of. a_tab is the
+    // loadout tab supplying it, -1 when no costume is in force; a_forms lists
+    // the pieces (empty when a_tab is -1). Requested by a mod author who needs
+    // to follow the player's APPEARANCE, which equipment does not report -- a
+    // costume changes how you look without changing what you wear.
+    //
+    // Called from the game thread only (Costume::Tick), and only when the state
+    // actually moved -- listeners are entitled to treat each one as a change.
+    void BroadcastCostume(int a_tab, const RE::FormID* a_forms, std::uint32_t a_count);
+
     // Number of providers that passed the version handshake (0 or 1 today).
     [[nodiscard]] std::uint32_t ProviderCount();
 

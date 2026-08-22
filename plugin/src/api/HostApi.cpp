@@ -154,6 +154,39 @@ namespace FUI::HostApi
         logger::info("[API] host ready broadcast (abi {})", GridInvAPI::kABIVersion);
     }
 
+    void BroadcastCostume(int a_tab, const RE::FormID* a_forms, std::uint32_t a_count)
+    {
+        // ★★THE BUFFER IS OURS AND IT IS REUSED. The ABI says `pieces` is
+        // borrowed for the duration of the callback, so a static buffer is
+        // exactly right -- and it means announcing a costume allocates nothing
+        // after the first time. Dispatch is synchronous: every listener has
+        // read what it needs before this returns.
+        static std::vector<GridInvAPI::ItemKey> s_pieces;
+        s_pieces.clear();
+        if (a_forms && a_count > 0) {
+            s_pieces.reserve(a_count);
+            for (std::uint32_t i = 0; i < a_count; ++i) {
+                GridInvAPI::ItemKey k{};
+                k.owner = 0x00000014;   // the player
+                k.base  = a_forms[i];
+                k.uid   = 0;            // a costume names a FORM, not a stack unit
+                s_pieces.push_back(k);
+            }
+        }
+
+        GridInvAPI::CostumeState st{
+            sizeof(GridInvAPI::CostumeState),
+            GridInvAPI::kABIVersion,
+            a_tab,
+            static_cast<std::uint32_t>(s_pieces.size()),
+            s_pieces.empty() ? nullptr : s_pieces.data(),
+        };
+        SKSE::GetMessagingInterface()->Dispatch(
+            GridInvAPI::kMsgCostumeState, &st, sizeof(st), nullptr);
+        logger::info("[API] costume state broadcast: tab {} ({} piece(s))",
+                     a_tab, st.pieceCount);
+    }
+
     std::uint32_t ProviderCount()
     {
         return g_haveProvider ? 1u : 0u;

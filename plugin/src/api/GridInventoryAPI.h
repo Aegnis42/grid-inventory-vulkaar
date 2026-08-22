@@ -34,6 +34,17 @@
 //      kPostLoad :  host     --[ kMsgHostReady, const HostReady* ]--> everyone
 //      kPostLoad :  provider --[ kMsgRegisterProvider, const Provider* ]--> "GridInventory"
 //
+//  ★AND ONE SIGNAL THAT RUNS THE OTHER WAY (1.4.1):
+//
+//      any time  :  host     --[ kMsgCostumeState, const CostumeState* ]--> everyone
+//
+//  Everything above is the outside EXTENDING our UI: we call a Provider and it
+//  answers. The costume signal is the opposite direction -- we announce, nobody
+//  answers -- so it needs no Provider and no registration. A plugin that does
+//  not know this message simply never sees it, which is why adding it did NOT
+//  require an ABI bump: message types are separate namespaces, and existing
+//  extensions are untouched.
+//
 //  ★REGISTER TWO LISTENERS, SPLIT BY SENDER (learned the hard way, 2026-07-30):
 //
 //      RegisterListener(OnLifecycle);            // == RegisterListener("SKSE", ..)
@@ -74,6 +85,7 @@ namespace GridInvAPI
 
     inline constexpr std::uint32_t kMsgHostReady        = 0x47494852;  // 'GIHR'
     inline constexpr std::uint32_t kMsgRegisterProvider = 0x47495250;  // 'GIRP'
+    inline constexpr std::uint32_t kMsgCostumeState     = 0x47494353;  // 'GICS'
 
     // ---- limits -----------------------------------------------------------
 
@@ -230,6 +242,41 @@ namespace GridInvAPI
         const HostServices* services;    // owned by the host, valid for the process lifetime
     };
     static_assert(sizeof(HostReady) == 16, "HostReady is part of the ABI");
+
+    // ---- costume state ----------------------------------------------------
+    //
+    //  A COSTUME is an appearance-only outfit: the body shows the set held by
+    //  one loadout tab while the stats keep coming from what is really worn.
+    //  Sent whenever that changes -- put on, switched to another tab, or taken
+    //  off -- so a companion mod can follow what the player LOOKS like without
+    //  reading equipment, which would tell it the wrong thing.
+    //
+    //  ★SENT ON EVERY TRANSITION, not only the ones a player causes. Loading a
+    //  save that had a costume, reverting to a new game, and deleting the tab a
+    //  costume pointed at all move this state, and all announce here. A listener
+    //  that only handled the button presses would drift out of sync silently.
+    //
+    //  ★`pieces` IS BORROWED. It points into the host's own buffer and is valid
+    //  for the duration of the callback and no longer -- copy what you need
+    //  before returning. Length is `pieceCount`, which is 0 when `tab` is -1.
+    //
+    //  ★A PIECE IS A FORM, not a stack unit: `base` is the armour's FormID,
+    //  `owner` is the player, and `uid` is 0. A costume names what to LOOK
+    //  like; it does not point at one particular copy in the inventory.
+    //
+    //  ★ARMOUR ONLY. The loadout tab behind a costume may also hold weapons, a
+    //  shield and a quiver -- a costume leaves all of those alone, because they
+    //  are held rather than worn. Only the pieces that actually reach the body
+    //  are listed here, so every entry is something the player is now seen in.
+    struct CostumeState
+    {
+        std::uint32_t  structSize;   // = sizeof(CostumeState)
+        std::uint32_t  abiVersion;   // = kABIVersion
+        std::int32_t   tab;          // loadout tab supplying the look; -1 = none
+        std::uint32_t  pieceCount;   // 0 when tab is -1
+        const ItemKey* pieces;       // BORROWED: valid only during the callback
+    };
+    static_assert(sizeof(CostumeState) == 24, "CostumeState is part of the ABI");
 
     // ---- provider -> host ------------------------------------------------
 
