@@ -294,7 +294,7 @@ namespace FUI::Equip
                 }
             }
 
-            if (auto* ammo = player->GetCurrentAmmo()) {
+            if (auto* ammo = EquippedAmmo(player)) {
                 // ★★The count on this slot is what is ON THE BACK, not how many
                 // of that arrow the player owns. data.first is the whole stock —
                 // the quiver plus every tile still in the pack — so the doll
@@ -794,6 +794,21 @@ namespace FUI::Equip
         return (a_obj && a_obj->Is(RE::FormType::Ammo))
                    ? (std::max)(1, a_tileCount)
                    : 1;
+    }
+
+    RE::TESAmmo* EquippedAmmo(RE::Actor* a_actor)
+    {
+        if (!a_actor) return nullptr;
+        auto quiver = a_actor->GetInventory([](RE::TESBoundObject& o) {
+            return o.Is(RE::FormType::Ammo);
+        });
+        for (auto& [obj, data] : quiver) {
+            if (data.first <= 0) continue;
+            if (auto* e = data.second.get(); e && e->IsWorn()) {
+                return obj->As<RE::TESAmmo>();
+            }
+        }
+        return nullptr;
     }
 
     bool UseItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid, int a_xlIdx,

@@ -1,5 +1,6 @@
 #include "ui/Loadout.h"
 #include "game/Costume.h"
+#include "ui/Equip.h"
 #include "ui/Grid.h"
 #include "ui/Lang.h"
 #include "ui/Wheeler.h"
@@ -103,7 +104,7 @@ namespace FUI::Loadout
                  left->Is(RE::FormType::Armor))) {
                 add(left, true);
             }
-            if (auto* ammo = a_p->GetCurrentAmmo()) add(ammo, false);
+            if (auto* ammo = Equip::EquippedAmmo(a_p)) add(ammo, false);
 
             auto inv = a_p->GetInventory(
                 [](RE::TESBoundObject& o) { return o.Is(RE::FormType::Armor); });
@@ -158,7 +159,7 @@ namespace FUI::Loadout
                 (left->Is(RE::FormType::Weapon) || left->Is(RE::FormType::Light))) {
                 un(left, 2);
             }
-            if (auto* ammo = a_p->GetCurrentAmmo()) {
+            if (auto* ammo = Equip::EquippedAmmo(a_p)) {
                 a_em->UnequipObject(a_p, ammo, worn(ammo, 0), 1, nullptr, false, false, true, true);
             }
             auto inv = a_p->GetInventory(

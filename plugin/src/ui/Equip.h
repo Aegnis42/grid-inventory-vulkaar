@@ -44,6 +44,15 @@ namespace FUI::Equip
     // vanilla inventory does not pre-judge either — it hands the item over and
     // lets the engine decide. So does this.
     // Same queue, same tick, no slot: the engine picks what the click means.
+    // ★★THE QUIVER, WITHOUT ASKING A VTABLE. Actor::GetCurrentAmmo is a
+    // virtual and the two CommonLib lines disagree about its slot -- 0x9E in
+    // the tree we used to build against, 0x9F in the one that reads 1.7.99's
+    // address library. An off-by-one there does not fail; it calls the
+    // neighbour and answers with whatever that returns, which is how equipped
+    // arrows silently vanished from the doll. Equipped ammo is the ammo the
+    // engine has marked worn, and that needs no vtable.
+    [[nodiscard]] RE::TESAmmo* EquippedAmmo(RE::Actor* a_actor);
+
     bool UseItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0, int a_xlIdx = -1,
                  std::uint16_t a_sig = 0, const std::string& a_srcKey = {},
                  int a_tileCount = 1);
