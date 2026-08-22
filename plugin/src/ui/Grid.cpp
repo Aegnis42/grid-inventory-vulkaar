@@ -9414,6 +9414,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (auto* e1 = LiveEntryOf(player, book)) heldAfter = e1->countDelta;
         SKSE::log::info("[BOOK] Read -> {}; spell {} -> {}, held {} -> {}",
             took ? 1 : 0, hadSpell ? 1 : 0, hasSpell ? 1 : 0, heldBefore, heldAfter);
+
+        // ★★★AND THE TOME IS SPENT. Read() is the engine's door and it does
+        // teach -- measured: `Read -> 1; spell 0 -> 1` on a spell the player
+        // did not have. What it does NOT do is take the book: `held 2 -> 2`.
+        // In the vanilla menu something downstream of the page spends it, and
+        // that something is not reachable from here.
+        //
+        // So the spending is done explicitly, and only on the exact evidence
+        // that it is owed: the read was accepted, the spell arrived across it,
+        // and the count did not move. If a gate refuses the read -- vanilla's
+        // or a mod's -- `took` is false, nothing was learned, and the book
+        // stays, which is the whole point of asking the engine first.
+        if (took && spell && hasSpell && !hadSpell && heldAfter == heldBefore &&
+            heldAfter > 0) {
+            player->RemoveItem(book, 1, RE::ITEM_REMOVE_REASON::kRemove,
+                               nullptr, nullptr);
+            SKSE::log::info("[BOOK] tome spent");
+            NotePendingRemove(book, {}, 1, -1);
+            RequestRebuild();
+        }
         // the page is owed only if the engine raises none of its own
         g_pageOwed = req;
         // ⓔⓖ PROBE. Two reports say our reading is not the game's reading: the
