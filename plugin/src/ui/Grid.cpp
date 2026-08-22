@@ -9320,6 +9320,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             std::uint16_t sig = 0;
         };
         std::optional<PendingRead> g_pendingRead;
+        // ★A page still owed after the engine has read the book, settled one
+        // tick later: a menu is raised through the UI queue, never
+        // synchronously, so "did the engine open one?" cannot be asked now.
+        std::optional<PendingRead> g_pageOwed;
         // ⓔⓖ PROBE: the book the page was raised for, so the CLOSE can report
         // whether anything actually registered as a read.
         RE::FormID g_probeBook = 0;
@@ -9331,8 +9335,58 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_pendingRead = PendingRead{ a_book->GetFormID(), a_uid, a_sig };
     }
 
+    // Raise the engine's page for a book we are only DISPLAYING. Handing it
+    // the sub-stack keeps a per-instance name (quest alias / player rename) on
+    // the page, and ref = nullptr is how a book held in the inventory is shown
+    // rather than one lying in the world.
+    //
+    // ★★★THIS IS NOT READING. Measured across this one call: `spell 0 -> 1,
+    // held 2 -> 2` -- it APPLIES the book on the spot and leaves it in the
+    // pack. That is why a tome was learned the instant it was right-clicked,
+    // why nothing a skill gate hangs off ever ran, and why the Elder Scroll
+    // opened to an empty page. Display only; the reading happens above.
+    void ShowBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
+                      std::uint16_t a_sig)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !a_book) return;
+        auto* xl = ExtraForPool(LiveEntryOf(player, a_book), a_uid, a_sig);
+        RE::BSString desc;
+        a_book->GetDescription(desc, a_book);
+        RE::BookMenu::OpenBookMenu(desc, xl, nullptr, a_book,
+                                   RE::NiPoint3{}, RE::NiMatrix3{}, 1.0f, true);
+    }
+
     void ProcessBookRead()
     {
+        // ---- the page we may still owe, one tick after the engine read ----
+        if (g_pageOwed) {
+            const auto req = *g_pageOwed;
+            g_pageOwed.reset();
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto* book = RE::TESForm::LookupByID<RE::TESObjectBOOK>(req.form);
+            auto* ui = RE::UI::GetSingleton();
+            if (!player || !book || !ui) return;
+            if (ui->IsMenuOpen(RE::BookMenu::MENU_NAME)) {
+                SKSE::log::info("[BOOK] the engine raised its own page");
+                return;
+            }
+            // consumed by the reading: there is nothing left to show
+            auto* entry = LiveEntryOf(player, book);
+            if (!entry || entry->countDelta <= 0) {
+                SKSE::log::info("[BOOK] read consumed it -- no page to raise");
+                return;
+            }
+            // a tome whose spell we now know has said everything it has to say
+            if (auto* sp = book->GetSpell(); sp && player->HasSpell(sp)) {
+                SKSE::log::info("[BOOK] spell already known -- no page to raise");
+                return;
+            }
+            SKSE::log::info("[BOOK] the engine raised no page -- showing it ourselves");
+            ShowBookPage(book, req.uid, req.sig);
+            return;
+        }
+
         if (!g_pendingRead) return;
         const auto req = *g_pendingRead;
         g_pendingRead.reset();
@@ -9345,35 +9399,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             ui && ui->IsMenuOpen(RE::BookMenu::MENU_NAME)) {
             return;
         }
-
-        // The engine's own reader. Handing it the sub-stack keeps a
-        // per-instance name (quest alias / player rename) on the page, and
-        // ref = nullptr is exactly how vanilla opens a book held in the
-        // inventory rather than one lying in the world.
-        auto* xl = ExtraForPool(LiveEntryOf(player, book), req.uid, req.sig);
-        RE::BSString desc;
-        book->GetDescription(desc, book);
-        // ⓔⓖ PROBE 2. The state that actually moves, sampled either side of
-        // the one call -- IsRead() is a BASE-FORM flag and read back 1 on
-        // every book tested, so it can tell us nothing.
+        // ★★★READ IT THROUGH THE ENGINE'S OWN DOOR. Everything a player and
+        // their mods expect of reading -- a skill gate, a quest fragment, the
+        // tome being spent -- hangs off this, and we were never opening it.
         auto* spell = book->GetSpell();
-        const bool hadSpell = (spell && player) ? player->HasSpell(spell) : false;
+        const bool hadSpell = spell ? player->HasSpell(spell) : false;
         int heldBefore = 0;
         if (auto* e0 = LiveEntryOf(player, book)) heldBefore = e0->countDelta;
 
-        RE::BookMenu::OpenBookMenu(desc, xl, nullptr, book,
-                                   RE::NiPoint3{}, RE::NiMatrix3{}, 1.0f, true);
+        const bool took = book->Read(player);
 
-        const bool hasSpell = (spell && player) ? player->HasSpell(spell) : false;
+        const bool hasSpell = spell ? player->HasSpell(spell) : false;
         int heldAfter = 0;
         if (auto* e1 = LiveEntryOf(player, book)) heldAfter = e1->countDelta;
-        if (spell) {
-            SKSE::log::info("[BOOK] ...across OpenBookMenu: spell {} -> {}, held {} -> {}",
-                hadSpell ? 1 : 0, hasSpell ? 1 : 0, heldBefore, heldAfter);
-        } else {
-            SKSE::log::info("[BOOK] ...across OpenBookMenu: held {} -> {}",
-                heldBefore, heldAfter);
-        }
+        SKSE::log::info("[BOOK] Read -> {}; spell {} -> {}, held {} -> {}",
+            took ? 1 : 0, hadSpell ? 1 : 0, hasSpell ? 1 : 0, heldBefore, heldAfter);
+        // the page is owed only if the engine raises none of its own
+        g_pageOwed = req;
         // ⓔⓖ PROBE. Two reports say our reading is not the game's reading: the
         // Dawnguard Elder Scroll does nothing at all, and a spell tome skips
         // the "you lack the skill" gate. Both would follow if OpenBookMenu
@@ -9386,8 +9428,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // IsRead() is still false after the page closes, our reading never
         // counted as one, and that is the whole bug.
         g_probeBook = req.form;
-        SKSE::log::info("[BOOK] open '{}' ({:08X}) type={} spell={} skill={} read={}",
-            DisplayNameOf(book, xl), req.form,
+        SKSE::log::info("[BOOK] read '{}' ({:08X}) type={} spell={} skill={} wasRead={}",
+            DisplayNameOf(book, ExtraForPool(LiveEntryOf(player, book), req.uid, req.sig)),
+            req.form,
             book->IsNoteScroll() ? "note/scroll" : "tome",
             book->TeachesSpell() ? 1 : 0, book->TeachesSkill() ? 1 : 0,
             book->IsRead() ? 1 : 0);
