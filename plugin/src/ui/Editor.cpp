@@ -31,9 +31,14 @@ namespace FUI::Editor
         // board the instant you touch the control, before you have said what
         // you actually want (reported).
         //
-        // So this row alone waits for the edit to SETTLE. The number moves
-        // under the cursor as usual; the board is only rebuilt once the value
-        // has stopped moving.
+        // So this row alone reaches the board at SAVE and nowhere else. The
+        // number moves under the cursor as usual and the board does not stir
+        // until the edit is committed -- which is also the only moment the
+        // player has actually said what they meant.
+        //
+        // Every LIVE apply therefore has to send the stack the board is built
+        // for rather than the one being edited (see LiveDef), or adjusting any
+        // other row would drag a half-chosen cap along with it.
         int g_stackApplied = 0;
         std::string         g_selKey;
 
@@ -117,12 +122,25 @@ namespace FUI::Editor
         // rewrite the file every frame.
         void MarkDirty() { g_dirty = true; }
 
+        // What a LIVE apply is allowed to say: everything being edited, except
+        // the stack cap, which stays at whatever the board is already built
+        // for until Save.
+        FullDef LiveDef()
+        {
+            FullDef d = g_cur;
+            d.stack = g_stackApplied;
+            return d;
+        }
+
         // SAVE: the one place a change reaches the file. The baseline moves up
         // to here, so from now on "revert" means back to what was just saved.
         void SaveSession()
         {
             if (!g_dirty || !g_sel || !g_hooks.setOverride) return;
+            const bool stackMoved = g_cur.stack != g_stackApplied;
             g_hooks.setOverride(g_sel, g_cur, true);   // persist to ini
+            g_stackApplied = g_cur.stack;              // ★the cap lands HERE
+            if (stackMoved) Grid::RequestRebuild();
             g_base = g_cur;
             g_baseOverride = true;                     // the line exists now
             g_dirty = false;
@@ -139,6 +157,7 @@ namespace FUI::Editor
         {
             if (!g_dirty || !g_sel) return;
             g_cur = g_base;
+            g_stackApplied = g_base.stack;
             if (g_baseOverride) {
                 if (g_hooks.setOverride) g_hooks.setOverride(g_sel, g_base, false);
             } else if (g_hooks.resetOverride) {
@@ -898,13 +917,8 @@ namespace FUI::Editor
                 (void)Theme::GaugeStepInt(stAt, kTrackW * S0, stH,
                                           "##StackCap", g_cur.stack, 1, 0, 999);
             }
-            // ★...and it lands here, once the hand is off it. Typing counts as
-            // moving too: a half-typed "20" is a 2 the moment it is entered.
-            if (g_cur.stack != g_stackApplied && !sTyping &&
-                !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                g_stackApplied = g_cur.stack;
-                chLayout = true;
-            }
+            // ★...and it is NOT applied here. It lands at Save (SaveSession).
+            if (g_cur.stack != g_stackApplied) MarkDirty();
             ImGui::SameLine();
             if (g_cur.stack > 0) {
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(Theme::Chrome(0.85f)), "(override)");
@@ -916,7 +930,7 @@ namespace FUI::Editor
         ImGui::Separator();
 
         if ((chOrient || chLayout) && g_hooks.setOverride) {
-            g_hooks.setOverride(g_sel, g_cur, false);   // live apply, zero IO
+            g_hooks.setOverride(g_sel, LiveDef(), false);   // live apply, zero IO
             if (chLayout) Grid::RequestRebuild();       // footprint: reflow
             else          Grid::RefreshDefs();          // orientation: recapture only
             MarkDirty();                                // ini write, debounced
@@ -954,6 +968,7 @@ namespace FUI::Editor
             g_cur = d;
             g_stackApplied = g_cur.stack;
             if (g_hooks.setOverride) g_hooks.setOverride(g_sel, g_cur, false);
+            // (Reset is not an edit in progress -- it IS the value)
             DefToPainter();
             Grid::RequestRebuild();
             MarkDirty();
@@ -1001,7 +1016,7 @@ namespace FUI::Editor
             g_cur.lightAz = s_clip.lightAz;
             g_cur.lightEl = s_clip.lightEl;
             DefToPainter();
-            if (g_hooks.setOverride) g_hooks.setOverride(g_sel, g_cur, false);
+            if (g_hooks.setOverride) g_hooks.setOverride(g_sel, LiveDef(), false);
             Grid::RequestRebuild();
             MarkDirty();
         }
