@@ -9893,6 +9893,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (const std::string slot = Equip::SlotLabel(a_obj); !slot.empty()) {
             ImGui::TextColored(Theme::TipSub(), "%s", slot.c_str());
         }
+        // ★A BOOK YOU HAVE READ SAYS SO, which is what vanilla's list does and
+        // what a shelf of two hundred titles needs to be usable at all. The
+        // flag lives on the BASE FORM, so this is per TITLE rather than per
+        // copy -- the same grain vanilla marks at, and the honest one: having
+        // read one copy is having read the book.
+        if (const auto* bk = a_obj->As<RE::TESObjectBOOK>();
+            bk && bk->IsRead() && !bk->TeachesSpell()) {
+            ImGui::TextColored(Theme::TipSub(), "%s", Lang::T(Lang::Str::BookRead));
+        }
         // ★The armour CLASS reads as a second qualifier of the same kind as the
         // slot -- "Body", then "Heavy Armor" -- so it belongs on its own line
         // directly under it, not appended to the rating below (user's layout
@@ -10361,7 +10370,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             } else if (mode == LootBarter::Mode::kBarter) {
                 verb = Lang::Str::ActSell;
             } else if (auto* bk = a_obj->As<RE::TESObjectBOOK>()) {
-                verb = bk->TeachesSpell() ? Lang::Str::ActLearn : Lang::Str::ActRead;
+                verb = bk->TeachesSpell() ? Lang::Str::ActLearn
+                     : bk->IsRead()       ? Lang::Str::ActReread
+                                          : Lang::Str::ActRead;
             } else if (a_obj->Is(RE::FormType::AlchemyItem) ||
                        a_obj->Is(RE::FormType::Ingredient)) {
                 verb = Lang::Str::ActUse;   // drunk / eaten, not worn

@@ -197,6 +197,8 @@ namespace FUI::Lang
         X(ActPickUp, "pick up")                                                                             \
         X(ActEquip, "equip")                                                                                \
         X(ActRead, "read")                                                                                  \
+        X(ActReread, "read again")                                                                          \
+        X(BookRead, "Read")                                                                                 \
         X(ActLearn, "learn")                                                                                \
         X(ActSell, "sell")                                                                                  \
         X(ActStoreIn, "store")                                                                              \
