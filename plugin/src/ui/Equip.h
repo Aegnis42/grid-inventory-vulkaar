@@ -153,6 +153,66 @@ namespace FUI::Equip
     // not with a budget. 0 before the first draw.
     [[nodiscard]] float SlotsTopOffset();
 
+    // ★The same row in SCREEN space. Not derivable from the offset above:
+    // Draw() runs inside the "fab_left" CHILD, so that number is relative to
+    // the child, and adding it to the MAIN window's origin lands a child's
+    // worth too high (it did — the drawer's first row sat above the doll's).
+    // Anything drawing outside both windows wants this one.
+    [[nodiscard]] float SlotsTopScreen();
+
+    // ---- accessory drawer (PLAN_ACCESSORY_DRAWER.md) ----------------------
+    //
+    // The doll holds four accessory cells (acc1..acc3 + accM — the strip's
+    // fifth is the drawer's button), and the next worn accessory used to be
+    // DROPPED: silently, with nothing on screen and nothing in the log.
+    // Outfit mods routinely equip eight to fifteen — scarves, bags, belts,
+    // glasses, cloaks, piercings all land on biped slots 44..60, which
+    // SlotForArmor has no name for.
+    //
+    // The drawer is the rest of that list, in a panel docked to the main
+    // window's left edge. The strip is effectively column 0 and the drawer
+    // continues it, so between them nothing worn is invisible.
+
+    // The lowest biped slot (30..61) this armour occupies, or a large number
+    // when it claims none.
+    //
+    // ★THIS decides where an accessory sits, not the order it was equipped in.
+    // Assignment used to be `accNext++`, so taking one item off and putting it
+    // back rearranged the others. A slot number cannot drift: wear the same
+    // outfit and the cells are the same cells.
+    [[nodiscard]] int PrimarySlot(RE::TESBoundObject* a_obj);
+
+    // How many worn accessories did not fit the doll's five cells. May be 0 —
+    // the tab shows regardless, because a drawer that appears only once you
+    // are overflowing is a drawer nobody knows exists.
+    [[nodiscard]] int DrawerCount();
+
+    [[nodiscard]] bool DrawerOpen();
+    void               SetDrawerOpen(bool a_open);
+
+    // ★NOT during loot/barter. The doll itself is hidden there (the partner
+    // window takes that side of the screen), so a drawer hanging off it would
+    // be a panel belonging to something the player cannot see.
+    [[nodiscard]] bool DrawerAvailable();
+
+    // Draws BOTH the tab and the panel, from outside the main window — UIRoot
+    // calls this at top level, beside the shelf-bag windows.
+    //
+    // ★The tab sits in the main window's own margin, level with the first
+    // slot row, and STAYS there -- it used to ride the panel's outer edge,
+    // so the control that opens the drawer travelled with the drawer and had
+    // to be found again after every slide. It still cannot be drawn BY the
+    // main window (a widget clips to the window that declares it, and the
+    // panel it toggles lies entirely outside that rectangle), so one function
+    // owns both halves and a slide can never leave them disagreeing.
+    //
+    // Position is derived, never remembered: the panel's inner edge is the
+    // main window's left edge and its first CELL — not its frame — sits on
+    // the doll's first slot row, so moving the window moves the drawer with
+    // it and the two grids read as one column.
+    void DrawDrawer(const ImVec2& a_mainPos, const ImVec2& a_mainSize,
+                    float a_rowTopScreen);
+
     // ★★What the TOOLTIP says an item is worn on, and it has to agree with the
     // doll: SlotAccepts already files every biped slot this UI does not know as
     // an ACCESSORY, so an unknown one reads "Accessory (47)" rather than having

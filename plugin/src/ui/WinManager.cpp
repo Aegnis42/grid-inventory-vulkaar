@@ -1,5 +1,6 @@
 ﻿#include "ui/IconCache.h"
 #include "ui/Grid.h"
+#include "ui/Equip.h"
 #include "ui/Lang.h"
 #include "ui/LootBarter.h"
 #include "ui/Theme.h"
@@ -338,6 +339,12 @@ namespace FUI
             // UIRoot::SetVanillaKey.
             if (key == "!vanillakey") {
                 try { UIRoot::SetVanillaKey(std::stoi(rest)); } catch (...) {}
+                continue;
+            }
+            // Accessory drawer, open or shut. A screen preference, so it
+            // lives here rather than in the cosave.
+            if (key == "!accdrawer") {
+                Equip::SetDrawerOpen(rest == "1" || rest == "true");
                 continue;
             }
             // Test switch, not a setting: see Grid::SetRebuildDrop.
@@ -819,6 +826,7 @@ namespace FUI
         if (UIRoot::VanillaKey() != 0) {
             out << "!vanillakey = " << UIRoot::VanillaKey() << "\n";
         }
+        if (Equip::DrawerOpen())   out << "!accdrawer = 1\n";
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
         out << "!caplight = " << Theme::CaptureLightAz()
@@ -1085,25 +1093,27 @@ namespace FUI
                (w ? w->topPad : 0.0f) + (TitleBarH() - a_glyphH) * 0.5f;
     }
 
-    void WinManager::TitleBar(const std::string& a_key, const char* a_label, float a_reserveRight,
-                              bool a_centerTitle)
+    // ★★★A WINDOW'S GROUND, SEPARATED FROM ITS TITLE.
+    //
+    // Every skin that paints its own sheet -- torn paper, the ink
+    // photograph, the flat panel -- used to do it INSIDE TitleBar, which
+    // meant a panel without a title bar had no ground at all. The
+    // accessory drawer is exactly that panel, and on the ink skin it came
+    // out as floating cells over the world (reported).
+    //
+    // Split out rather than copied: two places painting the same sheet is
+    // how skins drift apart one at a time.
+    //
+    // a_topPad/a_barH describe the title strip this ground sits under, for
+    // the one gradient that needs to know where it ends. A panel with no
+    // title passes 0 for both, and the gradient collapses to nothing.
+    void WinManager::PaintGround(ImDrawList* dl, ImVec2 wp, ImVec2 we,
+                                 const std::string& a_key, float a_topPad,
+                                 float a_barH, ImVec2 a_clipMin, ImVec2 a_clipMax)
     {
-        auto& w = Ensure(a_key);
-        // ★What ApplyNext already charged this window's height for. Reading it
-        // rather than taking it again is the whole point: one argument, one
-        // number, no way to pay for one and spend the other.
-        const float a_topPad = w.topPad;
-        w.pos = ImGui::GetWindowPos();
-        w.size = ImGui::GetWindowSize();
-        w.lastSeen = ImGui::GetFrameCount();
-
         const auto& sk = Theme::S();
         const float S = Theme::Scale();
-        const float barH = TitleBarH();
-
-        auto* dl = ImGui::GetWindowDrawList();
-        const ImVec2 wp = w.pos;
-        const ImVec2 we(wp.x + w.size.x, wp.y + w.size.y);
+        const float barH = a_barH;
 
         // Window chrome must reach the EDGE pixels, but the window drawlist
         // is clipped ~half-padding inside the window (edge-hugging strips and
@@ -1114,8 +1124,18 @@ namespace FUI
         const float bleed = sk.tornFrame  ? Theme::kTornOut * S
                           : Theme::InkChrome() ? (Theme::kInkBleed + Theme::kInkFade) * S
                                                : 0.0f;
-        dl->PushClipRect(ImVec2(wp.x - bleed, wp.y - bleed),
-                         ImVec2(we.x + bleed, we.y + bleed), false);
+        // ★The override is intentional (see the note above) — but a caller may
+        // fence it. Intersecting rather than replacing keeps the bleed for
+        // everyone who does not ask for one.
+        ImVec2 clipLo(wp.x - bleed, wp.y - bleed);
+        ImVec2 clipHi(we.x + bleed, we.y + bleed);
+        if (a_clipMax.x > a_clipMin.x && a_clipMax.y > a_clipMin.y) {
+            clipLo.x = (std::max)(clipLo.x, a_clipMin.x);
+            clipLo.y = (std::max)(clipLo.y, a_clipMin.y);
+            clipHi.x = (std::min)(clipHi.x, a_clipMax.x);
+            clipHi.y = (std::min)(clipHi.y, a_clipMax.y);
+        }
+        dl->PushClipRect(clipLo, clipHi, false);
 
         // ★The window key, hashed. Both the torn silhouette and the ink
         // sheet's cut are derived from it, for the same reason: a window keeps
@@ -1258,6 +1278,33 @@ namespace FUI
             dl->AddRect(ImVec2(wp.x + b, wp.y + b), ImVec2(we.x - b, we.y - b),
                         Theme::BevelLit(true), (r > b) ? r - b : 0.0f, 0, 1.0f);
         }
+        dl->PopClipRect();
+    }
+
+    void WinManager::TitleBar(const std::string& a_key, const char* a_label, float a_reserveRight,
+                              bool a_centerTitle)
+    {
+        auto& w = Ensure(a_key);
+        // ★What ApplyNext already charged this window's height for. Reading it
+        // rather than taking it again is the whole point: one argument, one
+        // number, no way to pay for one and spend the other.
+        const float a_topPad = w.topPad;
+        w.pos = ImGui::GetWindowPos();
+        w.size = ImGui::GetWindowSize();
+        w.lastSeen = ImGui::GetFrameCount();
+
+        const auto& sk = Theme::S();
+        const float S = Theme::Scale();
+        const float barH = TitleBarH();
+
+        auto* dl = ImGui::GetWindowDrawList();
+        const ImVec2 wp = w.pos;
+        const ImVec2 we(wp.x + w.size.x, wp.y + w.size.y);
+        PaintGround(dl, wp, we, a_key, a_topPad, barH);
+        dl->PushClipRect(ImVec2(wp.x - Theme::kTornOut * S,
+                                wp.y - Theme::kTornOut * S),
+                         ImVec2(we.x + Theme::kTornOut * S,
+                                we.y + Theme::kTornOut * S), false);
         // (no title rule on a light panel — same reason as the frame above)
         if (!sk.lightPanel) {
             const float ly = wp.y + Theme::FrameInsetY() + a_topPad + barH;

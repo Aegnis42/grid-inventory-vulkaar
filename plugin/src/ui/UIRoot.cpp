@@ -3200,7 +3200,21 @@ namespace FUI::UIRoot
             DrawTrashButton(gridW, bodyH);   // F2: bottom-right of the grid column
             ImGui::EndChild();
 
+            // ★The accessory drawer hangs off this window's LEFT edge, which
+            // is outside it -- a window clips to its own rectangle, so the
+            // panel has to be its own. Drawn right after End() with the rect
+            // this frame actually used, so it tracks a window drag exactly.
+            const ImVec2 mainPos = ImGui::GetWindowPos();
+            const ImVec2 mainDim = ImGui::GetWindowSize();
+
             ImGui::End();
+
+            // ★No doll in compact mode, so no drawer hanging off it — the
+            // panel would belong to a column that is not on screen. (The
+            // button lives in the doll's own strip, so it goes with it.)
+            if (!compact) {
+                Equip::DrawDrawer(mainPos, mainDim, Equip::SlotsTopScreen());
+            }
         }
     }
 

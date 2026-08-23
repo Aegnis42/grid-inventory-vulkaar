@@ -124,6 +124,29 @@ namespace FUI
         // back from what ApplyNext recorded for this key. It used to be passed
         // to both, and the comment describing which windows opted out went stale
         // the same day four of them opted in.
+        // Paint a window's GROUND -- the skin's own sheet (torn paper, ink
+        // photograph, flat panel) plus its frame. Split out of TitleBar so a
+        // panel with NO title bar can still have a background; the accessory
+        // drawer is that panel, and without this it was cells floating over
+        // the world on any skin that paints itself.
+        //
+        // a_topPad/a_barH describe the title strip above this ground, for the
+        // one gradient that needs it. Pass 0/0 when there is no title.
+        //
+        // ★★a_clipMin/a_clipMax FENCE THE PAINT IN. This routine deliberately
+        // overrides the window's clip (chrome has to reach the edge pixels,
+        // and torn/ink sheets bleed past them), which is right for a window
+        // painting itself and wrong for anything painting a rect BIGGER than
+        // what may be seen. The drawer is that case: its sheet belongs to the
+        // whole sliding box, but only the part outside the inventory window is
+        // allowed on screen — without a fence the sheet drew straight over the
+        // inventory (reported on the ink and parchment skins, which are the
+        // ones that paint a sheet at all). Leave them equal to opt out.
+        void PaintGround(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max,
+                         const std::string& a_key, float a_topPad, float a_barH,
+                         ImVec2 a_clipMin = ImVec2(0.0f, 0.0f),
+                         ImVec2 a_clipMax = ImVec2(0.0f, 0.0f));
+
         void TitleBar(const std::string& a_key, const char* a_label, float a_reserveRight = 0.0f,
                       bool a_centerTitle = false);
 

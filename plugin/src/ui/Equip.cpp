@@ -7,6 +7,7 @@
 #include "game/DualRing.h"
 #include "ui/Grid.h"
 #include "ui/Loadout.h"
+#include "ui/LootBarter.h"
 #include "ui/IconCache.h"
 #include "ui/Lang.h"
 #include "ui/Sfx.h"
@@ -36,15 +37,29 @@ namespace FUI::Equip
 {
     namespace
     {
+        // ---- accessory drawer state --------------------------------------
+        // How many worn accessories the doll's five cells could not take.
+        // Written by CollectEquipment, read by the tab and the panel.
+        int   g_drawerCount = 0;
+        bool  g_drawerOpen  = false;
+        // 0 = shut, 1 = fully out. Rolled by DeltaTime so opening and closing
+        // ride the same curve.
+        float g_drawerSlide = 0.0f;
+
         struct SlotDef
         {
             const char* id;
             const char* icon;   // silhouette file: slot_<icon>.fic
         };
 
-        constexpr SlotDef kStrip[5] = {
+        // ★FOUR, not five. The strip's last cell is no longer a slot — it is
+        // the drawer's button (see DrawDrawerCell). Trading one accessory cell
+        // for the drawer is not a loss: whatever would have sat there is one
+        // of the things the drawer holds anyway, and a control that lives in
+        // the column it opens beats one bolted to the window frame.
+        constexpr SlotDef kStrip[4] = {
             { "circlet", "circlet" }, { "acc1", "acc" }, { "acc2", "acc" },
-            { "acc3", "acc" },        { "acc4", "acc" },
+            { "acc3", "acc" },
         };
         constexpr SlotDef kDoll[4][3] = {
             { { "earring", "earring" }, { "head", "head" },   { "necklace", "necklace" } },
@@ -114,7 +129,25 @@ namespace FUI::Equip
         // window is the proven pattern.
         bool  g_buyOpen = false;    // "+" purchase confirm window open
         int   g_delTarget = -1;     // preset index pending delete confirm (>=1)
+        // ★How many accessory cells the doll took before the drawer starts.
+        // Written by CollectEquipment from the array it actually used, read by
+        // the drawer to build the same ids -- a literal in both places is how
+        // the two drift and a whole cell's contents go missing.
+        int   g_drawerFirstIdx = 4;
+        // ★Which side the panel comes out of, decided by the panel and read by
+        // the BUTTON, which sits in a child window and cannot see the main
+        // window's rect to work it out. One frame stale at worst, and only
+        // while a window drag is crossing the screen edge.
+        bool  g_drawerToRight = false;
+
         float g_slotsTop = 0.0f;    // GI77: measured tab-strip height
+        // ★★THE SAME ROW, IN SCREEN SPACE -- and it has to be measured
+        // separately, not derived. g_slotsTop is relative to the window Draw()
+        // ran in, and Draw() runs inside the "fab_left" CHILD, so adding it to
+        // the MAIN window's origin lands a child-height too high. The drawer
+        // sits outside both windows and can only speak screen coordinates, so
+        // it gets the row's absolute y and no arithmetic to get wrong.
+        float g_slotsTopScreen = 0.0f;
 
         // silhouettes: loaded once, kept for the process lifetime
         std::unordered_map<std::string, IconCache::Icon> g_silhouettes;
@@ -149,6 +182,22 @@ namespace FUI::Equip
             }
             g_silhouettes[key] = icon;
             return icon.srv ? &g_silhouettes[key] : nullptr;
+        }
+
+        // ★The lowest biped slot the item occupies. See Equip.h for why this,
+        // and not arrival order, decides which accessory cell it gets.
+        // Bit N is slot 30+N -- the same reading the tooltip already does.
+        int PrimarySlotOf(RE::TESBoundObject* a_obj)
+        {
+            constexpr int kNoSlot = 9999;   // sorts last
+            const auto* biped = a_obj ? a_obj->As<RE::BGSBipedObjectForm>() : nullptr;
+            if (!biped) return kNoSlot;
+            const auto mask = static_cast<std::uint32_t>(biped->GetSlotMask().get());
+            if (mask == 0) return kNoSlot;
+            for (int bit = 0; bit < 32; ++bit) {
+                if (mask & (1u << bit)) return 30 + bit;
+            }
+            return kNoSlot;
         }
 
         const char* SlotForArmor(RE::TESObjectARMO* a_armo)
@@ -219,21 +268,79 @@ namespace FUI::Equip
         {
             auto* player = RE::PlayerCharacter::GetSingleton();
             if (!player) return;
-            const char* accPool[] = { "acc1", "acc2", "acc3", "acc4", "accM" };
-            int accNext = 0;
+
+            // ★★★THE SIXTH ACCESSORY USED TO BE THROWN AWAY.
+            //
+            // This was `accPool[5]` and `if (!s) return;` -- an item the player
+            // is visibly wearing, dropped with nothing on screen and nothing in
+            // the log to say so. Outfit mods equip eight to fifteen accessories
+            // routinely (scarves, bags, belts, glasses, cloaks, piercings all
+            // sit on biped slots 44..60, which SlotForArmor cannot name), so
+            // the cap was not an edge case.
+            //
+            // Accessories are now COLLECTED rather than assigned on sight, so
+            // there is a complete list to sort before any cell is handed out.
+            // The doll's five keep their names; the rest become acc6, acc7...
+            // and the drawer shows them. SlotAccepts tests rfind("acc", 0) == 0,
+            // which already accepts every one of those.
+            struct PendingAcc
+            {
+                RE::TESBoundObject* obj;
+                int                 count;
+                std::uint8_t        glow;
+                RE::ExtraDataList*  xl;
+                int                 hand;
+                int                 slotNo;   // PrimarySlot -- decides the cell
+            };
+            std::vector<PendingAcc> accs;
 
             auto add = [&](const char* slot, RE::TESBoundObject* obj, int count,
                            std::uint8_t glow = 0, RE::ExtraDataList* xl = nullptr,
                            int hand = 0) {
                 if (!obj) return;
-                const char* s = slot;
-                if (!s) s = (accNext < 5) ? accPool[accNext++] : nullptr;
-                if (!s) return;
+                if (!slot) {
+                    // an accessory: park it, place it once they are all in
+                    accs.push_back({ obj, count, glow, xl, hand, PrimarySlotOf(obj) });
+                    return;
+                }
                 std::uint16_t uid = 0;
                 if (xl) {
                     if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
                 }
-                a_out[s] = { obj, count, glow, uid, Grid::InstanceSigOf(xl), hand };
+                a_out[slot] = { obj, count, glow, uid, Grid::InstanceSigOf(xl), hand };
+            };
+
+            // ...and hand out the accessory cells, in slot-number order, once
+            // the walk below has finished. Called at the end of this function.
+            auto placeAccessories = [&]() {
+                std::stable_sort(accs.begin(), accs.end(),
+                    [](const PendingAcc& x, const PendingAcc& y) {
+                        return x.slotNo < y.slotNo;
+                    });
+                // The doll's own cells, then the drawer's.
+                // ★acc4 is GONE from this list — the strip's last cell became
+                // the drawer button. Anything landing there would have been
+                // invisible, which is the exact failure the drawer exists to
+                // fix. The count below follows the array, so the two can never
+                // disagree about where the doll stops.
+                static const char* kDollAcc[] = { "acc1", "acc2", "acc3", "accM" };
+                for (std::size_t i = 0; i < accs.size(); ++i) {
+                    const auto& a = accs[i];
+                    const std::string id =
+                        (i < std::size(kDollAcc)) ? std::string(kDollAcc[i])
+                                                  : ("acc" + std::to_string(i + 1));
+                    std::uint16_t uid = 0;
+                    if (a.xl) {
+                        if (const auto* xu = a.xl->GetByType<RE::ExtraUniqueID>()) {
+                            uid = xu->uniqueID;
+                        }
+                    }
+                    a_out[id] = { a.obj, a.count, a.glow, uid,
+                                  Grid::InstanceSigOf(a.xl), a.hand };
+                }
+                g_drawerCount = static_cast<int>(
+                    accs.size() > std::size(kDollAcc) ? accs.size() - std::size(kDollAcc) : 0);
+                g_drawerFirstIdx = static_cast<int>(std::size(kDollAcc));
             };
 
             // equipped SPELLS have no world model (garbage capture) and are
@@ -385,6 +492,11 @@ namespace FUI::Equip
                 add("ringL", second, 1, Grid::GlowBits(second, nullptr, nullptr));
             }
 
+            // ★Every accessory is in hand now, so the cells can be handed out
+            // in slot order. Nothing above may place one directly -- that was
+            // the arrival-order assignment this replaces.
+            placeAccessories();
+
             // ---- self-check: THE DOLL SHOWS WHAT THE BODY WEARS ---------------
             // Everything else in this log describes the BOARD. Nothing described
             // the doll, so "the same weapon in both hands" -- where the whole
@@ -442,36 +554,26 @@ namespace FUI::Equip
             }
         }
 
-        void DrawSlot(const SlotDef& a_slot, float a_w, float a_h,
-                      std::unordered_map<std::string, EquipEntry>& a_eq)
+        // ★★THE CELL FACE, SHARED. Every doll slot and the drawer's button all
+        // have to be the same object at rest — the button only stops looking
+        // like a slot when the cursor is on it. Four skin branches copied into
+        // a second place is exactly how that promise breaks, one skin at a
+        // time, and nobody notices until someone reports the odd one out.
+        //
+        // frame (v9: border only; filled slots get the skin's filled
+        // accent + faint fill)
+        // ★engravedCells: every slot wears the SAME heavy frame, worn or
+        // not, and "worn" is said by the darker ground alone. A bright rim
+        // on the worn ones turned the doll into a scatter of highlights —
+        // the reference marks occupancy with ground, never with rim.
+        void PaintCellFace(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1,
+                           const char* a_id, bool a_worn)
         {
             const auto& sk = Theme::S();
-            auto* dl = ImGui::GetWindowDrawList();
-            const ImVec2 p0 = ImGui::GetCursorScreenPos();
-            const ImVec2 p1(p0.x + a_w, p0.y + a_h);
-
-            const auto it = a_eq.find(a_slot.id);
-            const EquipEntry* eq = it != a_eq.end() ? &it->second : nullptr;
-
-            // ★★THE BORDER RECT IS HALF A PIXEL IN, and that is not a nicety.
-            // ImGui strokes a rect ON its path, so a 1px border straddles the
-            // edge: half of it lies OUTSIDE p0..p1. The doll's last column ends
-            // exactly on the panel's clip boundary -- measured in game, slot
-            // 1394.0 and clip 1394.0 -- so that outer half was clipped away and
-            // the right edge of every slot in that column drew at half weight.
-            // ★It was never an ink-skin bug. Every skin draws its slot border
-            // with AddRect, so every skin had it; the ink one only made it
-            // obvious by drawing a border thick enough to notice.
-            // The FILL still uses p0..p1: a cell's ground is the whole cell.
+            // Half-pixel inset — see the note at the DrawSlot call site.
             const ImVec2 e0(p0.x + 0.5f, p0.y + 0.5f);
             const ImVec2 e1(p1.x - 0.5f, p1.y - 0.5f);
 
-            // frame (v9: border only; filled slots get the skin's filled
-            // accent + faint fill)
-            // ★engravedCells: every slot wears the SAME heavy frame, worn or
-            // not, and "worn" is said by the darker ground alone. A bright rim
-            // on the worn ones turned the doll into a scatter of highlights —
-            // the reference marks occupancy with ground, never with rim.
             if (Theme::InkChrome()) {
                 // ★★THE WASH LIVES HERE AND NOWHERE ELSE. The board draws its
                 // occupied ground as a flat rect and that split is deliberate:
@@ -483,9 +585,9 @@ namespace FUI::Equip
                 // that comment warns about.
                 // ★Keyed by the slot's id, so a slot keeps its own blob for as
                 // long as it exists and its neighbours never match it.
-                if (eq) {
+                if (a_worn) {
                     unsigned int key = 2166136261u;
-                    for (const char* p = a_slot.id; p && *p; ++p) {
+                    for (const char* p = a_id; p && *p; ++p) {
                         key = (key ^ static_cast<unsigned char>(*p)) * 16777619u;
                     }
                     Theme::InkWash(dl, p0, p1, Theme::OccupiedGround(), key);
@@ -516,11 +618,11 @@ namespace FUI::Equip
                 // ★Theme::OccupiedGround(), not sk.shade — the doll was the one
                 // place still reading the raw token, so it would have kept the
                 // old near-black ground after the board moved off it.
-                if (eq) dl->AddRectFilled(p0, p1, Theme::OccupiedGround(), sk.rounding);
+                if (a_worn) dl->AddRectFilled(p0, p1, Theme::OccupiedGround(), sk.rounding);
                 const ImU32 inner = Theme::Col(sk.cellGroove, sk.cellGroove.w * 0.85f);
                 dl->AddLine(ImVec2(p0.x, p0.y + 0.5f), ImVec2(p1.x, p0.y + 0.5f), inner);
                 dl->AddLine(ImVec2(p0.x + 0.5f, p0.y), ImVec2(p0.x + 0.5f, p1.y), inner);
-            } else if (eq) {
+            } else if (a_worn) {
                 // ★A worn slot is an occupied cell — same ground the grid gives
                 // an item, so "there is something here" reads the same way in
                 // both places. A 5% accent wash said nothing on a light panel.
@@ -543,6 +645,44 @@ namespace FUI::Equip
             } else {
                 dl->AddRect(e0, e1, Theme::Acc(sk.cornerFade ? 0.14f : 0.28f), sk.rounding);
             }
+        }
+
+        // ★The tint an empty slot gives its silhouette. The drawer button's
+        // mark takes the same one so it weighs exactly what the diamonds
+        // beside it weigh — a hint, not a signal.
+        [[nodiscard]] ImU32 CellHintCol()
+        {
+            const auto& sk = Theme::S();
+            return Theme::InkChrome() ? Theme::Col(sk.ink, 0.65f)
+                 : sk.lightPanel      ? Theme::Col(sk.ink, 0.50f)
+                                      : Theme::Acc(0.35f);
+        }
+
+        void DrawSlot(const SlotDef& a_slot, float a_w, float a_h,
+                      std::unordered_map<std::string, EquipEntry>& a_eq)
+        {
+            const auto& sk = Theme::S();
+            auto* dl = ImGui::GetWindowDrawList();
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            const ImVec2 p1(p0.x + a_w, p0.y + a_h);
+
+            const auto it = a_eq.find(a_slot.id);
+            const EquipEntry* eq = it != a_eq.end() ? &it->second : nullptr;
+
+            // ★★THE BORDER RECT IS HALF A PIXEL IN, and that is not a nicety.
+            // ImGui strokes a rect ON its path, so a 1px border straddles the
+            // edge: half of it lies OUTSIDE p0..p1. The doll's last column ends
+            // exactly on the panel's clip boundary -- measured in game, slot
+            // 1394.0 and clip 1394.0 -- so that outer half was clipped away and
+            // the right edge of every slot in that column drew at half weight.
+            // ★It was never an ink-skin bug. Every skin draws its slot border
+            // with AddRect, so every skin had it; the ink one only made it
+            // obvious by drawing a border thick enough to notice.
+            // The FILL still uses p0..p1: a cell's ground is the whole cell.
+            const ImVec2 e0(p0.x + 0.5f, p0.y + 0.5f);
+            const ImVec2 e1(p1.x - 0.5f, p1.y - 0.5f);
+
+            PaintCellFace(dl, p0, p1, a_slot.id, eq != nullptr);
 
             if (eq) {
                 // GI51: same rule as the grid — a worn item is drawable now,
@@ -1824,6 +1964,286 @@ namespace FUI::Equip
     }
 
     float SlotsTopOffset() { return g_slotsTop; }
+    float SlotsTopScreen() { return g_slotsTopScreen; }
+
+    // ---- accessory drawer -------------------------------------------------
+
+    int PrimarySlot(RE::TESBoundObject* a_obj) { return PrimarySlotOf(a_obj); }
+
+    int  DrawerCount() { return g_drawerCount; }
+    bool DrawerOpen()  { return g_drawerOpen; }
+
+    void SetDrawerOpen(bool a_open) { g_drawerOpen = a_open; }
+
+    namespace
+    {
+        // ★★ONE SOURCE FOR THE DRAWER'S MEASUREMENTS, so the button in the
+        // strip and the panel outside the window can never disagree about
+        // which side it comes out of or how far it has travelled.
+        //
+        // ★bodyX/bodyR are the drawer BOX — where it is right now, most of it
+        // usually still inside the cabinet. panelX/shownW are the window we
+        // open onto it, which stops dead at the main window's edge. Keeping
+        // the two apart is what makes this a drawer rather than an accordion:
+        // cells are placed against the BOX and travel with it, while the
+        // window merely reveals more of them.
+        struct DrawerGeom
+        {
+            float slot, gap, pad;
+            float panelW, panelH, shownW;
+            float bodyX, bodyR;      // the box: left edge, right edge
+            float panelX, rowTop, top;
+            int   cols;
+            bool  toRight;
+        };
+
+        // ★FIVE ROWS, ALWAYS. The strip beside the doll is five cells tall and
+        // the drawer continues it, so a drawer holding two accessories is one
+        // column with three empty cells -- which are drop targets, not waste.
+        constexpr int kDrawerRows = 5;
+
+        DrawerGeom DrawerGeomOf(const ImVec2& a_mainPos, const ImVec2& a_mainSize,
+                                float a_rowTop)
+        {
+            DrawerGeom g{};
+            const float S = Theme::Scale();
+            g.slot = SlotPx();
+            g.gap  = GapPx();
+            // ★3px was the plan's number and it proved too mean in game -- the
+            // cells sat right on the frame. 6 still reads as trim, and gives
+            // the border somewhere to be. Deliberately far tighter than a bag
+            // window: a title bar and generous padding are what would make
+            // this read as a second window instead of an extension.
+            g.pad  = 6.0f * S;
+
+            const int n = (std::max)(0, g_drawerCount);
+            g.cols   = (std::max)(1, (n + kDrawerRows - 1) / kDrawerRows);
+            g.panelW = g.cols * g.slot + (g.cols - 1) * g.gap + 2 * g.pad;
+            g.panelH = kDrawerRows * g.slot + (kDrawerRows - 1) * g.gap + 2 * g.pad;
+
+            // Left by default; right when the screen runs out.
+            g.toRight = (a_mainPos.x - g.panelW) < 0.0f;
+            g.shownW  = g.panelW * g_drawerSlide;
+
+            // ★★THE FIRST CELL LINES UP WITH THE DOLL'S FIRST SLOT ROW, not
+            // the panel's frame. The drawer is an extension of the equipment
+            // column, not a window parked beside it, so the two grids have to
+            // start on one line -- and they did not: the panel's own top
+            // padding lifted its cells a notch above the doll's (reported,
+            // with a rule drawn across both to show it). Pull the FRAME up by
+            // that padding rather than dropping the padding, which every other
+            // edge still wants.
+            g.rowTop = a_rowTop;
+            g.top    = a_rowTop - g.pad;
+
+            // ★★THE BOX SLIDES; THE OPENING DOES NOT GROW. The drawer body
+            // starts fully inside the cabinet (its outer edge flush with the
+            // window) and travels a full panel-width out. The window we open
+            // onto it always ends exactly at the main window's edge, so the
+            // part still inside is CLIPPED rather than drawn -- there is no
+            // arrangement of alpha where it could show through the inventory.
+            //
+            // The old version moved the opening instead and pinned the cells
+            // to it, which grew a column at a time from the inside: an
+            // accordion, not a drawer.
+            const float travel = g.panelW * g_drawerSlide;
+            if (g.toRight) {
+                g.bodyX  = a_mainPos.x + a_mainSize.x - g.panelW + travel;
+                g.panelX = a_mainPos.x + a_mainSize.x;
+            } else {
+                g.bodyX  = a_mainPos.x - travel;
+                g.panelX = g.bodyX;
+            }
+            g.bodyR = g.bodyX + g.panelW;
+
+            g_drawerToRight = g.toRight;
+            return g;
+        }
+
+        // ★★THE STRIP'S LAST CELL, AND IT IS NOT A SLOT. It sits among four
+        // that are, so it has to say so in its own shape or players will try
+        // to drop things on it: sunk ground instead of the slot's raised one,
+        // and a solid mark where a slot would hold an icon.
+        void DrawDrawerCell(float a_size)
+        {
+            const auto& sk = Theme::S();
+            auto* dl = ImGui::GetWindowDrawList();
+
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            const ImVec2 p1(p0.x + a_size, p0.y + a_size);
+
+            const bool clicked = ImGui::InvisibleButton("##gi_accdrawer_btn",
+                                                        ImVec2(a_size, a_size));
+            const bool hov = ImGui::IsItemHovered();
+
+            // ★Sound on the EDGE, not on the state. IsItemHovered is true every
+            // frame the cursor rests here, and playing on that fires the blip
+            // dozens of times a second.
+            static bool s_wasHov = false;
+            if (hov && !s_wasHov) Sfx::Focus();
+            s_wasHov = hov;
+
+            if (clicked) {
+                g_drawerOpen = !g_drawerOpen;
+                // Opening is a confirm, closing is a dismiss -- the same pair
+                // every other panel in this UI uses.
+                if (g_drawerOpen) Sfx::SelectOn(); else Sfx::SelectOff();
+            }
+
+            // ★★AT REST IT IS A SLOT, to the pixel. The first cut gave it a
+            // sunk ground and a darker rim of its own, and the result did not
+            // read as "one of these is a button" — it read as a broken cell
+            // (reported: "평상시에 색상부터 차이가 심하게 난다"). The cell face
+            // comes from the same function every slot uses, so the difference
+            // is carried entirely by what happens under the cursor.
+            PaintCellFace(dl, p0, p1, "accdrawer", /*worn=*/false);
+
+            // ★Pressing DROPS the highlight and releasing brings it back, so
+            // the button dips under the finger. Without it a click had a sound
+            // and no picture, which reads as a missed press on a slow frame.
+            if (hov && !ImGui::IsItemActive()) {
+                // ★Same half-pixel inset as every slot border -- a 2px stroke
+                // on the path puts 1px outside, and on an edge cell that 1px
+                // is past the clip.
+                // The highlight the slots use when they accept something, so
+                // the button answers the cursor the way its neighbours do.
+                dl->AddRect(ImVec2(p0.x + 1.0f, p0.y + 1.0f),
+                            ImVec2(p1.x - 1.0f, p1.y - 1.0f),
+                            Theme::Col(sk.hi, 0.8f), sk.rounding, 0, 2.0f);
+            }
+
+            // The mark: a solid triangle pointing where the drawer will go.
+            // ★Sized and tinted like the silhouettes beside it — those are the
+            // marks a resting cell wears, and this one is no louder.
+            const float cx = (p0.x + p1.x) * 0.5f;
+            const float cy = (p0.y + p1.y) * 0.5f;
+            const float tw = a_size * 0.115f;   // half-width
+            const float th = a_size * 0.165f;   // half-height
+            const bool  pointLeft = g_drawerToRight ? g_drawerOpen : !g_drawerOpen;
+            const float dx = pointLeft ? tw : -tw;
+            const ImVec2 apex(cx - dx, cy);
+            const ImVec2 top (cx + dx, cy - th);
+            const ImVec2 bot (cx + dx, cy + th);
+
+            // ★★★WINDING DECIDES WHETHER THE AA WORKS AT ALL, and this is why
+            // the two states looked different (reported: the closed arrow was
+            // clean, the open one stepped). ImGui's anti-aliased FILL assumes
+            // CLOCKWISE points -- it walks the edge and lays the feather on
+            // one nominated side. Mirroring the arrow by negating dx also
+            // reverses the winding, so on one of the two states the feather
+            // was laid on the INSIDE and the outer edge was left raw.
+            // Flipping the order back means both states are drawn the same
+            // way and both get the same edge.
+            const ImVec2 v1 = pointLeft ? top : bot;
+            const ImVec2 v2 = pointLeft ? bot : top;
+
+            const ImU32 mark = CellHintCol();
+            dl->AddTriangleFilled(apex, v1, v2, mark);
+            // ★And stroke the same path. Even correctly wound, the fill's
+            // feather is a single pixel; the LINE rasteriser is the better one
+            // here (AntiAliasedLinesUseTex is on), so the outline in the same
+            // colour hands it the edge.
+            dl->AddTriangle(apex, v1, v2, mark, 1.5f);
+        }
+    }
+
+    void DrawDrawer(const ImVec2& a_mainPos, const ImVec2& a_mainSize,
+                    float a_rowTop)
+    {
+        if (!DrawerAvailable()) { g_drawerSlide = 0.0f; return; }
+
+        // ---- the slide -----------------------------------------------------
+        // One curve for both directions, so pressing the tab mid-open simply
+        // reverses it instead of snapping.
+        {
+            const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 1.0f / 20.0f);
+            const float target = g_drawerOpen ? 1.0f : 0.0f;
+            constexpr float kSpeed = 7.0f;   // ~0.14s end to end
+            if (g_drawerSlide < target) {
+                g_drawerSlide = (std::min)(target, g_drawerSlide + dt * kSpeed);
+            } else if (g_drawerSlide > target) {
+                g_drawerSlide = (std::max)(target, g_drawerSlide - dt * kSpeed);
+            }
+        }
+
+        const float S   = Theme::Scale();
+        const auto  g   = DrawerGeomOf(a_mainPos, a_mainSize, a_rowTop);
+        const float S2  = g.slot;
+        const float gap = g.gap;
+        const float pad = g.pad;
+
+        // ---- the panel -----------------------------------------------------
+        // Only while it is actually out: a zero-width window still draws its
+        // border, which would leave a hairline glued to the main window.
+        if (g.shownW <= 1.0f) return;
+
+        ImGui::SetNextWindowPos(ImVec2(g.panelX, g.top), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(g.shownW, g.panelH), ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+        // ★★SetNextWindowSize IS NOT THE LAST WORD -- WindowMinSize (32x32 by
+        // default) clamps it afterwards. So the last 32px of the slide made a
+        // window WIDER than the opening it was meant to be, and its right edge
+        // pushed past the inventory's left edge: the drawer showed through the
+        // panel exactly while closing, which is when nothing should be left of
+        // it at all (reported). The clamp is a guard for windows a user
+        // resizes; this one is driven frame by frame.
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1.0f, 1.0f));
+        ImGui::Begin("##gi_accdrawer", nullptr, kManagedWinFlags);
+
+        // ★The skin paints its own sheet, and it does that inside TitleBar --
+        // which this panel deliberately has none of. Without asking for the
+        // ground explicitly, an ink or torn skin left the cells floating over
+        // the world with nothing behind them (reported). 0/0 = no title strip.
+        // ★Painted over the whole BOX, not the visible slice: the sheet has to
+        // travel with the drawer or the grain slides under the cells while
+        // they move. The window clips whatever is still inside.
+        // ★Fenced to the visible slice. PaintGround overrides the window clip
+        // on purpose (chrome must reach the edge), so without a fence the
+        // sheet for the whole box painted straight over the inventory.
+        WinManager::GetSingleton()->PaintGround(
+            ImGui::GetWindowDrawList(), ImVec2(g.bodyX, g.top),
+            ImVec2(g.bodyR, g.top + g.panelH), "accdrawer", 0.0f, 0.0f,
+            ImVec2(g.panelX, g.top - g.panelH),
+            ImVec2(g.panelX + g.shownW, g.top + 2.0f * g.panelH));
+        std::unordered_map<std::string, EquipEntry> eq;
+        CollectEquipment(eq);
+
+        // ★Cells are nailed to the BOX. Column 0 is the innermost, so it is
+        // the last to clear the cabinet -- pull the drawer and its far end
+        // appears first, exactly like a real one. (Placing them against the
+        // visible slice instead is what made the old version unfold.)
+        const float innerRight = g.bodyR - pad;
+        for (int c = 0; c < g.cols; ++c) {
+            const float cx = innerRight - S2 - c * (S2 + gap);
+            for (int r = 0; r < kDrawerRows; ++r) {
+                const int idx = c * kDrawerRows + r;
+                // ★The drawer's nth cell continues the doll's — and where the
+                // doll stops is whatever CollectEquipment actually used, not a
+                // number typed here twice.
+                const std::string id =
+                    "acc" + std::to_string(idx + g_drawerFirstIdx + 1);
+                const SlotDef def{ id.c_str(), "acc" };
+                // ★From the ROW, not from the frame -- g.top already carries
+                // the padding offset, and adding it back here is what put the
+                // grid a notch above the doll's.
+                ImGui::SetCursorScreenPos(
+                    ImVec2(cx, g.rowTop + r * (S2 + gap)));
+                DrawSlot(def, S2, S2, eq);
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);   // WindowMinSize + WindowPadding
+    }
+
+
+    bool DrawerAvailable()
+    {
+        // The doll is not on screen during loot/barter -- the partner window
+        // has that side -- so a drawer hanging off it would belong to
+        // something the player cannot see. kNormal is the only mode that
+        // shows the doll, so it is the only one that gets a drawer.
+        return LootBarter::CurrentMode() == LootBarter::Mode::kNormal;
+    }
 
     void OnMenuClosed()
     {
@@ -1845,12 +2265,16 @@ namespace FUI::Equip
         // one line. Read from the cursor the tabs left behind, not computed —
         // frame height and item spacing are style values, not ours.
         g_slotsTop = start.y - ImGui::GetWindowPos().y;
+        g_slotsTopScreen = start.y;
 
-        // vertical strip: circlet + acc x4 (total height == doll height)
-        for (int i = 0; i < 5; ++i) {
+        // vertical strip: circlet + acc x3, then the drawer button
+        // (total height == doll height)
+        for (int i = 0; i < 4; ++i) {
             ImGui::SetCursorScreenPos(ImVec2(start.x, start.y + i * (S2 + gap)));
             DrawSlot(kStrip[i], S2, S2, eq);
         }
+        ImGui::SetCursorScreenPos(ImVec2(start.x, start.y + 4 * (S2 + gap)));
+        DrawDrawerCell(S2);
 
         // doll: 3 columns, rows [2u, tall, 2u, 2u]
         const float rowY[4] = {
