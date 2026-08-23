@@ -1412,6 +1412,23 @@ namespace FUI::Wheeler
         // would open the menu, and by the time the wheel is up it is too late.
         [[nodiscard]] bool InCombo(bool a_pad, std::uint32_t a_code);   // defined below
 
+        // ★Is a menu already holding input? Both the hotkey path and the
+        // pre-MenuControls blanking ask this, and they have to agree: one
+        // refusing to open while the other still eats the key is precisely
+        // the state that swallowed the favourite toggle.
+        [[nodiscard]] bool AnotherMenuOwnsInput()
+        {
+            auto* ui = RE::UI::GetSingleton();
+            if (!ui) return false;
+            if (ui->GameIsPaused()) return true;
+            for (const auto& m : ui->menuStack) {
+                if (m && m->menuFlags.all(RE::UI_MENU_FLAGS::kUsesMenuContext)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         struct MenuLock
         {
             // ★★★BLANK, CALL, PUT IT BACK. Muting outright was wrong and the
@@ -1452,7 +1469,30 @@ namespace FUI::Wheeler
                 //
                 // So the stand-down has to reach here too. Three layers, one
                 // question -- ask it in all three or the answer never arrives.
-                if (g_enabled && !YieldingToVanilla() && a_event) {
+                // ★★★...AND NOTHING WHILE A MENU ALREADY OWNS INPUT.
+                //
+                // This blanks the key BEFORE MenuControls sees it, and an open
+                // menu is fed from AFTER MenuControls -- our own inventory
+                // takes its keys as Scaleform events, not from the window
+                // proc. A key erased here therefore never reaches the menu at
+                // all.
+                //
+                // The wheel's hotkey follows the game's FAVORITES binding
+                // (AdoptFavoritesKey). At the vanilla default that is Q and
+                // nothing collides. Rebind favourites to F -- which plenty of
+                // players do, since F is what stars an item in the inventory
+                // -- and the wheel starts eating the star key: with the wheel
+                // ON you could favourite nothing, with it OFF everything
+                // worked. Reported, then reproduced exactly by making that one
+                // rebind.
+                //
+                // Nothing is lost by standing down here: the wheel cannot open
+                // over a menu that owns input (SomethingElseOwnsTheKey already
+                // refuses), and the vanilla favourites menu -- the thing this
+                // blanking exists to suppress -- cannot appear over one
+                // either. The key was being erased for nobody.
+                if (g_enabled && !YieldingToVanilla() && !AnotherMenuOwnsInput() &&
+                    a_event) {
                     for (auto* e = *a_event; e && n < 16; e = e->next) {
                         auto* b = e->AsButtonEvent();
                         if (!b) continue;
@@ -2818,14 +2858,7 @@ namespace FUI::Wheeler
 
     bool SomethingElseOwnsTheKey(std::uint32_t a_pressed)
     {
-        if (auto* ui = RE::UI::GetSingleton()) {
-            if (ui->GameIsPaused()) return true;
-            for (const auto& m : ui->menuStack) {
-                if (m && m->menuFlags.all(RE::UI_MENU_FLAGS::kUsesMenuContext)) {
-                    return true;
-                }
-            }
-        }
+        if (AnotherMenuOwnsInput()) return true;
         if (YieldingToVanilla()) {
             // Rare and worth measuring: which races actually land here
             // (the plan asks whether modded transformations do).
