@@ -1537,10 +1537,17 @@ namespace FUI::LootBarter
                     // no NAME, so an earlier log printed "owner " and I read it
                     // as null and went hunting through the cell for it. It was
                     // on the ref the whole time.
+                    // ★★ONLY AS MANY AS ARE BEING STOLEN. This stamped every
+                    // unowned list on the shelf, which was harmless while the
+                    // whole container was somebody else's and wrong the moment
+                    // the deposit ledger arrived: ask for five where two are
+                    // yours and all five were branded on the way out.
                     if (auto* owner = ContainerOwner(source)) {
                         if (auto* e = Grid::LiveEntryOf(source, r.obj); e && e->extraLists) {
+                            int left = stolenCount;
                             for (auto* l : *e->extraLists) {
-                                if (l && !l->GetOwner()) l->SetOwner(owner);
+                                if (left <= 0) break;
+                                if (l && !l->GetOwner()) { l->SetOwner(owner); --left; }
                             }
                         }
                     }
@@ -1616,11 +1623,16 @@ namespace FUI::LootBarter
                     // outside it. A list that ALREADY has an owner is left
                     // alone: it was stolen before it got here, and rewriting
                     // whose it is would rewrite who the player answers to.
+                    // ★★AND ONLY AS MANY AS WERE STOLEN, for the reason given
+                    // at the shelf-side stamp above: the units that arrived
+                    // are a mix of the player's deposit and the room's goods,
+                    // and only the second half is anybody else's.
                     auto* owner = ContainerOwner(source);
                     int   marked = 0;
                     if (owner) {
                         if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
                             for (auto* l : *e->extraLists) {
+                                if (marked >= stolenCount) break;
                                 if (!l || hadBefore.contains(l) || l->GetOwner()) continue;
                                 l->SetOwner(owner);
                                 ++marked;
@@ -1664,7 +1676,16 @@ namespace FUI::LootBarter
                 // ContLayout::deposits). Recorded even outside steal mode: an
                 // ordinary chest can become an owned one, and a deposit made
                 // before that should still be yours afterwards.
-                DepositAdd(source, r.obj, r.count);
+                //
+                // ★★★EXCEPT STOLEN GOODS, which a deposit would launder. The
+                // ledger counts units, not identities, so a stolen sack put in
+                // beside your own raises the count by one and comes back out
+                // as yours -- and kRemove has the engine clear the ownership on
+                // the way, so it is genuinely clean afterwards. Measured: five
+                // in, five out, all five plain. A chest is not a fence.
+                if (!(sxl && sxl->GetOwner())) {
+                    DepositAdd(source, r.obj, r.count);
+                }
                 // ★TEST ONLY (!simrefuse): skip the ENGINE CALL and nothing
                 // else. A real refusal is RemoveItem quietly not taking -- our
                 // own bookkeeping still runs, because the engine's silence does
