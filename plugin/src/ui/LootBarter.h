@@ -365,6 +365,12 @@ namespace FUI::LootBarter
     // cosave 'GCLY' v1: container ref FormID -> (item key -> spot), LRU 128.
     // main.cpp owns the record loop.
     inline constexpr std::uint32_t kContRecordType = 'GCLY';
+    // ★A container that respawned is a different container as far as its
+    // contents go: the player's deposit went with the reset, and a ledger that
+    // outlives it hands the replacements over as the player's own. Called from
+    // the TESResetEvent sink.
+    void ForgetDeposits(RE::FormID a_containerID);
+
     void SaveGame(SKSE::SerializationInterface* a_intfc);
     void LoadRecord(SKSE::SerializationInterface* a_intfc, std::uint32_t a_version);
     void RevertGame();

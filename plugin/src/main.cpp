@@ -380,6 +380,37 @@ namespace
     // already happened when the event fires, so this is a BOUNCE: put the
     // item back into the source. Scoped to an open ContainerMenu — scripted
     // quest handovers (no menu) must never bounce.
+    // ★★★A RESPAWNED CONTAINER OWES NOBODY ANYTHING.
+    //
+    // The deposit ledger (LootBarter, ContLayout::deposits) remembers how many
+    // of each form the player stored in a given container, so taking them back
+    // is not theft. A cell reset empties that container and refills it from the
+    // record -- the player's deposit is gone, but a ledger that outlived it
+    // would hand those replacements over as "yours", which is a free steal on
+    // every respawn.
+    //
+    // TESResetEvent is the engine saying exactly that happened, and it names
+    // the ref. Without it the only alternative was to expire ledgers on a
+    // guessed timer, and a guess is wrong in both directions.
+    class ResetSink : public RE::BSTEventSink<RE::TESResetEvent>
+    {
+    public:
+        static ResetSink* GetSingleton()
+        {
+            static ResetSink s;
+            return &s;
+        }
+
+        RE::BSEventNotifyControl ProcessEvent(const RE::TESResetEvent* a_event,
+            RE::BSTEventSource<RE::TESResetEvent>*) override
+        {
+            if (a_event && a_event->object) {
+                FUI::LootBarter::ForgetDeposits(a_event->object->GetFormID());
+            }
+            return RE::BSEventNotifyControl::kContinue;
+        }
+    };
+
     class ContainerSink : public RE::BSTEventSink<RE::TESContainerChangedEvent>
     {
     public:
@@ -2085,6 +2116,7 @@ namespace
         if (auto* holder = RE::ScriptEventSourceHolder::GetSingleton()) {
             // capacity: container-take bounce (menu-scoped, see ContainerSink)
             holder->AddEventSink<RE::TESContainerChangedEvent>(ContainerSink::GetSingleton());
+            holder->AddEventSink<RE::TESResetEvent>(ResetSink::GetSingleton());
             // W2: worn state changes the board occupancy
             holder->AddEventSink<RE::TESEquipEvent>(EquipSink::GetSingleton());
         }

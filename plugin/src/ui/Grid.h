@@ -657,28 +657,6 @@ namespace FUI::Grid
     // straight to RemoveItem. Keeping resolution and star-removal together is
     // the point: clearing by pool name stripped every look-alike's star.
     //   a_starred = how many of the a_count outgoing units wore a star (0 = none).
-    // ★★MARK A UNIT AS THE PLAYER'S BEFORE IT LEAVES THE PACK.
-    //
-    // Vanilla writes ownership=Player onto anything you store in a container,
-    // which is how your own gear survives a stay in somebody else's chest --
-    // it comes back yours because it never stopped being yours. Measured, two
-    // items into one barrel: vanilla's arrive `lists=1 owned=1 [00000007]`,
-    // ours arrived `lists=0`, and taking ours back had the engine stamp the
-    // barrel's owner on it. The reported Embassy case is exactly that trip.
-    //
-    // ★Ownership lives on an ExtraDataList and a plain unit has none, so one
-    // has to exist first. The engine mints one for an entry that has NO lists
-    // at all when asked to favourite it (measured -- with any variant present
-    // it writes into that variant instead), so the star is used as a chisel
-    // and removed again; the list stays because the ownership in it is now
-    // something worth keeping.
-    //
-    // Returns the list carrying the stamp, or nullptr when none could be had
-    // (entry already has variants, or the engine refused) -- in which case the
-    // caller stores as before.
-    RE::ExtraDataList* MarkAsPlayerOwned(RE::TESBoundObject* a_obj,
-                                         RE::ExtraDataList* a_known);
-
     //               The caller always knows this; the sink never can.
     // Returns nullptr for "let the engine pick", only within a pool whose members
     // are genuinely interchangeable.

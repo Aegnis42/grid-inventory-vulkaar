@@ -391,6 +391,25 @@ namespace FUI::LootBarter
         {
             std::map<std::string, ContCell> cells;
             std::uint32_t                   stamp = 0;   // LRU recency
+            // ★★★THE DEPOSIT LEDGER: how many of each form the PLAYER put in
+            // here. Taking your own property back is not theft, and this is the
+            // only way we can know which units are yours.
+            //
+            // Ownership was tried first and cannot work for us. It lives on an
+            // ExtraDataList, a bare unit has none, and there is no way to give
+            // it one -- ExtraDataList's constructor is declared but not
+            // implemented in CommonLibSSE (LNK2019), and the favourite trick
+            // that mints one only fires for an entry with no lists at all. So
+            // a plain dagger stored while a tempered one sat in the pack could
+            // never be marked, and came home stolen. A count needs no such
+            // permission.
+            //
+            // ★Vanilla behaves as if it keeps one of these: three stolen sacks
+            // in a barrel show the mark, put one of your own in and the mark
+            // goes, take one back and it returns -- it is serving your deposit
+            // first. Measured to survive a cell change and a save/load, so
+            // this is written to the cosave too.
+            std::map<RE::FormID, std::int32_t> deposits;
         };
         std::unordered_map<RE::FormID, ContLayout> g_contLayouts;
         // ★★A MERCHANT'S BOARD IS REAL TOO, it just is not remembered. Barter
@@ -853,6 +872,15 @@ namespace FUI::LootBarter
 
     Mode CurrentMode() { return g_mode; }
 
+    void ForgetDeposits(RE::FormID a_containerID)
+    {
+        const auto it = g_contLayouts.find(a_containerID);
+        if (it == g_contLayouts.end() || it->second.deposits.empty()) return;
+        SKSE::log::info("[LOOT] container {:08X} reset -- dropping {} deposit(s)",
+                        a_containerID, it->second.deposits.size());
+        it->second.deposits.clear();
+    }
+
     void Enter(Mode a_mode, RE::TESObjectREFR* a_partner)
     {
         g_mode = a_mode;
@@ -1246,6 +1274,51 @@ namespace FUI::LootBarter
         //
         // ★StealAlarm was asking the same way, so the bounty roll has been
         // handed a null owner all along. It goes through here now too.
+        // ---- deposit ledger ------------------------------------------------
+        // See ContLayout::deposits for why a ledger and not ownership.
+
+        [[nodiscard]] ContLayout* LedgerFor(RE::TESObjectREFR* a_src)
+        {
+            if (!a_src) return nullptr;
+            const auto it = g_contLayouts.find(a_src->GetFormID());
+            return it != g_contLayouts.end() ? &it->second : nullptr;
+        }
+
+        // How many of this form in this container are the player's own.
+        [[nodiscard]] int DepositedCount(RE::TESObjectREFR* a_src,
+                                         RE::TESBoundObject* a_obj)
+        {
+            if (!a_obj) return 0;
+            auto* cl = LedgerFor(a_src);
+            if (!cl) return 0;
+            const auto it = cl->deposits.find(a_obj->GetFormID());
+            return it != cl->deposits.end() ? (std::max)(0, it->second) : 0;
+        }
+
+        void DepositAdd(RE::TESObjectREFR* a_src, RE::TESBoundObject* a_obj, int a_count)
+        {
+            if (!a_src || !a_obj || a_count <= 0) return;
+            // The layout is created on open (Enter), so this normally finds one;
+            // make it anyway rather than silently losing the deposit.
+            auto& cl = g_contLayouts[a_src->GetFormID()];
+            cl.deposits[a_obj->GetFormID()] += a_count;
+        }
+
+        // Spend up to a_count from the deposit and report how much was covered.
+        [[nodiscard]] int DepositTake(RE::TESObjectREFR* a_src,
+                                      RE::TESBoundObject* a_obj, int a_count)
+        {
+            if (!a_src || !a_obj || a_count <= 0) return 0;
+            auto* cl = LedgerFor(a_src);
+            if (!cl) return 0;
+            const auto it = cl->deposits.find(a_obj->GetFormID());
+            if (it == cl->deposits.end()) return 0;
+            const int used = (std::min)(a_count, (std::max)(0, it->second));
+            it->second -= used;
+            if (it->second <= 0) cl->deposits.erase(it);
+            return used;
+        }
+
         RE::TESForm* ContainerOwner(RE::TESObjectREFR* a_source)
         {
             if (!a_source) return nullptr;
@@ -1383,46 +1456,20 @@ namespace FUI::LootBarter
                     player->StealAlarm(source, r.obj, r.count,
                         r.obj->GetGoldValue() * r.count, ContainerOwner(source), true);
                 }
-                // ★★★TAKING BACK YOUR OWN PROPERTY IS NOT THEFT.
+                // ★★★TAKING BACK YOUR OWN PROPERTY IS NOT THEFT, and the
+                // deposit ledger is how we know which units are yours. See
+                // ContLayout::deposits for why ownership could not do this job.
                 //
-                // A unit stamped ownership=Player is one the player stored here
-                // (Grid::MarkAsPlayerOwned writes that on the way in, exactly
-                // as vanilla does). Handing kSteal to the engine for it makes
-                // the engine re-stamp it with the CONTAINER's owner, and the
-                // player's own gear comes home stolen -- the reported Embassy
-                // case. Measured: identical items into one barrel both arrive
-                // [00000007], and on the way out one loses the stamp cleanly
-                // while the other is overwritten with the barrel's owner. The
-                // engine's rule there is not one we can predict, so it is not
-                // one to rely on: say plainly that this unit is not being
-                // stolen.
-                //
-                // ★The stamp carries no uid, so PoolChoice may hand back a
-                // null list for it -- fall back to the entry, the same way the
-                // partner board's marker does.
-                auto* myBase = player->GetActorBase();
-                const RE::TESForm* unitOwner = pick.xl ? pick.xl->GetOwner() : nullptr;
-                if (!unitOwner && myBase) {
-                    for (auto& [o, d] : source->GetInventory(
-                             [&](RE::TESBoundObject& x) { return &x == r.obj; })) {
-                        const auto* e = d.second.get();
-                        if (!e || !e->extraLists) continue;
-                        for (auto* l : *e->extraLists) {
-                            if (l && l->GetOwner()) { unitOwner = l->GetOwner(); break; }
-                        }
-                    }
-                }
-                const bool minesAlready = myBase && unitOwner == myBase;
+                // The count is spent here, once, and drives everything below:
+                // the removal reason, the two ownership stamps, and nothing
+                // else. Ask for three when two are yours and the engine is
+                // told about two clean ones and one theft, which is what
+                // vanilla does with its own ledger.
+                const int fromDeposit = (g_mode == Mode::kSteal)
+                    ? DepositTake(source, r.obj, r.count) : r.count;
+                const int stolenCount = (std::max)(0, r.count - fromDeposit);
+                const bool anyStolen  = g_mode == Mode::kSteal && stolenCount > 0;
 
-                // ★★★TRIED AND WRONG, recorded so it is not tried again:
-                // gating the ownership steps below on `pick.xl->GetOwner()`,
-                // on the theory that a unit which really belongs to somebody
-                // already carries them. It does not. A cheese on a shelf reads
-                // owner='Lucan Valerius' only AFTER it reaches the player --
-                // that stamp is the engine's answer to kSteal, not something
-                // the shelf was holding. Inside the container both a shop's
-                // goods and the player's own stored gear read owner=none, so
-                // the test silently disabled every stolen mark in the game.
                 // ★★⑰ NAMING A LIST COSTS THE STEAL STAMP.
                 //
                 // Measured: taking four cabbages out of an owned chest hands
@@ -1455,7 +1502,7 @@ namespace FUI::LootBarter
                 // The name goes back (GI39 wants it), and the ownership is ours
                 // to state.
                 std::set<RE::ExtraDataList*> hadBefore;
-                if (g_mode == Mode::kSteal && !minesAlready) {
+                if (anyStolen) {
                     if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
                         for (auto* l : *e->extraLists) {
                             if (l) hadBefore.insert(l);
@@ -1520,15 +1567,27 @@ namespace FUI::LootBarter
                 // guards answer to, and it still fires on the container's
                 // ownership. Confirmed in game: NPCs react identically, both
                 // storing and taking. Only the ownership stamp changes.
+                // ★★TWO CALLS WHEN THE ASK STRADDLES THE LEDGER. The reason is
+                // per-call, so three units of which two are yours cannot be
+                // described in one: the engine would stamp all three or none.
+                // Split it and each half arrives as what it is.
+                // ★The deposit half goes FIRST -- vanilla serves your own
+                // goods before the room's, and a player who takes two of three
+                // should get the two that were theirs.
                 GuardedRemove(source, r.obj,
                     pick.kind == Grid::PickKind::kFallback, "take", [&]() {
-                    source->RemoveItem(r.obj, r.count,
-                        (g_mode == Mode::kSteal && !minesAlready)
-                            ? RE::ITEM_REMOVE_REASON::kSteal
-                            : RE::ITEM_REMOVE_REASON::kRemove,
-                        pick.xl, player);
+                    if (fromDeposit > 0) {
+                        source->RemoveItem(r.obj, fromDeposit,
+                            RE::ITEM_REMOVE_REASON::kRemove, pick.xl, player);
+                    }
+                    if (stolenCount > 0) {
+                        source->RemoveItem(r.obj, stolenCount,
+                            g_mode == Mode::kSteal ? RE::ITEM_REMOVE_REASON::kSteal
+                                                   : RE::ITEM_REMOVE_REASON::kRemove,
+                            pick.xl, player);
+                    }
                 });
-                if (g_mode == Mode::kSteal && !minesAlready) {
+                if (anyStolen) {
                     // ★★A UNIT WITH NO LIST CANNOT BE STOLEN, because ownership
                     // lives on the list. That is the whole of this bug.
                     //
@@ -1599,15 +1658,13 @@ namespace FUI::LootBarter
                 // list we got to the engine (rule 58).
                 auto* sxl = Grid::ResolveExitUnit(r.obj, r.uid, r.sig, r.count,
                                                   r.fav ? r.count : 0, r.xlIdx);
-                // ★★SAY IT IS YOURS BEFORE IT GOES IN. Vanilla stamps
-                // ownership=Player on anything stored in a container, and that
-                // is the whole reason your own gear survives a chest in a
-                // hostile cell -- taking it back is not theft because the unit
-                // still says whose it is. We left nothing, so the engine
-                // stamped the CONTAINER's owner on the way out and the player's
-                // own equipment came home stolen (reported from the Embassy
-                // quest; reproduced with a barrel and a bride veil).
-                sxl = Grid::MarkAsPlayerOwned(r.obj, sxl);
+                // ★★WRITE IT IN THE LEDGER. Your gear survives a chest in a
+                // hostile cell because taking it back is not theft, and this
+                // count is how the take side knows that (see
+                // ContLayout::deposits). Recorded even outside steal mode: an
+                // ordinary chest can become an owned one, and a deposit made
+                // before that should still be yours afterwards.
+                DepositAdd(source, r.obj, r.count);
                 // ★TEST ONLY (!simrefuse): skip the ENGINE CALL and nothing
                 // else. A real refusal is RemoveItem quietly not taking -- our
                 // own bookkeeping still runs, because the engine's silence does
@@ -3409,11 +3466,11 @@ namespace
             // up front -- vanilla locks the whole row for the same reason.
             bool          unnameable = false;
             // ★★Is taking THIS unit a theft? Not the same question as "whose
-            // container is this". A unit the player stored here carries
-            // ownership=Player (see Grid::MarkAsPlayerOwned), and taking your
-            // own property back is not stealing however hostile the room --
-            // which is the whole of the reported Embassy complaint. Everything
-            // else in an owned container is.
+            // container is this". Taking back what you deposited is not
+            // stealing however hostile the room -- which is the whole of the
+            // reported Embassy complaint -- and the deposit ledger is what
+            // knows the difference. Everything else in an owned container is
+            // somebody's.
             bool          stolen = false;
             // GI20: the pool slot this cell was assigned this frame. Taking the
             // cell must free THIS slot -- otherwise the pool just loses its
@@ -3845,7 +3902,28 @@ namespace
                 }
                 const auto def = Grid::ResolveDef(obj);
                 const bool perUnit = Grid::StackCap(obj) <= 1;
-                auto*      xl = Grid::ExtraForInstance(entry, c.uid, c.xlIdx);
+                auto* xl = Grid::ExtraForInstance(entry, c.uid, c.xlIdx);
+                // ★★★FALL BACK TO THE POOL WHEN THE INSTANCE CANNOT BE NAMED.
+                //
+                // ExtraForInstance finds a list by uid, or failing that by its
+                // recorded position. A unit stored on OUR side of a container
+                // has neither: the engine assigns no uid, and the cell carries
+                // xlIdx = -1 because the position was never recorded. Measured:
+                // `want uid=0000 sig=B825 idx=-1 -> xl=N` against a container
+                // holding exactly `[0 uid=0000 sig=B825 own=00000007]`. The
+                // signature matched perfectly and was simply never consulted.
+                //
+                // Everything the list carries goes with that miss -- temper,
+                // enchantment, price, and the ownership the stolen mark reads
+                // -- which is why a second tempered dagger in a barrel made
+                // BOTH read as plain and eventually marked all of them stolen.
+                //
+                // ★The pool is the right granularity for a display: units that
+                // share a signature carry the same temper and the same price,
+                // so reading either answers the cell's question. It is NOT
+                // precise enough to move an item by, which is exactly why
+                // transfers keep using their own resolution.
+                if (!xl) xl = Grid::ExtraForPool(entry, c.uid, c.sig);
                 // GI43: a per-unit cell is priced from ITS list -- a tempered
                 // unit buys/sells at the vanilla tempered value.
                 int value = perUnit ? Grid::UnitValueWith(obj, xl) : unitValue;
@@ -3883,21 +3961,12 @@ namespace
                 // what the player put there, which says so on itself. The
                 // player's own base form is 0x7; anything else (or nothing) in
                 // an owned container is somebody else's.
+                // ★An owned container's contents are stolen goods -- except
+                // what the player deposited, which the ledger remembers. The
+                // cells of one form are numbered by `ord`, so the first N of
+                // them are the N units the player put here: mark from there on.
                 if (g_mode == Mode::kSteal) {
-                    auto* mine = RE::PlayerCharacter::GetSingleton();
-                    auto* base = mine ? mine->GetActorBase() : nullptr;
-                    const RE::TESForm* owner = xl ? xl->GetOwner() : nullptr;
-                    // ★Fall back to the ENTRY when this cell has no list of its
-                    // own. The stamp we write on the way in does not carry a
-                    // uid, so ExtraForInstance cannot match it and the cell
-                    // came back listless -- which read as "no owner" and put
-                    // the mark straight back on the player's own goods.
-                    if (!owner && entry && entry->extraLists) {
-                        for (auto* l : *entry->extraLists) {
-                            if (l && l->GetOwner()) { owner = l->GetOwner(); break; }
-                        }
-                    }
-                    pc.stolen = !(base && owner == base);
+                    pc.stolen = pc.ord >= DepositedCount(source, obj);
                 }
                 cells.push_back(std::move(pc));
             }
@@ -4166,7 +4235,12 @@ namespace
                                               SourceRef(),
                                               it.perUnit ? Grid::ExtraScope::kUnit
                                                          : Grid::ExtraScope::kAny,
-                                              it.uid, it.xlIdx, 0, 0,
+                                              // ★it.sig, not 0. The partner
+                                              // side has no uid and no list
+                                              // position to offer, so the
+                                              // signature is the only handle
+                                              // the tooltip can resolve with.
+                                              it.uid, it.xlIdx, it.sig, 0,
                                               Grid::TileContext{ {}, false, false, true, false });
                         // C: 3D view, same as the player's grid. Vanilla files
                         // Item Zoom under the kItemMenu context, which the
@@ -5248,7 +5322,7 @@ namespace
     {
         constexpr std::uint32_t kContMaxStr = 512;
         constexpr std::uint32_t kContMaxEntries = 65536;
-        constexpr std::uint32_t kContCosaveVersion = 13;   // ★v13: a bag CELL's name   // ★v12: a bundle entry's NAME (id + parent id, replacing the index)   // v11: a bundle entry's parent (nested bags)   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints  v10: the cell owns form + count + xlIdx
+        constexpr std::uint32_t kContCosaveVersion = 14;   // ★v14: the deposit ledger   // ★v13: a bag CELL's name   // ★v12: a bundle entry's NAME (id + parent id, replacing the index)   // v11: a bundle entry's parent (nested bags)   // v2: per-spot rotation  v3: a stored pouch's gold  v4: a stored bag's bundle  v5: bundle anchors  v6: bundle rotation  v7: bundle markers  v8: bundle stolen flag  v9: the spot's binding hints  v10: the cell owns form + count + xlIdx
 
         // ★v9 migration: before this, a spot's binding lived inside its KEY
         // ("form~B825!worn#1"). Read it back out and put it where it belongs.
@@ -5367,6 +5441,14 @@ namespace
                 a_intfc->WriteRecordData(static_cast<std::int32_t>(s.xlIdx));
                 // ★v13: if this cell is a bag, the bag's own name
                 a_intfc->WriteRecordData(s.bagId);
+            }
+            // ★v14: the deposit ledger. Measured to matter across a save/load:
+            // vanilla still treats a stored item as yours after one, and the
+            // Embassy quest hands your gear back a whole party later.
+            a_intfc->WriteRecordData(static_cast<std::uint32_t>(cl.deposits.size()));
+            for (const auto& [form, n] : cl.deposits) {
+                a_intfc->WriteRecordData(form);
+                a_intfc->WriteRecordData(static_cast<std::int32_t>(n));
             }
         }
         SKSE::log::info("[LOOT] cosave: saved {} container layouts", g_contLayouts.size());
@@ -5532,6 +5614,28 @@ namespace
                     sp.form = FormFromSpotKey(key);
                 }
                 cl.cells[std::move(key)] = std::move(sp);
+            }
+            // ★v14: the deposit ledger. Older saves simply have none -- their
+            // already-stored goods read as the container's, and anything put
+            // in from now on is recorded properly.
+            if (a_version >= 14) {
+                std::uint32_t nDep = 0;
+                if (!a_intfc->ReadRecordData(nDep) || nDep > kContMaxEntries) return;
+                for (std::uint32_t k = 0; k < nDep; ++k) {
+                    RE::FormID   rawForm = 0;
+                    std::int32_t n = 0;
+                    if (!a_intfc->ReadRecordData(rawForm) ||
+                        !a_intfc->ReadRecordData(n)) {
+                        return;
+                    }
+                    RE::FormID depForm = 0;
+                    // Load-order shift: an unresolvable form is dropped, the
+                    // same as an unresolvable container.
+                    if (a_intfc->ResolveFormID(rawForm, depForm) && depForm != 0 &&
+                        n > 0) {
+                        cl.deposits[depForm] = n;
+                    }
+                }
             }
             if (ok && resolved != 0) {
                 maxStamp = (std::max)(maxStamp, stamp);
