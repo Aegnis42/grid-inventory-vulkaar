@@ -298,7 +298,16 @@ namespace
                         // are IGNORED on this side -- the equip direction
                         // never needed a rebuild (B3, measured), and e.g. a
                         // torch's "still worn" decline must not start one.
-                        (void)FUI::Grid::OnFormDelta(fid);
+                        // ★Still ignored -- but SAID, because it used not to
+                        // be. The shared decline line claimed "full rebuild"
+                        // for every caller, and this one does not rebuild, so
+                        // a stale tile after an equip looked in the log like a
+                        // tile a rebuild had already been past. Which of the
+                        // two it is decides where to look next.
+                        if (!FUI::Grid::OnFormDelta(fid)) {
+                            SKSE::log::info("[B3] equip-side decline NOT escalated "
+                                            "({:08X}) -- no rebuild from here", fid);
+                        }
                         auto* ui = RE::UI::GetSingleton();
                         if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return;
                         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -2311,7 +2320,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 4, 3, 0 },
+    .Version              = { 1, 4, 4, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)

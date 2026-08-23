@@ -7317,7 +7317,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     bool OnFormDelta(std::uint32_t a_form)
     {
         const auto decline = [&](const char* a_why) {
-            SKSE::log::info("[B3] partial add declined ({:08X}): {} -- full rebuild",
+            // ★NOT "-- full rebuild". That was written when every caller
+            // escalated a decline, and one of them does not: the EQUIP side of
+            // the event sink drops the return value on purpose (see the note
+            // there). So this line promised a rebuild that, on that path, never
+            // happened -- and a log that lies is worse than a quiet one,
+            // because it is the first thing read when a stale tile is
+            // reported. Every caller but that one escalates, which is the
+            // documented default; the exception says so itself rather than
+            // making this line repeat what is usually true.
+            SKSE::log::info("[B3] partial add declined ({:08X}): {}",
                 a_form, a_why);
             return false;
         };
