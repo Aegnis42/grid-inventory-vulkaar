@@ -1241,7 +1241,16 @@ namespace FUI
         box.bottom = static_cast<UINT>(top + height);
         box.back   = 1;
 
-#ifdef GI_CAPTURE_DIAG
+        // ★★★ALWAYS ON, ONCE PER SESSION. This used to be behind
+        // GI_CAPTURE_DIAG, which meant the one fact that explains most capture
+        // reports was missing from every log a player ever sent. Two
+        // investigations were spent getting it back by other means: a pink
+        // backdrop that turned out to be a 10-bit surface, and a crash whose
+        // log showed frame generation only because the DLL happened to be in
+        // the module list. Both would have been one line here.
+        //
+        // Costs one QueryInterface and one log line for the whole session.
+        //
         // Surface facts, once. An upscaler changes exactly these: the format
         // (HDR/typeless), the size (render resolution below output), and the
         // sample count. Reported by NAME so the report needs no lookup table.
@@ -1302,7 +1311,6 @@ namespace FUI
                 }
             }
         }
-#endif
 
         // Step 1 (save): stash the WHOLE backbuffer for restoration — the
         // model draw is not confined to the capture rect.

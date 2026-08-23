@@ -42,6 +42,40 @@ namespace FUI
     // player who wants the fix applied to icons they already have deletes
     // GridInventory_icons.pak and lets them re-capture.
     //
+    // Is there room to capture at all? See the note at the call site for why
+    // this is asked BEFORE arming a queue entry rather than after failing one.
+    //
+    // ★A FRACTION, FENCED AT BOTH ENDS -- all three numbers earn their place.
+    //
+    // The FRACTION is the honest measure of "this machine is running out":
+    // the reported crash sat at 1.13 of 23.91 GB, which is 4.7%.
+    //
+    // The FLOOR exists because a fraction alone is meaningless on a small
+    // machine -- 10% of 8GB is 800MB, and one that size lives near there
+    // normally. Below 512MB nothing should be captured on any box.
+    //
+    // The CEILING exists because a capture's cost does NOT scale with RAM. It
+    // is two 2048² targets and a mesh, the same on every machine, so demanding
+    // 6.4GB free on a 64GB box would stall captures on the machine least
+    // likely to be in trouble. Past 2GB of headroom the question is settled.
+    //
+    // ★10%, not the 5% first written: 5% would have cleared the reported crash
+    // by 0.3 of a percentage point, and a margin that thin is not a margin.
+    [[nodiscard]] static bool MemoryHeadroom()
+    {
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof(ms);
+        // ★Cannot ask -> proceed. A capture that might fail beats an icon
+        // system that silently never runs because one API said no.
+        if (!::GlobalMemoryStatusEx(&ms)) return true;
+        constexpr ULONGLONG kFloor   =  512ull * 1024 * 1024;
+        constexpr ULONGLONG kCeiling = 2048ull * 1024 * 1024;
+        const ULONGLONG tenth = ms.ullTotalPhys / 10;
+        const ULONGLONG need =
+            (std::min)(kCeiling, (std::max)(kFloor, tenth));
+        return ms.ullAvailPhys >= need;
+    }
+
     // 'FIC8': no rotation field.
     static constexpr std::uint32_t kIconMagic = 0x38434946;
     // 'FIC9': records the FIRST GEOMETRY's world.rotate at capture (9 f32
@@ -1836,7 +1870,33 @@ namespace FUI
             SKSE::log::info("[ICONS] retry pass done: {} still deferred",
                 m_deferred.size());
         }
-        if (!m_pendingBusy) {
+        // ★★★DO NOT BE THE LAST DROP.
+        //
+        // A capture is the most expensive moment this plugin has: two 2048²
+        // render targets, and behind them the engine's NIF loader allocating
+        // a mesh. On a machine already at the wall, ours is the request that
+        // fails -- and it fails INSIDE the engine, in a loader we do not call
+        // directly and cannot guard. A reported crash landed exactly there:
+        // NiBinaryStream reading note03.nif with physical memory at 22.78 of
+        // 23.91 GB and 6.6M page faults. Nothing downstream could have caught
+        // it; the only place we can act is before asking.
+        //
+        // ★The QUEUE IS UNTOUCHED. Nothing is dropped and no timeout runs --
+        // an entry that never armed cannot age out -- so when memory frees up
+        // the next frame simply carries on. This costs the player a wait, not
+        // an icon.
+        const bool memOk = MemoryHeadroom();
+        if (!memOk && !m_memPaused && !m_queue.empty()) {
+            m_memPaused = true;
+            SKSE::log::warn("[ICONS] paused: system memory is low -- {} icon(s) "
+                            "stay queued and resume when it frees up",
+                m_queue.size());
+        } else if (memOk && m_memPaused) {
+            m_memPaused = false;
+            SKSE::log::info("[ICONS] resumed: memory recovered");
+        }
+
+        if (!m_pendingBusy && memOk) {
             // A skipped entry does NOT end the frame's work -- the loop keeps
             // going until it arms something -- so a run of skips is paid all at
             // once. First-time archive probes are the expensive kind, and a
@@ -2393,11 +2453,85 @@ namespace FUI
                             dst[x * 4 + 0] = static_cast<std::uint8_t>(((v >>  0) & 0x3FF) >> 2);
                             dst[x * 4 + 1] = static_cast<std::uint8_t>(((v >> 10) & 0x3FF) >> 2);
                             dst[x * 4 + 2] = static_cast<std::uint8_t>(((v >> 20) & 0x3FF) >> 2);
-                            dst[x * 4 + 3] = 255;   // 2-bit alpha is not ours to use
+                            // ★★★THE TWO ALPHA BITS ARE THE WHOLE PICTURE HERE.
+                            // This wrote 255 unconditionally, with "2-bit alpha
+                            // is not ours to use" beside it. Harmless while the
+                            // backdrop was found by COLOUR — and the reported
+                            // pink background the moment the key became alpha:
+                            // no pixel reads as background, so the magenta sheet
+                            // is kept as opaque model and baked into the icon.
+                            // (1.4.0 was immune for exactly that reason, which is
+                            // why downgrading fixed it for the reporter.)
+                            // Two bits is coarse — 0/85/170/255 — but the two
+                            // ends are the two that carry the meaning: 0 is the
+                            // backdrop we cleared, 3 is solid geometry.
+                            //
+                            // ★KNOWN AND ACCEPTED: a genuinely translucent
+                            // pixel whose real alpha is 192..255 rounds to 255
+                            // here, and the sprite pass leaves a==255 alone by
+                            // design (that rule is what keeps a purple potion
+                            // purple). Such a pixel still carries up to a
+                            // quarter of the magenta backdrop, so a lace veil
+                            // shows a faint violet cast on this surface and
+                            // none on an 8-bit one — measured both ways.
+                            // Not fixable from here: two bits cannot tell 200
+                            // from 255, and treating 255 as suspect would bleach
+                            // every actually-purple object on this hardware.
+                            // Visible only while rotating a veil in EDIT.
+                            dst[x * 4 + 3] =
+                                static_cast<std::uint8_t>(((v >> 30) & 0x3) * 85);
                         }
                     } else {
                         std::memcpy(dst, row, static_cast<size_t>(w) * 4);
                     }
+                }
+                context->Unmap(staging, 0);
+
+                // ★★★DOES THIS SURFACE GIVE US ALPHA AT ALL?
+                //
+                // Everything downstream reads transparency out of the alpha
+                // channel, which is only sound while the channel survives the
+                // trip — and it does not always. A 10-bit backbuffer carries
+                // two bits; an upscaler proxy can hand back a surface with
+                // none. The failure is SILENT: every pixel reads opaque, the
+                // trim keeps the whole rect, and the magenta backdrop bakes
+                // into the icon as a pink sheet.
+                //
+                // We cleared this rect to alpha 0 OURSELVES and the model never
+                // fills it (kSafetyMargin is 1.5x the box, and anything that
+                // does reach the edge is sent back for a bigger box below). So
+                // a capture with ZERO transparent pixels is not a full frame —
+                // it is a channel that never arrived. Say so, and fall back to
+                // what 1.4.0 did: key the magenta by colour and write the alpha
+                // ourselves, after which nothing downstream need know.
+                //
+                // ★The gate is not "is this 10-bit" on purpose. We know of one
+                // surface that eats alpha; the reporter's may be another. The
+                // question that generalises is whether the channel came back,
+                // and the answer costs nothing to ask — a healthy capture's
+                // first pixel IS backdrop, so this breaks on iteration one.
+                bool alphaOk = false;
+                for (size_t i = 3; i < pixels.size(); i += 4) {
+                    if (pixels[i] == 0) { alphaOk = true; break; }
+                }
+                if (!alphaOk && !pixels.empty()) {
+                    for (size_t i = 0; i < pixels.size(); i += 4) {
+                        // Symmetric in R/B, so BGRA vs RGBA never matters.
+                        const bool key = pixels[i] > 200 && pixels[i + 2] > 200 &&
+                                         pixels[i + 1] < 60;
+                        pixels[i + 3] = key ? 0 : 255;
+                    }
+                    static bool s_saidKey = false;
+                    if (!s_saidKey) {
+                        s_saidKey = true;
+                        SKSE::log::info("[ICONS] capture surface returned no alpha (fmt={}) "
+                                        "-- keying the backdrop by colour instead",
+                            static_cast<int>(srcDesc.Format));
+                    }
+                }
+
+                for (int y = 0; y < h; ++y) {
+                    const auto* dst = pixels.data() + static_cast<size_t>(y) * w * 4;
                     for (int x = 0; x < w; ++x) {
                         // ★★★CONTENT IS ALPHA, NOT COLOUR. The background is
                         // cleared to alpha 0 and the engine writes real alpha
@@ -2419,7 +2553,6 @@ namespace FUI
                         }
                     }
                 }
-                context->Unmap(staging, 0);
             }
             staging->Release();
 
@@ -2542,10 +2675,35 @@ namespace FUI
                     if (spill > 0) {
                         px[0] = static_cast<std::uint8_t>((std::max)(0, px[0] - spill));
                         px[2] = static_cast<std::uint8_t>((std::max)(0, px[2] - spill));
+                    } else {
+                        // ★★★LOW ALPHA WITH NO BACKDROP IN IT IS NOT
+                        // TRANSPARENCY. Hides and pelts came out see-through
+                        // (reported: goat and elk). Measured, they carry NO
+                        // opaque pixel at all — 'Goat Hide' 255=0, every pixel
+                        // between 64 and 191 — and yet the engine draws them
+                        // solid, because they are alpha-TESTED: the shader
+                        // writes the material's alpha and the test decides
+                        // visibility, so the number in the buffer describes
+                        // the material, not what you can see through.
+                        //
+                        // The two cases separate by COLOUR, not by alpha. A
+                        // pixel that really was blended has the magenta
+                        // backdrop mixed into it and shows up as spill (a lace
+                        // veil measured 940B92 -> 135). One that covered the
+                        // backdrop outright has none, and on natural colours
+                        // min(R,B)-G lands at or below zero. So: backdrop in
+                        // the pixel means it is genuinely see-through, and no
+                        // backdrop means the low alpha is bookkeeping.
+                        //
+                        // ★This keeps the veil intact — that was the whole
+                        // point of reading alpha — while giving the hides back
+                        // the solidity the engine gives them.
+                        px[3] = 255;
                     }
                 }
             }
         }
+
 
         // ★Store at the size the TILE can actually show, not the size we
         // captured at. Rendering the model large is what buys the detail

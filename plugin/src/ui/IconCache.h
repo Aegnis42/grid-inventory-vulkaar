@@ -390,6 +390,10 @@ namespace FUI
         bool                                   m_inspectRetire = false;   // free on Tick
         bool                                   m_pendingInspect = false;  // in-flight kind
         bool                                   m_pendingBusy = false;
+        // ★Held OFF because the machine is out of memory, not because anything
+        // failed. Only here so the log says it once on the way in and once on
+        // the way out instead of every frame.
+        bool                                   m_memPaused = false;
         int                                    m_frames = 0;
         std::uint32_t                          m_stampBefore = 0;
         // ★A run of timeouts means the backbuffer read is coming back empty —
