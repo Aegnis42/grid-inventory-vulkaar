@@ -1383,6 +1383,46 @@ namespace FUI::LootBarter
                     player->StealAlarm(source, r.obj, r.count,
                         r.obj->GetGoldValue() * r.count, ContainerOwner(source), true);
                 }
+                // ★★★TAKING BACK YOUR OWN PROPERTY IS NOT THEFT.
+                //
+                // A unit stamped ownership=Player is one the player stored here
+                // (Grid::MarkAsPlayerOwned writes that on the way in, exactly
+                // as vanilla does). Handing kSteal to the engine for it makes
+                // the engine re-stamp it with the CONTAINER's owner, and the
+                // player's own gear comes home stolen -- the reported Embassy
+                // case. Measured: identical items into one barrel both arrive
+                // [00000007], and on the way out one loses the stamp cleanly
+                // while the other is overwritten with the barrel's owner. The
+                // engine's rule there is not one we can predict, so it is not
+                // one to rely on: say plainly that this unit is not being
+                // stolen.
+                //
+                // ★The stamp carries no uid, so PoolChoice may hand back a
+                // null list for it -- fall back to the entry, the same way the
+                // partner board's marker does.
+                auto* myBase = player->GetActorBase();
+                const RE::TESForm* unitOwner = pick.xl ? pick.xl->GetOwner() : nullptr;
+                if (!unitOwner && myBase) {
+                    for (auto& [o, d] : source->GetInventory(
+                             [&](RE::TESBoundObject& x) { return &x == r.obj; })) {
+                        const auto* e = d.second.get();
+                        if (!e || !e->extraLists) continue;
+                        for (auto* l : *e->extraLists) {
+                            if (l && l->GetOwner()) { unitOwner = l->GetOwner(); break; }
+                        }
+                    }
+                }
+                const bool minesAlready = myBase && unitOwner == myBase;
+
+                // ★★★TRIED AND WRONG, recorded so it is not tried again:
+                // gating the ownership steps below on `pick.xl->GetOwner()`,
+                // on the theory that a unit which really belongs to somebody
+                // already carries them. It does not. A cheese on a shelf reads
+                // owner='Lucan Valerius' only AFTER it reaches the player --
+                // that stamp is the engine's answer to kSteal, not something
+                // the shelf was holding. Inside the container both a shop's
+                // goods and the player's own stored gear read owner=none, so
+                // the test silently disabled every stolen mark in the game.
                 // ★★⑰ NAMING A LIST COSTS THE STEAL STAMP.
                 //
                 // Measured: taking four cabbages out of an owned chest hands
@@ -1415,7 +1455,7 @@ namespace FUI::LootBarter
                 // The name goes back (GI39 wants it), and the ownership is ours
                 // to state.
                 std::set<RE::ExtraDataList*> hadBefore;
-                if (g_mode == Mode::kSteal) {
+                if (g_mode == Mode::kSteal && !minesAlready) {
                     if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
                         for (auto* l : *e->extraLists) {
                             if (l) hadBefore.insert(l);
@@ -1458,14 +1498,37 @@ namespace FUI::LootBarter
                         }
                     }
                 }
+                // ★★★kSteal IS ABOUT THE UNIT, NOT THE ROOM.
+                //
+                // This said "steal mode -> kSteal" for everything in the
+                // container, and kSteal is how the engine is told to write
+                // ownership onto what it hands over. So storing your own sword
+                // in an innkeeper's chest and taking it straight back handed it
+                // to you stamped -- confirmed by opening the VANILLA inventory
+                // on the same item, where the mark was also there, so it was
+                // real ownership rather than a mark of ours. It is the reported
+                // Embassy case exactly: the player's own confiscated gear comes
+                // home through a chest in a hostile cell.
+                //
+                // Vanilla does neither, and measurement says why: a unit that
+                // really belongs to somebody ALREADY CARRIES THEM. Taking a
+                // cheese off Lucan's shelf reads owner='Lucan Valerius' before
+                // anything of ours runs. A unit the player put there carries
+                // nothing. So ask the unit instead of the room.
+                //
+                // ★The crime is unaffected -- StealAlarm above is what the
+                // guards answer to, and it still fires on the container's
+                // ownership. Confirmed in game: NPCs react identically, both
+                // storing and taking. Only the ownership stamp changes.
                 GuardedRemove(source, r.obj,
                     pick.kind == Grid::PickKind::kFallback, "take", [&]() {
                     source->RemoveItem(r.obj, r.count,
-                        g_mode == Mode::kSteal ? RE::ITEM_REMOVE_REASON::kSteal
-                                               : RE::ITEM_REMOVE_REASON::kRemove,
+                        (g_mode == Mode::kSteal && !minesAlready)
+                            ? RE::ITEM_REMOVE_REASON::kSteal
+                            : RE::ITEM_REMOVE_REASON::kRemove,
                         pick.xl, player);
                 });
-                if (g_mode == Mode::kSteal) {
+                if (g_mode == Mode::kSteal && !minesAlready) {
                     // ★★A UNIT WITH NO LIST CANNOT BE STOLEN, because ownership
                     // lives on the list. That is the whole of this bug.
                     //
@@ -1536,6 +1599,15 @@ namespace FUI::LootBarter
                 // list we got to the engine (rule 58).
                 auto* sxl = Grid::ResolveExitUnit(r.obj, r.uid, r.sig, r.count,
                                                   r.fav ? r.count : 0, r.xlIdx);
+                // ★★SAY IT IS YOURS BEFORE IT GOES IN. Vanilla stamps
+                // ownership=Player on anything stored in a container, and that
+                // is the whole reason your own gear survives a chest in a
+                // hostile cell -- taking it back is not theft because the unit
+                // still says whose it is. We left nothing, so the engine
+                // stamped the CONTAINER's owner on the way out and the player's
+                // own equipment came home stolen (reported from the Embassy
+                // quest; reproduced with a barrel and a bride veil).
+                sxl = Grid::MarkAsPlayerOwned(r.obj, sxl);
                 // ★TEST ONLY (!simrefuse): skip the ENGINE CALL and nothing
                 // else. A real refusal is RemoveItem quietly not taking -- our
                 // own bookkeeping still runs, because the engine's silence does
@@ -2557,8 +2629,11 @@ namespace
             // ★(1.3.2) the marker tray: poison, and "stolen" when the whole
             // container is someone else's. No star -- a stored unit is not
             // the player's favourite any more (the store strips it).
+            // ★b.stolen ALONE -- what this unit actually carries, not what
+            // container it happens to be sitting in. See the note on the
+            // partner board's tray for why the mode is no longer part of it.
             Grid::DrawMarkerTray(dl, p0, ImVec2(p0.x + bw, p0.y + bh),
-                                 false, b.stolen || g_mode == Mode::kSteal,
+                                 false, b.stolen,
                                  (b.glow & 0x4) != 0, false);
             {   // GI8: extension overlay (socket wells), same as every board
                 Badges::TileShape shape;
@@ -2905,9 +2980,13 @@ namespace
                             // ★the entry keeps the name the CELL had, when the
                             // cell had one -- the mirror of the move out, and
                             // the other half of "one bag, one name"
+                            // ★What the carried unit actually is. Storing into
+                            // an owned container does not make a clean item
+                            // stolen -- measured, no ownership is written --
+                            // so the bundle must not record one either.
                             BundleItem ni{ hfid, hcount, hsig,
                                            dropC, dropR, hrot & 3, hglow,
-                                           g_carryStolen || g_mode == Mode::kSteal,
+                                           g_carryStolen,
                                            root };
                             ni.id = cellName != 0 ? cellName : NextBundleId();
                             const std::uint32_t nid = ni.id;
@@ -3329,6 +3408,13 @@ namespace
             // worn unit (same plain form on the body, no naming handle). Locked
             // up front -- vanilla locks the whole row for the same reason.
             bool          unnameable = false;
+            // ★★Is taking THIS unit a theft? Not the same question as "whose
+            // container is this". A unit the player stored here carries
+            // ownership=Player (see Grid::MarkAsPlayerOwned), and taking your
+            // own property back is not stealing however hostile the room --
+            // which is the whole of the reported Embassy complaint. Everything
+            // else in an owned container is.
+            bool          stolen = false;
             // GI20: the pool slot this cell was assigned this frame. Taking the
             // cell must free THIS slot -- otherwise the pool just loses its
             // trailing position and everything after the taken cell shuffles up,
@@ -3792,6 +3878,26 @@ namespace
                     pc.locked = (pc.worn && !HasPerfectTouch()) || pc.unnameable;
                 } else {
                     pc.locked = pc.unnameable;
+                }
+                // ★An owned container makes its contents stolen goods -- EXCEPT
+                // what the player put there, which says so on itself. The
+                // player's own base form is 0x7; anything else (or nothing) in
+                // an owned container is somebody else's.
+                if (g_mode == Mode::kSteal) {
+                    auto* mine = RE::PlayerCharacter::GetSingleton();
+                    auto* base = mine ? mine->GetActorBase() : nullptr;
+                    const RE::TESForm* owner = xl ? xl->GetOwner() : nullptr;
+                    // ★Fall back to the ENTRY when this cell has no list of its
+                    // own. The stamp we write on the way in does not carry a
+                    // uid, so ExtraForInstance cannot match it and the cell
+                    // came back listless -- which read as "no owner" and put
+                    // the mark straight back on the player's own goods.
+                    if (!owner && entry && entry->extraLists) {
+                        for (auto* l : *entry->extraLists) {
+                            if (l && l->GetOwner()) { owner = l->GetOwner(); break; }
+                        }
+                    }
+                    pc.stolen = !(base && owner == base);
                 }
                 cells.push_back(std::move(pc));
             }
@@ -4376,8 +4482,19 @@ namespace
                     // alone, because the label did not reach the person who
                     // designed it: the behaviour (goods turning stolen) was
                     // noticed, the label was not.
+                    // ★★PER UNIT, not per container. This was `g_mode ==
+                    // kSteal` -- everything in an owned chest stamped -- and
+                    // that put a crimson dot on the player's OWN sword the
+                    // moment they stored it, which reads as "this mod turned my
+                    // gear into contraband" (reported from the Embassy quest,
+                    // where confiscated gear comes home through such a chest).
+                    // Dropping the mark entirely was tried next and lost real
+                    // information: an owned container's contents ARE stolen
+                    // goods and the board should say so.
+                    // pc.stolen answers the actual question -- see where it is
+                    // computed.
                     Grid::DrawMarkerTray(dl, p0, ImVec2(p0.x + bw, p0.y + bh),
-                                         false, g_mode == Mode::kSteal,
+                                         false, it.stolen,
                                          (it.glow & 0x4) != 0,
                                          it.worn && !it.locked);
                 }

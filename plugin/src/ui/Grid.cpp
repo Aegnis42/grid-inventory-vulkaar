@@ -8058,6 +8058,53 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     //               caller always knows; the sink never can.
     // Returns nullptr for "let the engine pick" -- only ever within a pool whose
     // members are genuinely interchangeable.
+    RE::ExtraDataList* MarkAsPlayerOwned(RE::TESBoundObject* a_obj,
+                                         RE::ExtraDataList* a_known)
+    {
+        auto* p = RE::PlayerCharacter::GetSingleton();
+        if (!p || !a_obj) return a_known;
+        auto* base = p->GetActorBase();
+        if (!base) return a_known;
+
+        // Already have a handle: stamp it and go. An owner that is ALREADY set
+        // is left alone -- a genuinely stolen unit being stashed must not be
+        // laundered by putting it in a box.
+        if (a_known) {
+            if (!a_known->GetOwner()) a_known->SetOwner(base);
+            return a_known;
+        }
+
+        auto* changes = p->GetInventoryChanges();
+        auto* entry   = LiveEntry(p, a_obj);
+        if (!changes || !entry) return nullptr;
+        // The engine only mints for an entry with no lists at all (GI37's
+        // measurement). With variants present it would write into one of them,
+        // which is somebody else's unit -- leave it be. Measured cost of that
+        // caution: storing the third of three identical daggers, where the
+        // other two already carry lists, goes unstamped and comes back stolen.
+        // Rare
+        // enough to accept; the alternative is walking the WRONG dagger out.
+        if (entry->extraLists && !entry->extraLists->empty()) return nullptr;
+
+        changes->SetFavorite(entry, nullptr);
+
+        RE::ExtraDataList* made = nullptr;
+        if (entry->extraLists) {
+            for (auto* x : *entry->extraLists) {
+                if (x) { made = x; break; }
+            }
+        }
+        if (!made) return nullptr;
+
+        // ★Stamp BEFORE un-starring. A list holding nothing but a hotkey is
+        // retired the moment the hotkey goes; one holding an owner is not.
+        // ★RemoveByType rather than RemoveFavorite: the latter can retire the
+        // list outright, which would take the stamp with it.
+        made->SetOwner(base);
+        made->RemoveByType(RE::ExtraDataType::kHotkey);
+        return made;
+    }
+
     RE::ExtraDataList* ResolveExitUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
                                        std::uint16_t a_sig, int a_count, int a_starred,
                                        int a_xlIdx)
