@@ -2212,9 +2212,17 @@ namespace FUI::Equip
         // the last to clear the cabinet -- pull the drawer and its far end
         // appears first, exactly like a real one. (Placing them against the
         // visible slice instead is what made the old version unfold.)
-        const float innerRight = g.bodyR - pad;
+        // ★★COLUMN 0 IS THE INNER ONE, WHICHEVER WAY THE BOX TRAVELS. Laying
+        // out from bodyR unconditionally worked only while the drawer opened
+        // LEFT, where bodyR is the edge against the window; docked right that
+        // same edge is the far one, so the first accessory jumped to the
+        // outermost column and the slide revealed the columns in reverse. Same
+        // worn set, mirrored layout, decided by nothing but where the window
+        // happened to sit.
         for (int c = 0; c < g.cols; ++c) {
-            const float cx = innerRight - S2 - c * (S2 + gap);
+            const float cx = g.toRight
+                ? (g.bodyX + pad + c * (S2 + gap))
+                : (g.bodyR - pad - S2 - c * (S2 + gap));
             for (int r = 0; r < kDrawerRows; ++r) {
                 const int idx = c * kDrawerRows + r;
                 // ★The drawer's nth cell continues the doll's — and where the
