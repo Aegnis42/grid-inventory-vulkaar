@@ -38,6 +38,27 @@ namespace FUI::DualRing
         };
         Lent g_lent;
 
+        // ★★★...AND IT DOES NOT STAY NAKED. See the note inside Carrier() for
+        // what the authored armature does. This is why the undressing is a
+        // function instead of three lines inside the resolve:
+        //
+        // LOADING A SAVE PUTS THE CLOTHES BACK ON. The engine re-reads the
+        // carrier's record from the plugin -- OnLoad has always known this,
+        // which is the reason the enchantment has to be re-lent there -- and
+        // armorAddons comes back with it. The strip used to live behind the
+        // `if (!cached)` of the resolve, so it ran ONCE PER PROCESS: the first
+        // load of a session was fine and every load after it wore a circlet's
+        // armature again.
+        //
+        // Measured in a reporter's log: 1924 lines, two loads, one strip.
+        // Now it is asked on every lend, and costs nothing when already bare.
+        void StripCarrier(RE::TESObjectARMO* a_c)
+        {
+            if (!a_c || a_c->armorAddons.empty()) return;
+            a_c->armorAddons.clear();
+            SKSE::log::info("[DUALRING] carrier armature stripped (authored circlet addon)");
+        }
+
         [[nodiscard]] RE::TESObjectARMO* Carrier()
         {
             // Not a function-local static initialiser: a miss must be
@@ -62,11 +83,7 @@ namespace FUI::DualRing
                 // actor, its armature was). Strip the armature once, here,
                 // where the form is first resolved; the slot mask is
                 // rewritten per wear by Lend already.
-                if (cached && !cached->armorAddons.empty()) {
-                    cached->armorAddons.clear();
-                    SKSE::log::info("[DUALRING] carrier armature stripped "
-                                    "(authored circlet addon)");
-                }
+                StripCarrier(cached);
             }
             return cached;
         }
@@ -188,6 +205,9 @@ namespace FUI::DualRing
                 g_lent.ench = a_carrier->formEnchanting;
                 g_lent.held = true;
             }
+            // ★Every lend, not once a session -- a load puts the authored
+            // armature back on the record. See StripCarrier.
+            StripCarrier(a_carrier);
             a_carrier->formEnchanting = a_ring->formEnchanting;
             a_carrier->bipedModelData.bipedObjectSlots = static_cast<Slot>(a_mask);
         }
@@ -485,9 +505,34 @@ namespace FUI::DualRing
         auto* ring = RingById(g_ringId);
         if (!p || !c || !ring) { g_ringId = 0; return; }
         g_lent = {};   // whatever we recorded belongs to the previous session
-        const auto mask = static_cast<std::uint32_t>(c->GetSlotMask().get());
-        Lend(c, ring, mask ? mask : (1u << 30));
-        SKSE::log::info("[DUALRING] load: re-lent '{}' to the carrier", NameOf(ring));
+        // ★★★DO NOT TRUST THE MASK THAT CAME BACK.
+        //
+        // This read the carrier's CURRENT slot mask and wrote it straight back,
+        // on the assumption that it was still the one Wear picked. It is not:
+        // the same restore that reverted the enchantment reverted the mask too,
+        // and the carrier's record is a costume anchor whose template carries a
+        // circlet's wardrobe -- BOD2 on the HAIR and circlet slots. So the load
+        // path took the authored hair mask and re-applied it, every time.
+        //
+        // It also never consulted FreeSlot, which is why "!ring2slot" appeared
+        // to do nothing: the override is read by Wear, and a ring already worn
+        // in the save never goes through Wear. Confirmed by a reporter's log --
+        // the pin was applied at startup ("carrier slot pinned to 55") and the
+        // character was bald anyway.
+        //
+        // Choose a slot the way Wear does, from what the body is actually
+        // wearing right now, and let the override have its say.
+        int slot = FreeSlot(p);
+        if (slot < 0) {
+            // Nothing free is not a reason to fall back on the record's own
+            // mask -- that is the hair. Take the top of the scan and say so.
+            slot = static_cast<int>(kSlots) - 3;
+            SKSE::log::warn("[DUALRING] load: no free biped slot -- parking on {} anyway",
+                            slot + 30);
+        }
+        Lend(c, ring, 1u << slot);
+        SKSE::log::info("[DUALRING] load: re-lent '{}' to the carrier on slot {} (0x{:08X})",
+            NameOf(ring), slot + 30, 1u << slot);
     }
 
     void SaveGame(SKSE::SerializationInterface* a_intfc)
