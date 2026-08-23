@@ -464,6 +464,13 @@ namespace FUI::DualRing
         Reclaim();
         g_ringId  = 0;
         g_wantOff = false;
+        // ★The signature travels with the id or not at all. The cosave stores
+        // only g_ringId, so leaving this behind let a PREVIOUS session's
+        // signature meet a freshly loaded id -- and since SecondSig() is the
+        // board's off-board exclusion key, the ring actually being worn stayed
+        // on the board while an innocent sibling unit vanished. Vanilla rings
+        // hash to 0 and never showed it; player-enchanted ones always did.
+        g_ringSig = 0;
     }
 
     void OnLoad()

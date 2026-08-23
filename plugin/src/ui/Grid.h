@@ -101,6 +101,8 @@ namespace FUI::Grid
                                   // the tooltip: equip / read / learn / use /
                                   // sell / store / open bag / restore / buy /
                                   // steal / plant / withdraw / unequip
+        bool canRecharge = false; // T feeds it a soul gem (enchanted weapon,
+                                  // not already full, not the partner's)
     };
     [[nodiscard]] HoverPrompt HoveredPrompt();
     void CancelHold();
@@ -251,6 +253,10 @@ namespace FUI::Grid
     // the native SetFavorite refuses to add a second favourite from inside the
     // render pass.
     void ProcessFavorites();
+    // Queue one unit's favourite toggle, named by uid+sig rather than by a
+    // board position -- what the equipment doll and the accessory drawer have.
+    void ToggleFavoriteUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                            std::uint16_t a_sig, int a_xlIdx = -1);
     void ClearPendingEquips();   // menu close / reset
     // ★A confirmed CONSUME releases its suppression entry at once. The entry
     // used to die only at the end of the rebuild it covered, and by then the

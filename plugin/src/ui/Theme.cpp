@@ -909,7 +909,12 @@ namespace FUI::Theme
         [[nodiscard]] constexpr float ClampShadow(int a_axis, float a_v)
         {
             const float hi = a_axis == 2 ? 1.0f : 8.0f;   // opacity is a fraction
-            return a_v < 0.0f ? 0.0f : (a_v > hi ? hi : a_v);
+            // ★NEGATED, so NaN lands on the floor instead of sailing through.
+            // strtof accepts "nan", both comparisons in `v < 0 ? .. : v > hi`
+            // are false for it, and the value was written straight back out to
+            // the ini -- one hand-edited line and the shadow was permanently
+            // NaN, which is not a shadow, it is no shadow at all.
+            return !(a_v > 0.0f) ? 0.0f : (a_v > hi ? hi : a_v);
         }
 
         // skin index is 1-BASED everywhere it is spoken about (ini, chips,
@@ -1348,6 +1353,23 @@ namespace FUI::Theme
             return sh ? &sh->ic : nullptr;
         }
 
+        // ★★THE THREE THE DRAW LOOPS ASK FOR BY THE HUNDRED.
+        //
+        // InkArt takes a std::string, so calling it with one of the kStroke /
+        // kRule / kCorner literals minted a temporary and hashed it -- once per
+        // grid line, per lattice, per frame. The answer only changes when the
+        // sheets are reloaded, and there is already a counter for that.
+        // Caller supplies the two statics so each site keeps its own slot.
+        [[nodiscard]] const IconCache::Icon* InkArtPinned(
+            const char* a_name, const IconCache::Icon*& a_slot, int& a_gen)
+        {
+            if (a_gen != g_inkGen) {
+                a_gen  = g_inkGen;
+                a_slot = InkArt(a_name);   // a cached miss is a null, and stays one
+            }
+            return a_slot;
+        }
+
         // One sprite, stretched into a rect. Vertical marks reuse the same
         // horizontal sprite by swapping the uv corners -- a 90 degree turn
         // costs nothing and keeps one file doing both jobs.
@@ -1546,7 +1568,9 @@ namespace FUI::Theme
                    ImU32 a_col, bool a_vert, bool a_whole, float a_fade)
     {
         if (a_len <= 0.5f || a_th <= 0.05f) return;
-        const auto* ic = InkArt(kStroke);
+        static const IconCache::Icon* s_stroke = nullptr;
+        static int s_strokeGen = -1;
+        const auto* ic = InkArtPinned(kStroke, s_stroke, s_strokeGen);
         // ★Overshoot half a thickness at each end. Four marks butted at a
         // corner leave a notch; the reference has them CROSS, one running a
         // little past the other, and half a width is the least that closes it.
@@ -1587,7 +1611,9 @@ namespace FUI::Theme
                  ImU32 a_col, bool a_vert)
     {
         if (a_len <= 0.5f || a_th <= 0.05f) return;
-        const auto* ic = InkArt(kRule);
+        static const IconCache::Icon* s_rule = nullptr;
+        static int s_ruleGen = -1;
+        const auto* ic = InkArtPinned(kRule, s_rule, s_ruleGen);
         const unsigned int key = InkSpanKey(a_from);
         float u0 = 0.0f, u1 = 1.0f;
         MarkSpan(ic, a_len, a_th, key, u0, u1);
@@ -1605,7 +1631,9 @@ namespace FUI::Theme
     void InkFrame(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max, ImU32 a_col,
                   float a_corner)
     {
-        const auto* cn = InkArt(kCorner);
+        static const IconCache::Icon* s_corner = nullptr;
+        static int s_cornerGen = -1;
+        const auto* cn = InkArtPinned(kCorner, s_corner, s_cornerGen);
         if (!a_dl || !cn) return;
         const float w = a_max.x - a_min.x, h = a_max.y - a_min.y;
         if (w < 6.0f || h < 6.0f) return;

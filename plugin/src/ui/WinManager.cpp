@@ -12,9 +12,12 @@
 #include "game/DualRing.h"
 #include "game/Ledger.h"
 
+#include <imgui_internal.h>   // ImTextCharFromUtf8 (the tracked-title walk)
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -1057,13 +1060,34 @@ namespace FUI
     }
 
     // uppercase + letter-tracked title text (skins set the tracking)
+    // ★★★THE LEAD BYTE IS A CLAIM, NOT A GUARANTEE.
+    //
+    // Both of these walked UTF-8 by reading the lead byte's advertised length
+    // and adding it, with nothing checking that the string was actually that
+    // long. A name ending in 0xE9 claims three bytes, so `p += len` stepped
+    // over the terminating NUL and `while (*p)` kept going through whatever
+    // came next -- drawn as glyphs, and an access violation if the buffer sat
+    // against a page boundary.
+    //
+    // Nothing about this needed a malformed file. Titles are game names
+    // straight from obj->GetName(), and there is no code-page conversion
+    // anywhere in this plugin: the CK writes ESP FULL names in Windows-1252,
+    // so an accented mod item does it in English and a Russian or Polish build
+    // does it on most container names in the game.
+    //
+    // ImTextCharFromUtf8 is what the rest of the project already uses (three
+    // sites in Theme.cpp) -- given an end pointer it consumes one byte on a
+    // broken sequence and never reads past it.
     static float TrackedTextWidth(ImFont* a_font, float a_size, const char* a_text, float a_spacing)
     {
+        if (!a_text || !*a_text) return 0.0f;
         float width = 0.0f;
         const char* p = a_text;
-        while (*p) {
-            const unsigned char c = static_cast<unsigned char>(*p);
-            const int len = (c & 0xF8) == 0xF0 ? 4 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xE0) == 0xC0 ? 2 : 1;
+        const char* const end = a_text + std::strlen(a_text);
+        while (p < end) {
+            unsigned int cp = 0;
+            const int len = ImTextCharFromUtf8(&cp, p, end);
+            if (len <= 0) break;
             width += a_font->CalcTextSizeA(a_size, FLT_MAX, 0.0f, p, p + len).x + a_spacing;
             p += len;
         }
@@ -1073,11 +1097,14 @@ namespace FUI
     static void DrawTrackedText(ImDrawList* a_dl, ImFont* a_font, float a_size, ImVec2 a_pos,
                                 ImU32 a_col, const char* a_text, float a_spacing)
     {
+        if (!a_text || !*a_text) return;   // see TrackedTextWidth
         const char* p = a_text;
+        const char* const end = a_text + std::strlen(a_text);
         float x = a_pos.x;
-        while (*p) {
-            const unsigned char c = static_cast<unsigned char>(*p);
-            const int len = (c & 0xF8) == 0xF0 ? 4 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xE0) == 0xC0 ? 2 : 1;
+        while (p < end) {
+            unsigned int cp = 0;
+            const int len = ImTextCharFromUtf8(&cp, p, end);
+            if (len <= 0) break;
             a_dl->AddText(a_font, a_size, ImVec2(x, a_pos.y), a_col, p, p + len);
             x += a_font->CalcTextSizeA(a_size, FLT_MAX, 0.0f, p, p + len).x + a_spacing;
             p += len;
@@ -1356,6 +1383,17 @@ namespace FUI
                                     Theme::Col(sk.sel, 0.60f));
             }
         }
+        // ★★★THE TITLE STOPS AT THE FRAME. The clip in force here is the
+        // window plus kTornOut on every side -- deliberately, so a ragged skin
+        // can bleed its edges outward -- and the title was inheriting it. But
+        // a bag window is sized from its COLUMN COUNT, with no thought for how
+        // long the name is: a 2x2 pouch is about 110px and "Ancient Nord
+        // Burial Urn" is not. The name ran past the frame, over the bleed
+        // allowance, and on a docked bag over the neighbouring window, ending
+        // mid-letter wherever the bleed ran out. The ink title plate beside it
+        // has always clamped to the frame; the text simply never did.
+        dl->PushClipRect(ImVec2(wp.x + insX, wp.y),
+                         ImVec2(we.x - insX, we.y), true);
         if (sk.titleGlow) {
             // poor-man's bloom: 4 offset passes under the main text.
             // ★1.0.5: the right-fading 1px UNDERLINE that used to follow is
@@ -1388,6 +1426,7 @@ namespace FUI
         }
         DrawTrackedText(dl, font, fontSize, ImVec2(tx, ty),
             sk.titleGlow ? Theme::Col(sk.hi, 1.0f) : Theme::TitleInk(), a_label, spacing);
+        dl->PopClipRect();   // ★the title's own clamp
 
         dl->PopClipRect();   // back to the window's normal clip
 

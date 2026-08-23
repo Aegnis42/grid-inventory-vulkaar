@@ -95,6 +95,7 @@ namespace FUI
 
         auto& io = ImGui::GetIO();
         io.ClearInputKeys();
+        io.ClearInputMouse();   // ★see UIRoot::OnClose -- keys alone leave the buttons down
         io.ClearEventsQueue();
     }
 
@@ -408,12 +409,29 @@ namespace FUI
             case ImGuiKey_DownArrow:  ai = 3; vk = VK_DOWN; break;
             default: break;
             }
-            if (ai >= 0 && UIRoot::IsTextInputActive()) {
+            // ★★★THE RELEASE FOLLOWS THE PRESS, NOT THE FIELD'S STATE.
+            //
+            // The whole block used to sit behind IsTextInputActive(), so the
+            // flag was written only while a field had the keyboard -- and the
+            // release was judged by the state at RELEASE time. Press an arrow
+            // with no field focused (the down goes straight through, flag
+            // still false), then click the search box while holding it, then
+            // let go: now the field IS active, the guard runs, the flag says
+            // false, and the key-up is dropped. ImGui holds that arrow down
+            // for good and repeats it into the field.
+            //
+            // s_arrowLive now means exactly "we passed a down for this arrow
+            // and owe ImGui the up", which is the invariant the note above
+            // always claimed.
+            if (ai >= 0) {
                 if (a_down) {
-                    if ((GetAsyncKeyState(vk) & 0x8000) == 0) return;   // WASD-translated
+                    if (UIRoot::IsTextInputActive() &&
+                        (GetAsyncKeyState(vk) & 0x8000) == 0) {
+                        return;   // WASD-translated while typing: not a real arrow
+                    }
                     s_arrowLive[ai] = true;
                 } else {
-                    if (!s_arrowLive[ai]) return;
+                    if (!s_arrowLive[ai]) return;   // we never passed its down
                     s_arrowLive[ai] = false;
                 }
             }

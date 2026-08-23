@@ -215,6 +215,7 @@ namespace FUI::Lang
         X(ActUse, "use")                                                                                    \
         X(ActDrop, "drop")                                                                                  \
         X(ActFavorite, "favorite")                                                                          \
+        X(ActRecharge, "recharge")   /* (1.3.1) T on an enchanted weapon that is not full */                \
         X(ActSplit, "split")                                                                                \
         X(ActCompare, "compare")                                                                            \
         X(Act3D, "3D")   /* GI62: shown under the carried item while it can be turned */                    \

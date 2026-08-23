@@ -298,6 +298,7 @@ namespace FUI::Grid
             bool      canFav = false;
             bool      hasVerb = false;
             Lang::Str verb{};
+            bool      canRecharge = false;   // (1.3.1) T, on an enchanted weapon
         };
         HoverRec g_hoverPrompt;
 
@@ -1122,7 +1123,7 @@ namespace FUI::Grid
         // plain unit, which is exactly what the no-lists case always passed.
         // Defined after g_layout / FormKey (it edits our own per-tile flag).
         void ToggleFavorite(const std::string& a_key, RE::TESBoundObject* a_obj,
-                            std::uint16_t a_uid, int a_xlIdx);
+                            std::uint16_t a_uid, int a_xlIdx, std::uint16_t a_sig);
 
         int StackCapOf(RE::TESBoundObject* a_obj)
         {
@@ -1409,6 +1410,10 @@ namespace FUI::Grid
             RE::TESBoundObject* obj = nullptr;
             std::uint16_t       uid = 0;
             int                 xlIdx = -1;
+            // ★The doll and the drawer know a unit by uid+sig and never by a
+            // list index -- a worn unit owns no cell, so there is no position
+            // to record. ProcessFavorites falls back to the pool with this.
+            std::uint16_t       sig = 0;
         };
         std::vector<FavSync> g_favSync;
         // Last drawn set per gear pool, so a rebuild that changes what is on the
@@ -1553,6 +1558,14 @@ namespace FUI::Grid
             // time the answer arrives there is nothing left to ask.
             std::uint16_t       uid = 0;
             std::uint16_t       sig = 0;
+            // ★★★AND THE TURN. Without it the confirm path re-derived the
+            // footprint from the def alone -- upright -- while the drop that
+            // opened the popup had been validated against the TURNED one. A
+            // 1x4 weapon laid flat then asked the trash for room as if it were
+            // still standing, found none across four rows, and TrashMakeRoomFor
+            // answered by evicting parked items to make space that was already
+            // there. Eviction here is a real RemoveItem: those items are gone.
+            int                 rot = 0;
         };
         TrashAsk                                 g_trashAsk;
 
@@ -1869,10 +1882,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         //
         // Queued for the game thread like every other inventory mutation here.
         void ToggleFavorite(const std::string& a_key, RE::TESBoundObject* a_obj,
-                            std::uint16_t a_uid, int a_xlIdx)
+                            std::uint16_t a_uid, int a_xlIdx, std::uint16_t a_sig = 0)
         {
             if (!a_obj || a_key.empty()) return;
-            g_favSync.push_back({ a_obj, a_uid, a_xlIdx });
+            g_favSync.push_back({ a_obj, a_uid, a_xlIdx, a_sig });
         }
 
 
@@ -3052,13 +3065,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // This is the payoff of the even-line decision: a polyline
                 // traces any shape, a corner fade would first have to be told
                 // which ends of which edge are convex.
-                if (Editor::IsSelected(BaseKey(it.key))) {
+                // ★IsEditMode() first: BaseKey returns a std::string BY VALUE,
+                // and a tile key is past SSO, so this was a heap allocation per
+                // tile per frame to answer a question that is "no" whenever the
+                // editor is shut -- which is always, in play. Same move the
+                // DefKeyOf call below already made.
+                if (Editor::IsEditMode() && Editor::IsSelected(BaseKey(it.key))) {
                     DrawMaskOutline(dl, it.mask, p0, Theme::Col(sk.sel, 1.0f), 2.0f);
                 }
 
                 // hover / pickup / bag-toggle surface
                 ImGui::SetCursorScreenPos(p0);
-                ImGui::InvisibleButton(("##it_" + it.key).c_str(), ImVec2(w, h));
+                // ★PushID hashes the key in place; "##it_" + it.key built and
+                // destroyed a second heap string for every tile, every frame.
+                ImGui::PushID(it.key.c_str());
+                ImGui::InvisibleButton("##it", ImVec2(w, h));
+                ImGui::PopID();
                 // ★★The button still exists — it reserves the rect and gives
                 // this tile an ImGui id (drag, tooltips and Sfx all key off
                 // it) — but it is NOT what decides the hit. The GRID decides:
@@ -3219,7 +3241,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         if (ImGui::IsKeyPressed(ImGuiKey_F, false) &&
                             !ImGui::GetIO().WantTextInput &&
                             !GoldCoins::IsCoinForm(fid)) {
-                            ToggleFavorite(it.key, it.obj, it.uid, it.xlIdx);
+                            ToggleFavorite(it.key, it.obj, it.uid, it.xlIdx, it.sig);
                             Sfx::Favorite();
                             RequestRebuild();
                         }
@@ -3291,8 +3313,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 ri != g_trashReturn.end()) {
                                 back = ri->second;
                                 back.count = it.count;
-                                g_trashReturn.erase(ri);
+                                // ★THE KEY FIRST, THE NODE SECOND. Reversed,
+                                // map::erase(ri) destroys the node and the next
+                                // line reads `ri->first` out of freed memory --
+                                // a tile key is 19 chars, past SSO, so that is
+                                // a freed heap buffer handed to erase().
                                 g_trashXl.erase(ri->first);
+                                g_trashReturn.erase(ri);
                             }
                             g_layout[it.key] = back;
                             if (g_sound) g_sound(it.obj, true);
@@ -3714,7 +3741,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (g_hoverPrompt.frame != ImGui::GetFrameCount()) return {};
         return { true, g_hoverPrompt.canSplit, g_hoverPrompt.canCompare,
                  true, g_hoverPrompt.canDrop, g_hoverPrompt.canFav,
-                 g_hoverPrompt.hasVerb, g_hoverPrompt.verb };
+                 g_hoverPrompt.hasVerb, g_hoverPrompt.verb,
+                 g_hoverPrompt.canRecharge };
     }
 
     bool IsPouchOpen() { return g_pouchOpen; }
@@ -3727,14 +3755,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // side actually owns it right now. 0 = nothing held, or a plain unit.
     std::uint16_t HeldInstanceSig()
     {
-        if (!g_held || !g_held->obj) return 0;
-        RE::TESObjectREFR* owner = RE::PlayerCharacter::GetSingleton();
-        if (g_held->fromPartner) {
-            if (auto* p = LootBarter::Partner()) owner = p;
-        }
-        auto* xl = ExtraForTile(LiveEntry(owner, g_held->obj),
-                                HeldUidOf(g_held->key, g_held->uid), g_held->xlIdx);
-        return InstanceSig(xl);
+        // ★★★THE CARRY ALREADY KNOWS. This re-derived the signature by POSITION
+        // -- ExtraForTile(entry, uid, xlIdx) -- and ExtraForTile's own comment
+        // says a position is a hint, not a promise, and to prefer the resolver
+        // that takes a signature wherever the pool is known. Here the pool is
+        // not merely known, it is the field right next to this one.
+        //
+        // It failed outright for a doll carry, which is the one case that
+        // matters: BeginCarry parks xlIdx at -1 on purpose (see the long note
+        // there -- an unequip GUARANTEES a list is removed, so an index written
+        // now names somebody else by the time it is read), and a unit with no
+        // ExtraUniqueID has uid 0 too. Both resolvers then return null and this
+        // returned 0, minting the destination cell as a PLAIN pool. A tempered
+        // sword lifted off the body and dropped into a chest bound to nothing
+        // and sat down wherever first-fit put it.
+        //
+        // The store path beside it was already passing a_held.sig to OpenSlider
+        // and RequestStore while these callers went through here, so the same
+        // move described the same unit two different ways.
+        return g_held ? g_held->sig : 0;
     }
 
     bool IsHeldPartnerUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
@@ -4988,8 +5027,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
             if (a_mutate && !inFlight) {
+                // ★★★A RESERVED UNIT IS ABSENT, NOT GONE, AND IT KEEPS ITS CELL.
+                //
+                // The `hide` pass above was supposed to leave a reserved unit's
+                // slot claimed while the unit itself stayed off the board. It
+                // never ran: both callers pass INT_MAX for a_units, so `surplus`
+                // is always negative and `hide` is always empty -- the design in
+                // that comment has been dead the whole time. Meanwhile the walk
+                // drops reserved units from `refs` outright, so nothing claims
+                // their slots and this loop erases them. Turn a preset off and
+                // that item alone came back to the first free gap.
+                //
+                // Spare them by name instead of reviving the surplus machinery,
+                // which would risk HIDING units that ought to be drawn -- a far
+                // worse failure than a forgotten cell.
+                std::set<std::string> reserved;
+                if (a_instanceKeys && a_entry && a_entry->object) {
+                    for (const std::uint16_t rs :
+                         Loadout::ReservedSigs(a_entry->object->GetFormID())) {
+                        reserved.insert(PoolPrefix(a_base, 0, rs));
+                    }
+                }
                 for (std::size_t s = 0; s < slots.size(); ++s) {
-                    if (!taken[s]) g_layout.erase(slots[s].first);
+                    if (taken[s]) continue;
+                    if (!reserved.empty() &&
+                        reserved.contains(PoolOfSlot(slots[s].first))) {
+                        continue;
+                    }
+                    g_layout.erase(slots[s].first);
                 }
             }
         }
@@ -5550,8 +5615,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // or a changed remainder needs.
                     std::vector<int> want;
                     want.reserve(static_cast<std::size_t>(coinTiles));
+                    // ★asked ONCE: the total is the same for every tile in this
+                    // loop, and deriving it walks the inventory (see
+                    // GoldCoins::InstanceValueAt).
+                    const int walking = GoldCoins::WalkingGoldValue();
                     for (int r = 0; r < coinTiles; ++r) {
-                        want.push_back(GoldCoins::InstanceValue(cfid, r));
+                        want.push_back(GoldCoins::InstanceValueAt(walking, r));
                     }
                     // Each amount finds its slot: first the one already holding
                     // that amount, then whatever is left over, in position
@@ -7252,6 +7321,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 a_form, a_why);
             return false;
         };
+        // ★★★THE HINT IS SPENT ON COMMIT, NOT WHILE PLANNING.
+        //
+        // This whole path is "all traces or none" -- it plans, and a single
+        // decline anywhere throws the plan away and hands the delta to a full
+        // rebuild. g_dropHint was the one thing that did not play by that
+        // rule: it was cleared the moment a unit claimed it, so a decline two
+        // units later left the rebuild to place everything with no hint at
+        // all, and the cell the player actually aimed at was ignored. Track it
+        // locally, and only write the global at the end.
+        bool hintTaken = false;
         // A full rebuild is already on its way: let it cover this delta too.
         // Partials one-by-one against a pending full pass are pure waste, and
         // this line is what coalesces a take-all burst into ONE rebuild --
@@ -7406,7 +7485,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // when MINTING a new tile, never when filling an existing one,
                 // which is the case a merge always takes.
                 auto& idxs = tilesByPool[pool];
-                const bool hinted =
+                const bool hinted = !hintTaken &&
                     g_dropHint.Wants(baseKey, pool) && g_dropHint.bag.empty();
                 const int hc = hinted ? g_dropHint.col : -1;
                 const int hr = hinted ? g_dropHint.row : -1;
@@ -7443,7 +7522,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // Left armed after a merge, it fires on the NEXT pickup of this
                 // form and teleports it to a cell the player chose for
                 // something else.
-                if (hintSpentByFill) g_dropHint = {};
+                if (hintSpentByFill) hintTaken = true;
                 // whatever the saved tiles cannot hold becomes fresh tiles --
                 // the pool prefix carries the identity the new slot records
                 while (delta > 0) {
@@ -7460,7 +7539,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     mp.le.uid = UidOf(pool);
                     mp.le.sig = SigOf(pool);
                     // partner-drop hint, same rules as the gear branch above
-                    if (g_dropHint.Wants(baseKey, pool)) {
+                    if (!hintTaken && g_dropHint.Wants(baseKey, pool)) {
                         if (!g_dropHint.bag.empty()) {
                             return decline("hinted into a bag");
                         }
@@ -7471,11 +7550,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             mp.le.row = g_dropHint.row;
                             mp.le.rot = hrot;
                             OccMark(occ, mp.le.col, mp.le.row, hm);
-                            g_dropHint = {};
+                            hintTaken = true;
                         }
                     }
                     if (mp.le.col < 0 && !OccPlace(occ, gdef, mp.le)) {
                         return decline("no room (growth/spill)");
+                    }
+                    // ★★★A GROWTH ROW IS NOT A PLACE THE PARTIAL CAN LEAVE IT.
+                    // MakeDisplayTile treats rows past kMinRows as temporary
+                    // and blanks the coordinates -- correctly, because the
+                    // rebuild's PlaceItems runs straight afterwards and seats
+                    // them properly. The partial has no such second pass, so
+                    // the tile kept col = -1 forever: counted in the space
+                    // figure, skipped by every draw loop, invisible until
+                    // something else forced a full rebuild. Hand it over
+                    // instead; declining is what this path is for.
+                    if (mp.le.bag.empty() && mp.le.row >= kMinRows) {
+                        return decline("landed in the growth zone");
                     }
                     mp.units = n;
                     mints.push_back(std::move(mp));
@@ -7564,7 +7655,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // hint into a BAG is the rebuild's business (bag views are not
                 // placed here); an occupied hint falls through to first-fit,
                 // matching the placer's own behaviour.
-                if (g_dropHint.Wants(baseKey,
+                if (!hintTaken && g_dropHint.Wants(baseKey,
                         PoolPrefix(baseKey, u->uid, u->sig))) {
                     if (!g_dropHint.bag.empty()) {
                         return decline("hinted into a bag");
@@ -7576,7 +7667,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         le.row = g_dropHint.row;
                         le.rot = hrot;
                         OccMark(occ, le.col, le.row, hm);
-                        g_dropHint = {};
+                        hintTaken = true;
                         plan.push_back({ u, le });
                         continue;
                     }
@@ -7586,6 +7677,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (!OccPlace(occ, gdef, le)) {
                     return decline("no room (growth/spill)");
                 }
+            }
+            // ★see the mint path: MakeDisplayTile blanks growth-row coordinates
+            // and only the full rebuild puts them back.
+            if (le.bag.empty() && le.row >= kMinRows) {
+                return decline("landed in the growth zone");
             }
             plan.push_back({ u, le });
         }
@@ -7602,6 +7698,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             SKSE::log::info("[B3] ★partial add '{}' key '{}' at [{},{}] -- no rebuild",
                 obj->GetName(), p.u->key, p.le.col, p.le.row);
         }
+        // ★NOW it is spent -- the plan committed, so the cell the player aimed
+        // at has actually been used. A decline above returns without touching
+        // the global and leaves the hint for the rebuild.
+        if (hintTaken) g_dropHint = {};
         MarkCapacityDirty();
         return true;
     }
@@ -7879,6 +7979,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // list, because that unit has to be split off the stack first -- and it
     // refuses to split while the entry already carries a hotkey. So lift the
     // other hotkeys for the duration of that one call and put them straight back.
+    // ★The doll's and the drawer's way in. A board tile has a key and a list
+    // index; a WORN unit has neither -- it owns no cell, and its position in
+    // the entry shifts every time something is equipped. uid+sig names it
+    // exactly, and ProcessFavorites resolves the pool from that.
+    void ToggleFavoriteUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                            std::uint16_t a_sig, int a_xlIdx)
+    {
+        if (!a_obj) return;
+        g_favSync.push_back({ a_obj, a_uid, a_xlIdx, a_sig });
+    }
+
     void ProcessFavorites()
     {
         if (g_favSync.empty()) return;
@@ -7920,6 +8031,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 };
 
                 auto* xl = ExtraForTile(entry, f.uid, f.xlIdx);
+                // ★No position to resolve from (a doll or drawer slot): ask the
+                // pool by signature, which is the grain the star works at.
+                if (!xl && f.sig != 0) xl = ExtraForPool(entry, f.uid, f.sig);
                 // GI40: read the POOL, the same unit the star is drawn from.
                 // Asking this one list said "off" whenever the pool's hotkey was
                 // sitting on a SIBLING list -- most often the worn one, after
@@ -9949,6 +10063,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
     }
 
+    namespace
+    {
+        // (1.3.1) defined with the recharge window further down; the tooltip
+        // needs it to decide whether T is worth offering on this unit.
+        bool UnitCharge(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl,
+                        bool a_worn, int a_hand, float& a_cur, float& a_max);
+    }
+
     void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count, int a_coinValue,
                          int a_price, bool a_isBuy, RE::TESObjectREFR* a_owner,
                          ExtraScope a_scope, std::uint16_t a_uid, int a_xlIdx,
@@ -10279,7 +10401,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             if (wantCmp && pc && player) {
                 const auto hmask = static_cast<std::uint32_t>(armo->GetSlotMask().get());
-                auto winv = player->GetInventory();
+                // ★★FILTER IT. GetInventory copies every entry it accepts --
+                // a new InventoryEntryData and a new BSSimpleList each -- and
+                // this asked for the WHOLE pack, every frame Shift was held
+                // over an armour tooltip. The loop then threw away all but the
+                // worn armour that shares a biped slot, which is a test the
+                // filter can make before anything is copied. (The weapon
+                // comparison a few lines up already passes one.)
+                auto winv = player->GetInventory([&](RE::TESBoundObject& o) {
+                    auto* wa = o.As<RE::TESObjectARMO>();
+                    return wa && (static_cast<std::uint32_t>(wa->GetSlotMask().get())
+                                  & hmask) != 0;
+                });
                 for (auto& [o2, d2] : winv) {
                     auto* e2 = d2.second.get();
                     if (!o2 || !e2 || !e2->IsWorn()) continue;
@@ -10593,10 +10726,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const bool canCompare = a_obj->Is(RE::FormType::Weapon) ||
                                     a_obj->Is(RE::FormType::Armor);
             const bool sideBoard = a_tile.partner || a_tile.equipSlot;
+            // ★T RECHARGES, and until now the only way to find that out was to
+            // read the changelog. The same test OpenRecharge runs, minus the
+            // sound: an enchanted WEAPON (armour carries no charge) that is not
+            // already full. Never on the partner's side -- their sword is not
+            // ours to feed a soul gem to.
+            float rcCur = 0.0f, rcMax = 0.0f;
+            const bool canRecharge =
+                !a_tile.partner && a_obj->Is(RE::FormType::Weapon) &&
+                UnitCharge(a_obj, scoped, a_tile.equipSlot, a_hand, rcCur, rcMax) &&
+                (rcMax - rcCur) >= 0.5f;
             g_hoverPrompt = { ImGui::GetFrameCount(), canSplit, canCompare,
                               !sideBoard && !quest,                    // canDrop
-                              !sideBoard && !isCoin && !isPouch,       // canFav
-                              hasVerb, verb };
+                              // ★the doll and the drawer star things now too;
+                              // only a coin or the partner's shelf cannot.
+                              !a_tile.partner && !isCoin && !isPouch,  // canFav
+                              hasVerb, verb, canRecharge };
         }
         const ImVec2 tipPos = ImGui::GetWindowPos();
         const ImVec2 tipSize = ImGui::GetWindowSize();
@@ -13026,9 +13171,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         // park a KEYED tile (whole-tile intake + the favorite-ask resume).
         // a_col/a_row -1 = first-fit inside the trash board.
+        // ★a_rot: the quarter-turn the item was carrying when it was binned.
+        // Omitted, PlaceTile leaves the entry's rotation alone -- so a tile
+        // dropped sideways was checked as 4x1 and then drawn as 1x4, straight
+        // over its neighbours, and the two room tests disagreed from then on.
         void ParkKeyInTrash(const std::string& a_key, RE::TESBoundObject* a_obj,
                             int a_count, int a_col, int a_row, int a_xlIdx = -1,
-                            std::uint16_t a_uid = 0, std::uint16_t a_sig = 0)
+                            std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
+                            int a_rot = -1)
         {
             LayoutEntry prev;   // pre-park spot -> right-click restore target
             prev.col = -1;
@@ -13037,7 +13187,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_trashReturn[a_key] = prev;
             // remember which unit this park refers to (see g_trashXl)
             g_trashXl[a_key] = a_xlIdx;
-            PlaceTile(a_key, a_col, a_row, kTrashKey, a_count);
+            PlaceTile(a_key, a_col, a_row, kTrashKey, a_count, a_rot);
             // ★★★STAMP THE IDENTITY. A carry lifted OFF THE DOLL has no layout
             // entry to inherit from -- a worn unit owns no cell -- so PlaceTile
             // minted a blank one and the parked slot claimed uid 0 / sig 0: a
@@ -13079,7 +13229,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (a_held.fav) {   // GI36: the carry brought the answer with it
                 // favorite: confirm first — the tile snaps back while asking
                 g_trashAsk = { true, a_held.obj, a_held.key, a_held.count, col, row,
-                               a_held.xlIdx, a_held.uid, a_held.sig };
+                               a_held.xlIdx, a_held.uid, a_held.sig, a_held.rot };
                 Sfx::SelectOn();
                 g_held.reset();
                 RequestRebuild();
@@ -13087,7 +13237,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             TrashMakeRoomFor(a_held.mask);
             ParkKeyInTrash(a_held.key, a_held.obj, a_held.count, col, row,
-                           a_held.xlIdx, a_held.uid, a_held.sig);
+                           a_held.xlIdx, a_held.uid, a_held.sig, a_held.rot);
             g_held.reset();
             return true;
         }
@@ -13602,11 +13752,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         const bool cancel = Sfx::Button(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), true) ||
                             ImGui::IsKeyPressed(ImGuiKey_Escape, false);
         if (ok && g_trashAsk.obj) {
-            const Mask m = MaskOf(g_resolver ? g_resolver(g_trashAsk.obj) : GridDef{});
+            // ★the TURNED footprint, the same one the drop was validated with
+            const Mask m = MaskOf(g_resolver ? g_resolver(g_trashAsk.obj) : GridDef{},
+                                  g_trashAsk.rot);
             TrashMakeRoomFor(m);
             ParkKeyInTrash(g_trashAsk.key, g_trashAsk.obj, g_trashAsk.count,
                 g_trashAsk.col, g_trashAsk.row, g_trashAsk.xlIdx,
-                g_trashAsk.uid, g_trashAsk.sig);
+                g_trashAsk.uid, g_trashAsk.sig, g_trashAsk.rot);
             g_trashAsk = {};
         } else if (cancel) {
             g_trashAsk = {};   // tile stays where it snapped back to
@@ -13991,6 +14143,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_trashXl.clear();
         g_trashDeleteQ.clear();
         g_trashAsk = {};
+        // ★★★THE WINDOWS THAT OUTLIVE THEIR SAVE. g_pouchOpen above has been
+        // on this list since it was written; the recharge window arrived in
+        // 1.3.1 and never joined it. Left standing, it comes back after a load
+        // still naming the PREVIOUS save's weapon by uid/sig/worn/hand -- and
+        // when that form is absent from the new one, the worn branch reads the
+        // charge off whatever is in the player's hand now and spends a real
+        // soul gem into it.
+        g_rechargeUI = {};
+        g_rechargePick = {};
+        // ★Book reading is worse than it looks: ProcessBookRead runs from
+        // UIRoot::Tick every frame, menu open or not. An owed page eight ticks
+        // from a load fires INTO THE NEW SESSION -- a page opening by itself,
+        // or a UIRoot::Close nobody asked for.
+        g_pendingRead.reset();
+        g_pageOwed.reset();
+        g_pageOwedWait = 0;
+        // ★And the two quiet ones: a click owed to a tile that no longer
+        // exists, and arrival marks whose FormIDs belonged to another game
+        // (they decay on their own, but not before poisoning a rebuild or three).
+        g_clickAction.reset();
+        g_transientArrivals.clear();
         RequestRebuild();
     }
 

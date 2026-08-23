@@ -238,7 +238,16 @@ namespace FUI::Badges
                                   IM_COL32(190, 176, 120, static_cast<int>(220 * alpha)), 1.4f);
                 }
                 if (b.tintRGBA != 0) {
-                    a_dl->AddCircle(ctr, rad - 0.5f, b.tintRGBA, 0, 1.6f);
+                    // ★THE ABI SAYS 0xRRGGBBAA; ImU32 IS 0xAABBGGRR here
+                    // (IMGUI_USE_BGRA_PACKED_COLOR is off in this build).
+                    // Handed over raw, an extension's opaque green arrived as
+                    // alpha 0 and drew nothing -- and since the header is what
+                    // consumers vendor, they had no way to see why.
+                    const ImU32 tint = IM_COL32((b.tintRGBA >> 24) & 0xFF,
+                                                (b.tintRGBA >> 16) & 0xFF,
+                                                (b.tintRGBA >>  8) & 0xFF,
+                                                 b.tintRGBA        & 0xFF);
+                    a_dl->AddCircle(ctr, rad - 0.5f, tint, 0, 1.6f);
                 }
                 ++drawn;
             }

@@ -111,8 +111,15 @@ namespace FUI
 
         inline constexpr float kNoClamp = 1.0e9f;
         inline constexpr DefField kDefFields[] = {
-            { "w",     nullptr,         &ItemDef::w,     1.0f,     kNoClamp, 0, DefRule::kCoreDims },
-            { "h",     nullptr,         &ItemDef::h,     1.0f,     kNoClamp, 0, DefRule::kCoreDims },
+            // ★★A CEILING, THE SAME ONE THE BAG BLOCK USES. These two were the
+            // only fields in the table left open-ended, and h is the one that
+            // reaches memory unchecked: MaskOf trims w to kCols and then does
+            // rows.assign(h, ...). A preset with `h:500000` -- and sharing
+            // presets is a shipped feature, so the file need not be ours --
+            // costs tens of megabytes per item, on every rebuild. The tallest
+            // real item is 4 cells.
+            { "w",     nullptr,         &ItemDef::w,     1.0f,     16.0f,    0, DefRule::kCoreDims },
+            { "h",     nullptr,         &ItemDef::h,     1.0f,     16.0f,    0, DefRule::kCoreDims },
             { "rx",    &ItemDef::rx,    nullptr,        -kNoClamp, kNoClamp, 0, DefRule::kCore },
             { "ry",    &ItemDef::ry,    nullptr,        -kNoClamp, kNoClamp, 0, DefRule::kCore },
             { "rz",    &ItemDef::rz,    nullptr,        -kNoClamp, kNoClamp, 0, DefRule::kCore },

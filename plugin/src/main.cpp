@@ -133,12 +133,19 @@ namespace
         static void Install()
         {
             REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
-            func = vtbl.write_vfunc(0xAD, thunk);
+            // ★★★THE SLOT MOVES IN VR. CommonLibSSE splits it itself --
+            // Actor.cpp: RelocateVirtual<&Actor::Update>(0x0AD, 0x0AF, ...) --
+            // and this build ships with ENABLE_SKYRIM_VR, so SKSEVR loads us.
+            // Writing the SE/AE index there replaced Resurrect (VR 0x0AD),
+            // whose signature is nothing like ours, and left the real Update
+            // unhooked: no Tick ever ran and the game died the first time
+            // anything was resurrected. Silent on SE/AE, fatal on VR.
+            func = vtbl.write_vfunc(REL::Module::IsVR() ? 0xAF : 0xAD, thunk);
         }
     };
 
     // ---- Capacity system (Mabinogi rule): no free cells -> no pickup ----
-    // PlayerCharacter::PickUpObject vtable hook (index 0xCC): the manual
+    // PlayerCharacter::PickUpObject vtable hook (0xCC on SE/AE, 0xCE on VR): the manual
     // world-pickup path. Scripted/quest AddItem is deliberately NOT blocked
     // (bouncing those would break quests); such items overflow into extra
     // grid rows instead.
@@ -166,7 +173,10 @@ namespace
         static void Install()
         {
             REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
-            func = vtbl.write_vfunc(0xCC, thunk);
+            // ★Same split as UpdateHook above -- CommonLibSSE's Actor.cpp has
+            // RelocateVirtual<&Actor::PickUpObject>(0x0CC, 0x0CE, ...). On VR
+            // the SE/AE index is OnArmorActorValueChanged.
+            func = vtbl.write_vfunc(REL::Module::IsVR() ? 0xCE : 0xCC, thunk);
         }
     };
 
@@ -405,7 +415,14 @@ namespace
             RE::BSTEventSource<RE::TESResetEvent>*) override
         {
             if (a_event && a_event->object) {
-                FUI::LootBarter::ForgetDeposits(a_event->object->GetFormID());
+                // ★Same reasoning as the pouch handlers in ContainerSink: this
+                // erases from g_contLayouts, which LootBarter reads and writes
+                // from the main thread with no lock. Read the id here (the
+                // event is only valid for this call) and do the erase there.
+                const RE::FormID id = a_event->object->GetFormID();
+                SKSE::GetTaskInterface()->AddTask([id]() {
+                    FUI::LootBarter::ForgetDeposits(id);
+                });
             }
             return RE::BSEventNotifyControl::kContinue;
         }
@@ -483,10 +500,25 @@ namespace
                 // pouch leaving/returning: stored gold travels with it
                 // (sale releases it instead — see OnPouchLeftPlayer)
                 if (FUI::GoldCoins::IsPouch(a_event->baseObj)) {
-                    if (a_event->oldContainer == 0x14) {
-                        FUI::GoldCoins::OnPouchLeftPlayer();
-                    } else if (a_event->newContainer == 0x14) {
-                        FUI::GoldCoins::OnPouchReturned();
+                    // ★★★ONTO THE MAIN THREAD, LIKE EVERYTHING ELSE IN HERE.
+                    //
+                    // A container event arrives on whatever thread moved the
+                    // item -- a Papyrus VM worker for a scripted AddItem, and
+                    // this file already knows it (the Grid delta twenty lines
+                    // up goes through AddTask for exactly that reason; Ledger
+                    // takes a mutex; WornLedger marshals). These two were the
+                    // only consumers left calling straight through, and they
+                    // are not read-only: OnPouchLeftPlayer push_backs into
+                    // g_pending and erases from g_pouchStored while Tick() is
+                    // iterating that same vector on the main thread. GoldCoins
+                    // has no lock of its own -- so give it the thread instead.
+                    const bool left = a_event->oldContainer == 0x14;
+                    const bool back = a_event->newContainer == 0x14;
+                    if (left || back) {
+                        SKSE::GetTaskInterface()->AddTask([left]() {
+                            if (left) FUI::GoldCoins::OnPouchLeftPlayer();
+                            else      FUI::GoldCoins::OnPouchReturned();
+                        });
                     }
                 }
             }
@@ -2134,6 +2166,17 @@ namespace
         }
         g_planBPendingOpen = false;
         g_reopenAfterMsg = false;
+        // ★★★A DEBT OWED TO A SAVE THAT IS GONE. g_echoMenu names a vanilla
+        // menu whose close we still have to announce; left set across a load,
+        // MenuCloseEchoTick fires it on the FIRST unpaused frame of the new
+        // session, and every Papyrus mod listening for that menu (TK Dodge and
+        // friends) is told the previous game's container just closed.
+        g_echoMenu = {};
+        g_pendingPartnerOpen = false;
+        // ★Same shape, shorter fuse: a lockpick handle armed at close will
+        // ActivateRef ten frames into whatever game is loaded next.
+        g_pickReopen = {};
+        g_pickReopenDelay = 0;
         // NOTE: Loadout reset moved to the serialization REVERT callback (L3) —
         // kPostLoadGame arrives AFTER the cosave load and would wipe the tabs.
         FUI::UIRoot::Close();   // hide across load/new game
@@ -2268,7 +2311,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 4, 2, 0 },
+    .Version              = { 1, 4, 3, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)

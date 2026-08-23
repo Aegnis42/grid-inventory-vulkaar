@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -193,6 +194,23 @@ namespace FUI::Wheeler
         // not shuffle the wheel under a hand that has learned it.
         std::vector<RE::FormID> g_order[2];   // [0] gear, [1] magic
 
+        // ★★★EVERY STAR, NOT JUST THE TEN THAT FIT.
+        //
+        // ApplyOrder gives a place up when its form is no longer starred, and
+        // it asked the DISPLAYED list -- which stops at kSlots. Past ten
+        // favourites the eleventh is starred, absent from that list, and read
+        // as unstarred: its place was zeroed on every rebuild (each open, and
+        // again every 330ms) and the zero went into the cosave.
+        //
+        // Worse, WHICH ten survive is not stable. GetInventory returns a
+        // std::map keyed by TESBoundObject*, so the walk runs in pointer-
+        // address order -- load order, allocation order, and different between
+        // sessions. The arrangement decayed differently every restart.
+        //
+        // So the walks below record every starred form here and stop only
+        // FILLING at kSlots, and this is what ApplyOrder asks.
+        std::set<RE::FormID> g_starredAll[2];
+
         // ★The saved order names a form PER PLACE, with 0 for "left empty".
         // Keeping the empty places is what makes a wheel worth arranging: the
         // hand remembers where a thing sits, and closing the gaps every time a
@@ -224,11 +242,9 @@ namespace FUI::Wheeler
             // something that is not starred is the very thing above.
             for (auto& id : want) {
                 if (!id) continue;
-                bool starred = false;
-                for (int i = 0; i < a_n && !starred; ++i) {
-                    starred = a_list[i].form && a_list[i].form->GetFormID() == id;
-                }
-                if (!starred) id = 0;
+                // ★asked of every star, not of the ten on screen -- see
+                // g_starredAll for what the narrower test cost.
+                if (!g_starredAll[a_which].contains(id)) id = 0;
             }
             FavItem out[kSlots]{};
             bool taken[kSlots]{};
@@ -1125,11 +1141,13 @@ namespace FUI::Wheeler
             for (auto& f : g_fav) f = {};
             for (auto& f : g_mag) f = {};
             g_favN = 0;
+            g_starredAll[0].clear();
             auto* player = RE::PlayerCharacter::GetSingleton();
             if (!player || !player->Is3DLoaded()) return;   // see ProcessCast
             auto inv = player->GetInventory();
             for (auto& [obj, data] : inv) {
-                if (g_favN >= kSlots) break;
+                // ★no early break: the walk has to SEE every star even when it
+                // can only show ten of them (see g_starredAll).
                 if (!obj || data.first <= 0 || !data.second) continue;
                 // ★Skip what the costume system wears on the player's behalf.
                 // An anchor is not the player's property anywhere else either.
@@ -1168,7 +1186,8 @@ namespace FUI::Wheeler
                     break;
                 }
                 if (!star) star = wornStar;
-                if (star) {
+                if (star) g_starredAll[0].insert(obj->GetFormID());
+                if (star && g_favN < kSlots) {
                     // ★★★KEEP THE SIGNATURE OF THE UNIT THAT CARRIES THE STAR.
                     // The star sits on one ExtraDataList and we are holding it
                     // -- but sig was written as 0, which means "no instance" all
@@ -1201,14 +1220,16 @@ namespace FUI::Wheeler
             // and shouts in their own list; to the player it was the same
             // gesture on the same screen, so the wheel does not distinguish.
             g_magN = 0;
+            g_starredAll[1].clear();
             if (auto* mf = RE::MagicFavorites::GetSingleton()) {
                 for (auto* form : mf->spells) {
-                    if (g_magN >= kSlots) break;
-                    if (!form) continue;
+                    if (!form) continue;   // ★no early break -- see g_starredAll
                     FavKind k;
                     if (form->Is(RE::FormType::Spell))      k = FavKind::kSpell;
                     else if (form->Is(RE::FormType::Shout)) k = FavKind::kShout;
                     else continue;   // scrolls and the like arrive as items above
+                    g_starredAll[1].insert(form->GetFormID());
+                    if (g_magN >= kSlots) continue;   // seen, but no place to show it
                     // ★"Currently on" for magic is the hand, not the pack. A
                     // shout sits in the voice slot; a spell in either hand, and
                     // both count -- the tick says "this is what you have out",
@@ -2905,7 +2926,18 @@ namespace FUI::Wheeler
                 // have cost the wheel its second hand.
                 // ★The group answers whether a click means anything, so this
                 // stays true when a fourth and fifth group arrive.
-                if (id == 1 && G(g_group).click) {
+                // ★★★ASK Eligible, LIKE EVERY OTHER PATH INTO click().
+                //
+                // The pad path and the left-release path below both check it;
+                // the two mouse paths did not. A slot can be drawn, filled and
+                // aimable while its group refuses to act on it -- the costume
+                // group does exactly that for the preset tab you are already
+                // wearing, and StepSlot skips it, so only a player aiming with
+                // the mouse could reach it. Costume::SetTab then folded the
+                // ineligible index to -1, which does not mean "nothing" but
+                // "no costume": the click took off what the player had on.
+                if (id == 1 && G(g_group).click && g_sel >= 0 &&
+                    Eligible(g_group, g_sel)) {
                     G(g_group).click(g_sel, /*leftHand*/ true);
                     return true;
                 }
@@ -2935,7 +2967,8 @@ namespace FUI::Wheeler
                 // ★A click is a drag that went nowhere. Having moved something
                 // is an act in itself -- finishing it must not also put the
                 // thing on.
-                if (from >= 0 && !moved && G(g_group).click) {
+                if (from >= 0 && !moved && G(g_group).click &&
+                    g_sel >= 0 && Eligible(g_group, g_sel)) {   // ★see the right-click note
                     G(g_group).click(g_sel, /*leftHand*/ false);
                 }
                 if (moved) {

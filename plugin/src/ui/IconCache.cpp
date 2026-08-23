@@ -1846,7 +1846,24 @@ namespace FUI
         // now costs one early return per frame; it used to cost a full engine
         // re-render of a 900px model plus a mipped-texture upload, every frame,
         // to redraw a picture that had not changed.
+        // ★★★THE GATE HAS TO BE ASKED FIRST. The long note below explains why
+        // it exists; this is why it sat in the wrong place. It tested
+        // !m_pendingBusy -- and arming an inspect is exactly what SETS that
+        // flag, a few lines above. So on a machine at the wall the tile queue
+        // stopped, correctly, while C walked straight past: the most expensive
+        // request this plugin makes, a 900px model at 3x scale, going into the
+        // same engine NIF loader the reported crash died inside.
+        const bool memOk = MemoryHeadroom();
+
         if (m_inspect && !m_pendingBusy) {
+            if (!memOk) {
+                if (!m_memPaused) {
+                    m_memPaused = true;
+                    SKSE::log::warn("[ICONS] paused: system memory is low -- the inspect "
+                                    "capture waits until it frees up");
+                }
+                return;   // nothing dropped; the next frame simply asks again
+            }
             if (InspectShotStale()) {
                 m_pending = Pending{ m_inspect, m_inspect ? m_inspect->GetFormID() : 0u, 0 };
                 m_pendingInspect = true;
@@ -1885,7 +1902,6 @@ namespace FUI
         // an entry that never armed cannot age out -- so when memory frees up
         // the next frame simply carries on. This costs the player a wait, not
         // an icon.
-        const bool memOk = MemoryHeadroom();
         if (!memOk && !m_memPaused && !m_queue.empty()) {
             m_memPaused = true;
             SKSE::log::warn("[ICONS] paused: system memory is low -- {} icon(s) "
@@ -2374,6 +2390,43 @@ namespace FUI
 
         D3D11_TEXTURE2D_DESC srcDesc = {};
         srcTex->GetDesc(&srcDesc);
+
+        // ★★★FOUR BYTES A PIXEL IS AN ASSUMPTION, SO STATE IT.
+        //
+        // The capture texture is created to match whatever surface was bound,
+        // and the whole pipeline below -- the readback memcpy of w*4 per row,
+        // the trim, the chroma key, CreateMippedTexture's SysMemPitch = w*4 --
+        // then treats it as 8-bit RGBA. The 10-bit case is handled (unpacked
+        // just below). Nothing handled the rest, and HDR swap chains are real:
+        // R16G16B16A16_FLOAT is EIGHT bytes a pixel, so D3D reads w*8 per row
+        // out of a buffer holding w*h*4 and walks off the end of it, while
+        // R11G11B10_FLOAT is the right size and the wrong meaning -- float bits
+        // stored as colour. Both then got written into the pack under that
+        // format tag, so removing the HDR mod afterwards changed nothing.
+        //
+        // Refuse instead. The item falls back to its glyph, and the log names
+        // the format so an unknown one can be added deliberately rather than
+        // guessed at.
+        switch (srcDesc.Format) {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        case DXGI_FORMAT_R10G10B10A2_UNORM:
+        case DXGI_FORMAT_R10G10B10A2_UINT:
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+            break;
+        default: {
+            static bool s_saidFmt = false;
+            if (!s_saidFmt) {
+                s_saidFmt = true;
+                SKSE::log::error("[ICONS] capture surface format {} is not 8-bit RGBA -- "
+                                 "icons stay on their fallback glyphs. Report this number.",
+                    static_cast<int>(srcDesc.Format));
+            }
+            giveUp("unsupported surface format");
+            return;
+        }
+        }
 
         // Content gate + alpha-trim: read the whole margin region back, find
         // the model's true pixel bounds, and store ONLY that rect. A sprite
@@ -2945,6 +2998,25 @@ namespace FUI
         m_pending = Pending{};
         m_queue.clear();
         m_queued.clear();
+        // ★★★AND EVERY OTHER PLACE A FORM POINTER SLEEPS. The note above got
+        // m_pending right and stopped there. A load destroys and remints every
+        // dynamic form (0xFF...): a potion the player brewed, a weapon they
+        // enchanted. Two maps were still holding those pointers afterwards.
+        //
+        // m_deferredObj is the dangerous one -- RetryDeferred (the settings
+        // window's "try again") walks it and calls GetFormID() on what it
+        // finds, BEFORE the queue's LookupByID revalidation can save it. The
+        // `!obj->second` null test never caught this; a destroyed form is not
+        // a null pointer. Nothing is lost by dropping the list: an icon still
+        // missing gets re-queued the next time its tile asks for one.
+        m_deferred.clear();
+        m_deferredObj.clear();
+        // m_lastGood is keyed BY the pointer rather than holding one, so it
+        // cannot crash -- it can lie. Let a new form land on a freed address
+        // and this lookup hands back somebody else's sprite, and because the
+        // tile path only queues a capture when the icon comes back null, that
+        // wrong picture never asks to be replaced.
+        m_lastGood.clear();
     }
 
     std::uint64_t IconCache::VramBytes() const

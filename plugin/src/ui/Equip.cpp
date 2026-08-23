@@ -415,6 +415,7 @@ namespace FUI::Equip
                 int          worn = 0;
                 int          stock = 0;
                 std::uint8_t g = Grid::GlowBits(ammo, nullptr, nullptr);
+                RE::ExtraDataList* ammoXl = nullptr;   // ★the quiver's own list
                 auto inv = player->GetInventory(
                     [&](RE::TESBoundObject& o) { return &o == ammo; });
                 for (auto& [obj, data] : inv) {
@@ -428,11 +429,12 @@ namespace FUI::Equip
                             }
                         }
                     }
-                    g = Grid::GlowBits(obj, entry, Grid::WornExtraOf(entry));
+                    ammoXl = Grid::WornExtraOf(entry);
+                    g = Grid::GlowBits(obj, entry, ammoXl);
                 }
                 // worn but unlisted: the engine is wearing the lot
                 if (worn <= 0) worn = (std::max)(1, stock);
-                add("ammo", ammo, worn, g);
+                add("ammo", ammo, worn, g, ammoXl);
             }
 
             auto inv = player->GetInventory(
@@ -452,8 +454,8 @@ namespace FUI::Equip
                     // but if it didn't (mod edge cases / spell in left hand
                     // data), a WORN shield must still show on the doll
                     if (!a_out.contains("shieldL")) {
-                        add("shieldL", obj, 1,
-                            Grid::GlowBits(obj, entry.get(), Grid::WornExtraOf(entry.get())));
+                        auto* wxl = Grid::WornExtraOf(entry.get());
+                        add("shieldL", obj, 1, Grid::GlowBits(obj, entry.get(), wxl), wxl);
                     }
                     continue;
                 }
@@ -481,7 +483,20 @@ namespace FUI::Equip
                     else if (!a_out.contains("ringL") && !DualRing::Second()) slot = "ringL";
                     else                               slot = nullptr;
                 }
-                add(slot, obj, 1, Grid::GlowBits(obj, entry.get(), Grid::WornExtraOf(entry.get())));
+                // ★★★HAND THE LIST OVER, like the weapon slots always did.
+                //
+                // Without it `add` writes uid 0 / sig 0, and both markers are
+                // asked as pool questions: IsPoolStolen(obj, 0, 0) compares
+                // InstanceSig(list) == 0, while InstanceSig MIXES OWNERSHIP AND
+                // TEMPER IN. A stolen unit therefore hashes to something other
+                // than 0 and could never match -- stolen armour showed no mark
+                // on the doll at all, ever -- and a tempered or enchanted piece
+                // lost its favourite star the moment it went on the body. Only
+                // plain, untempered armour behaved. It reads from outside as
+                // "weapons show their star, armour doesn't", which is exactly
+                // the split between the two call shapes.
+                auto* wxl = Grid::WornExtraOf(entry.get());
+                add(slot, obj, 1, Grid::GlowBits(obj, entry.get(), wxl), wxl);
             }
 
             // ★The second ring, placed after the loop. The engine is not
@@ -658,8 +673,34 @@ namespace FUI::Equip
                                       : Theme::Acc(0.35f);
         }
 
+        // ★★★ONE WALK A FRAME, SHARED BY THE PANEL AND THE DRAWER.
+        //
+        // CollectEquipment runs GetInventory three times (weapons, ammo,
+        // armour) and GetInventory DEEP-COPIES every matching entry: a fresh
+        // InventoryEntryData plus a new BSSimpleList of extra lists, per item.
+        // Draw() and DrawDrawer() each asked for their own, so a character with
+        // a full wardrobe paid for six to eight full walks of the pack every
+        // frame the equipment panel was up.
+        //
+        // Safe to hold for the frame because nothing in the draw pass changes
+        // the inventory -- every click here QUEUES its mutation for the game
+        // thread, which is this plugin's rule everywhere. The per-click queries
+        // (WornObjectAt and friends) deliberately keep walking fresh: they run
+        // either side of real mutations, where a cached answer would be a lie.
+        const std::unordered_map<std::string, EquipEntry>& EquipmentThisFrame()
+        {
+            static std::unordered_map<std::string, EquipEntry> s_eq;
+            static int s_frame = -1;
+            if (const int now = ImGui::GetFrameCount(); s_frame != now) {
+                s_frame = now;
+                s_eq.clear();
+                CollectEquipment(s_eq);
+            }
+            return s_eq;
+        }
+
         void DrawSlot(const SlotDef& a_slot, float a_w, float a_h,
-                      std::unordered_map<std::string, EquipEntry>& a_eq)
+                      const std::unordered_map<std::string, EquipEntry>& a_eq)
         {
             const auto& sk = Theme::S();
             auto* dl = ImGui::GetWindowDrawList();
@@ -845,6 +886,19 @@ namespace FUI::Equip
                     if (ImGui::IsKeyPressed(ImGuiKey_T, false) &&
                         !ImGui::GetIO().WantTextInput) {
                         Grid::OpenRecharge(eq->obj, eq->uid, eq->sig, true, eq->hand);
+                    }
+                    // ★F stars it, the same key and the same queue the board
+                    // uses. The doll and the drawer are where a player looks at
+                    // what they are actually wearing, and until now the only
+                    // way to star a worn item was to take it off first. Named
+                    // by uid+sig: a worn unit owns no cell to point at.
+                    // (no coin guard: a doll slot never holds one -- coins and
+                    // pouches are pack tiles and have no biped slot to sit in)
+                    if (ImGui::IsKeyPressed(ImGuiKey_F, false) &&
+                        !ImGui::GetIO().WantTextInput) {
+                        Grid::ToggleFavoriteUnit(eq->obj, eq->uid, eq->sig);
+                        Sfx::Favorite();
+                        Grid::RequestRebuild();
                     }
                     // C: the same 3D view the grid offers. Vanilla files Item
                     // Zoom under the kItemMenu context, which every item screen
@@ -2205,8 +2259,7 @@ namespace FUI::Equip
             ImVec2(g.bodyR, g.top + g.panelH), "accdrawer", 0.0f, 0.0f,
             ImVec2(g.panelX, g.top - g.panelH),
             ImVec2(g.panelX + g.shownW, g.top + 2.0f * g.panelH));
-        std::unordered_map<std::string, EquipEntry> eq;
-        CollectEquipment(eq);
+        const auto& eq = EquipmentThisFrame();
 
         // ★Cells are nailed to the BOX. Column 0 is the innermost, so it is
         // the last to clear the cabinet -- pull the drawer and its far end
@@ -2263,8 +2316,7 @@ namespace FUI::Equip
     {
         DrawLoadoutTabs();   // L2: loadout tab strip (switch / + buy / rename / delete / wheel)
 
-        std::unordered_map<std::string, EquipEntry> eq;
-        CollectEquipment(eq);
+        const auto& eq = EquipmentThisFrame();
 
         const float S2 = SlotPx();
         const float gap = GapPx();

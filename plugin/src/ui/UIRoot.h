@@ -159,6 +159,10 @@ namespace FUI::UIRoot
         // the day a pad binding exists, only the table below changes.
         kRotateCCW,
         kRotateCW,
+        // ★Ours as well, and with no pad binding at all -- KeyLabel answers
+        // for it without consulting the controller table (it sits past the
+        // end of that array on purpose).
+        kRecharge,
     };
     [[nodiscard]] const char* KeyLabel(Act a_act);
 

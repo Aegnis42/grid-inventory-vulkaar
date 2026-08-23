@@ -660,13 +660,23 @@ namespace FUI::GoldCoins
     // one tier-0 tile, was asked "is the remainder between 1 and 4?", answered
     // no, and was valued at zero. A tile worth nothing draws nothing. Count and
     // value are one rule and have to move together.
+    // ★The rule itself, with the walking total handed in. A caller filling N
+    // coin tiles asks N times for a number that cannot change between the
+    // questions -- and WalkingGold() reaches CountOf, which runs a filtered
+    // GetInventory: an entry-list walk plus a map allocation. At 100,000 gold
+    // that was a hundred inventory walks per rebuild, and the rebuild runs on
+    // every player-side container delta.
+    int InstanceValueAt(int a_walking, int a_index)
+    {
+        if (a_walking <= 0 || a_index < 0) return 0;
+        const int left = a_walking - a_index * kCoinCap;
+        return left > 0 ? (std::min)(left, kCoinCap) : 0;
+    }
+
     int InstanceValue(RE::FormID a_form, int a_index)
     {
-        if (TierOf(a_form) < 0 || a_index < 0) return 0;
-        const int walking = WalkingGold();
-        if (walking <= 0) return 0;
-        const int left = walking - a_index * kCoinCap;
-        return left > 0 ? (std::min)(left, kCoinCap) : 0;
+        if (TierOf(a_form) < 0) return 0;
+        return InstanceValueAt(WalkingGold(), a_index);
     }
 
     int CoinTileCount(RE::FormID a_form)

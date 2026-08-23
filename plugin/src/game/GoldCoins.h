@@ -53,6 +53,9 @@ namespace FUI::GoldCoins
     // a_index (04 tiles show one-per-coin: index < fullThousands -> 1000,
     // last one -> the 100..999 remainder; tiers 1..3 always index 0).
     [[nodiscard]] int InstanceValue(RE::FormID a_form, int a_index);
+    // Same rule, walking total supplied once -- for callers filling every tile
+    // in a loop (InstanceValue re-walks the inventory on each call).
+    [[nodiscard]] int InstanceValueAt(int a_walking, int a_index);
 
     // Number of grid tiles this coin form should display, computed from
     // WALKING gold (pending drops already subtracted). The rebuild uses this

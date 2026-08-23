@@ -2976,8 +2976,15 @@ namespace FUI::UIRoot
                     bits.push_back({ K(Act::kFavorite), T(S::ActFavorite),
                                      !bits.empty() && !hp.canDrop });
                 }
+                // ★Grouped with inspect rather than with discard/star: those
+                // two act on the item's place in the bag, this one and 3D look
+                // at the item itself.
+                if (hp.canRecharge) {
+                    bits.push_back({ K(Act::kRecharge), T(S::ActRecharge),
+                                     !bits.empty() });
+                }
                 bits.push_back({ K(Act::kInspect), T(S::PromptInspect),
-                                 !bits.empty() });
+                                 !bits.empty() && !hp.canRecharge });
             } else if (mode == LootBarter::Mode::kPickpocket) {
                 warn = true;
                 bits = { { "", T(S::WarnPickpocket) } };
@@ -3817,7 +3824,24 @@ namespace FUI::UIRoot
         if (g_onHide) g_onHide();
         if (ImGui::GetCurrentContext()) {
             ImGui::GetIO().ClearInputKeys();
+            // ★★★AND THE MOUSE. ClearInputKeys skips the mouse buttons on
+            // purpose -- ImGui keeps ClearInputMouse as a separate call, and
+            // this plugin had never made it. Close the menu with the left
+            // button DOWN (dragging a title bar and hitting I or Escape, which
+            // is not a rare way to close a window) and the release goes to a
+            // menu that is no longer relaying, so MouseDown[0] was still true
+            // at the next open. IsMouseClicked is an EDGE, and an edge that
+            // already happened never comes again: the first click after
+            // reopening did nothing at all -- no pickup, no window drag, no
+            // click-outside to dismiss. Press and release once and it healed,
+            // which is why it never survived being tested.
+            ImGui::GetIO().ClearInputMouse();
         }
+        // ★The pad's own held state is ours, not ImGui's, and it has the same
+        // problem: a button held across the close stays held in the mask.
+        g_padRaw.store(0);
+        g_padHeld.store(0);
+        g_padPrev = 0;
         // ★★GIVE THE CURSOR BACK, unconditionally and last. A cursor left
         // hidden is a game the player cannot click, so this runs on every exit
         // from the menu -- not only the tidy ones.
@@ -3870,10 +3894,13 @@ namespace FUI::UIRoot
         // Mouse/keyboard side is ours to choose (these are hardcoded above in
         // the ImGui translation), so it needs no lookup.
         static constexpr const char* kKeyboard[] = {
-            "LMB", "RMB", "R", "F", "C", "Shift", "A", "D",
+            "LMB", "RMB", "R", "F", "C", "Shift", "A", "D", "T",
         };
         const auto i = static_cast<std::size_t>(a_act);
         if (i >= std::size(kKeyboard)) return "";
+        // ★Past the pad table: recharge has no controller binding, so it always
+        // answers with its key rather than reading off the end of g_padLabel.
+        if (i >= std::size(g_padLabel)) return kKeyboard[i];
         // Read-only on the render thread: the table is filled on the game
         // thread in OnShow, so nothing here touches ControlMap. An unresolved
         // or unbound action still names the key, so a hint never goes blank.
@@ -4046,10 +4073,21 @@ namespace FUI::UIRoot
                 auto& io = ImGui::GetIO();
                 io.AddMouseButtonEvent(0, false);
                 io.AddMouseButtonEvent(1, false);
+                // ★★★AND GIVE THE CURSOR BACK WHILE THE BOOK HAS THE SCREEN.
+                // MouseHandler hides it every frame we run, and the only place
+                // that ever showed it again was OnClose -- but this return
+                // comes BEFORE MouseHandler, so the hide simply stood. Reading
+                // a book or a note out of the grid meant reading it with no
+                // mouse pointer, and the same hole belongs to any vanilla menu
+                // that opens over us.
+                SetGameCursorVisible(true);
             }
             return;
         }
-        g_bookWasOpen = false;
+        if (g_bookWasOpen) {
+            // ★back to us: MouseHandler takes the cursor again from here on
+            g_bookWasOpen = false;
+        }
 
         // ★★The console just came up. Keys stop reaching us from this frame on
         // (GridMenu::ProcessScaleformEvent), so anything HELD when it opened

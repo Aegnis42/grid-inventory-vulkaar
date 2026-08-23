@@ -1000,6 +1000,7 @@ namespace FUI::LootBarter
         g_shelfPouchSpot.clear();
         g_bundleCarry = {};
         g_carryGlow = 0;
+        g_carryStolen = false;   // ★its twin -- see the lift sites
         GoldCoins::SetBarterContext(false);
     }
 
@@ -1319,6 +1320,44 @@ namespace FUI::LootBarter
             return used;
         }
 
+        // How many of this form the holder actually has right now. The store
+        // path uses it to credit the ledger with what LEFT rather than with
+        // what was asked for -- a RemoveItem that quietly takes nothing is the
+        // engine's way of refusing, and it does not reach back to tell us.
+        [[nodiscard]] int HeldCount(RE::TESObjectREFR* a_who, RE::TESBoundObject* a_obj)
+        {
+            if (!a_who || !a_obj) return 0;
+            auto inv = a_who->GetInventory(
+                [&](RE::TESBoundObject& o) { return std::addressof(o) == a_obj; });
+            const auto it = inv.find(a_obj);
+            return it != inv.end() ? it->second.first : 0;
+        }
+
+        // ★★★CAN WE PROVE THIS DEPOSIT IS THE PLAYER'S OWN?
+        //
+        // With the unit named, the unit answers: an owner on the list means it
+        // is somebody else's and a chest is not a fence. Nameless is the hard
+        // case -- ResolveExitUnit returns null both for a genuinely plain unit
+        // (no list, therefore no owner, therefore the player's) and for a
+        // fallback pick where we simply could not tell which unit is leaving.
+        // The old test read the second as the first and handed a laundered
+        // credit to anything it failed to resolve. So when we cannot name it,
+        // claim the deposit only if NOTHING the player holds of that form
+        // carries an owner: then whichever one left, it was clean.
+        [[nodiscard]] bool DepositProvable(RE::TESObjectREFR* a_player,
+                                           RE::TESBoundObject* a_obj,
+                                           RE::ExtraDataList* a_xl)
+        {
+            if (a_xl) return !a_xl->GetOwner();
+            if (!a_player || !a_obj) return false;
+            auto* e = Grid::LiveEntryOf(a_player, a_obj);
+            if (!e || !e->extraLists) return true;   // nothing but bare units
+            for (auto* l : *e->extraLists) {
+                if (l && l->GetOwner()) return false;
+            }
+            return true;
+        }
+
         RE::TESForm* ContainerOwner(RE::TESObjectREFR* a_source)
         {
             if (!a_source) return nullptr;
@@ -1465,8 +1504,17 @@ namespace FUI::LootBarter
                 // else. Ask for three when two are yours and the engine is
                 // told about two clean ones and one theft, which is what
                 // vanilla does with its own ledger.
-                const int fromDeposit = (g_mode == Mode::kSteal)
-                    ? DepositTake(source, r.obj, r.count) : r.count;
+                //
+                // ★★★SPEND IT IN EVERY MODE, READ IT ONLY IN STEAL. The ledger
+                // is written in every mode -- deliberately, because a plain
+                // chest can become an owned one and a deposit made before that
+                // should still be yours after. But it was only ever DEBITED in
+                // steal mode, so the count on an ordinary chest could climb
+                // and never fall. Use the same chest as a stash for an hour
+                // and it carries a hundred phantom deposits into the cosave,
+                // waiting for the day that ref turns hostile.
+                const int spent = DepositTake(source, r.obj, r.count);
+                const int fromDeposit = (g_mode == Mode::kSteal) ? spent : r.count;
                 const int stolenCount = (std::max)(0, r.count - fromDeposit);
                 const bool anyStolen  = g_mode == Mode::kSteal && stolenCount > 0;
 
@@ -1588,10 +1636,23 @@ namespace FUI::LootBarter
                             RE::ITEM_REMOVE_REASON::kRemove, pick.xl, player);
                     }
                     if (stolenCount > 0) {
+                        // ★★★ASK AGAIN BETWEEN THE TWO CALLS. `pick.xl` named a
+                        // unit in the SOURCE, and the call above just moved
+                        // units out of it -- when the deposit half consumed
+                        // that list outright the engine MOVES it to the player
+                        // (measured, see the note above this case), so handing
+                        // the same pointer back names a list the source no
+                        // longer owns. The pickpocket path already re-resolves
+                        // after engine code runs; this one did not.
+                        RE::ExtraDataList* xl2 = pick.xl;
+                        if (fromDeposit > 0) {
+                            const auto again = SourceUnit(source, r);
+                            xl2 = again.ok() ? again.xl : nullptr;   // null = engine picks
+                        }
                         source->RemoveItem(r.obj, stolenCount,
                             g_mode == Mode::kSteal ? RE::ITEM_REMOVE_REASON::kSteal
                                                    : RE::ITEM_REMOVE_REASON::kRemove,
-                            pick.xl, player);
+                            xl2, player);
                     }
                 });
                 if (anyStolen) {
@@ -1683,9 +1744,17 @@ namespace FUI::LootBarter
                 // as yours -- and kRemove has the engine clear the ownership on
                 // the way, so it is genuinely clean afterwards. Measured: five
                 // in, five out, all five plain. A chest is not a fence.
-                if (!(sxl && sxl->GetOwner())) {
-                    DepositAdd(source, r.obj, r.count);
-                }
+                //
+                // ★★AND CREDIT WHAT LEFT, AFTER IT LEAVES. This ran before the
+                // engine call and booked the full requested count regardless
+                // of what the engine did with it -- a refusal (RemoveItem
+                // silently taking nothing, which is how the engine says no)
+                // left a credit behind for units still in the player's hands.
+                // Measure the holding across the call instead. See
+                // DepositProvable for the other half: whether it is ours to
+                // claim at all.
+                const bool provable = DepositProvable(player, r.obj, sxl);
+                const int  heldBefore = provable ? HeldCount(player, r.obj) : 0;
                 // ★TEST ONLY (!simrefuse): skip the ENGINE CALL and nothing
                 // else. A real refusal is RemoveItem quietly not taking -- our
                 // own bookkeeping still runs, because the engine's silence does
@@ -1703,6 +1772,11 @@ namespace FUI::LootBarter
                         player->RemoveItem(r.obj, r.count,
                             RE::ITEM_REMOVE_REASON::kStoreInContainer, sxl, source);
                     });
+                }
+                if (provable) {
+                    const int moved = (std::min)(r.count,
+                        (std::max)(0, heldBefore - HeldCount(player, r.obj)));
+                    if (moved > 0) DepositAdd(source, r.obj, moved);
                 }
                 // (B4-3c: no counter to drain -- the engine event that this
                 // call just fired has already confirmed the ledger entry)
@@ -2425,8 +2499,15 @@ namespace
                        [&](const BundleItem& b) { return b.id == a_id; });
         }
 
+        // ★BY VALUE, DELIBERATELY. This took `const ShelfBagWin&` straight out
+        // of g_shelfBags and then pushed onto that same vector when a nested
+        // bag was opened -- one reallocation and every later read of a_w.spot
+        // was freed memory. The struct is a string and two ints, and there are
+        // never more than a handful of open bags; the copy costs nothing and
+        // the alternative is a reference whose lifetime the body has to keep
+        // reasoning about.
         bool DrawOneShelfBag(RE::TESObjectREFR* p, ContLayout& a_cl,
-                             const ShelfBagWin& a_w, int a_ord)
+                             ShelfBagWin a_w, int a_ord)
         {
         const auto si = a_cl.cells.find(a_w.spot);
         if (si == a_cl.cells.end()) return false;   // the bag left the shelf
@@ -3886,6 +3967,14 @@ namespace
             if (!Grid::IsHolding() && !g_slider.active && !g_confirm.active) {
                 g_actingSpot.clear();
                 g_carryGlow = 0;                // (1.3.2) markers die with it
+                // ★★★AND THE OTHER MARKER. g_carryStolen was written only by
+                // the bundle lift and cleared by nobody, so one stolen item
+                // lifted out of a shelf bag latched it true for the session:
+                // every later drop into a bag was recorded stolen, in the
+                // cosave, and a genuinely stolen cell dropped in afterwards
+                // came out clean. Set in one place, cleared in none -- exactly
+                // the pairing §6-2 is about.
+                g_carryStolen = false;
                 g_bundleCarry.active = false;   // (1.3.1) cancelled carry: the
                                                 // entry was never removed, so
                                                 // the item is simply back in
@@ -3905,6 +3994,14 @@ namespace
             // decides what exists or how much of it -- that was settled above.
             const bool carrying = Grid::HeldPartnerObject() != nullptr;
             std::map<std::string, int> ordOf;   // nth cell of its pool
+            // ★A SECOND COUNTER, BECAUSE THE LEDGER COUNTS SOMETHING ELSE.
+            // `ord` is the cell's place within its POOL, which is what the
+            // carry and the swap need. The deposit ledger is keyed by FORM.
+            // Comparing one against the other gave every pool of a form its
+            // own run of low ordinals, so a single deposit cleared the first
+            // cell of each -- store one plain sword in the innkeeper's chest
+            // and his enchanted one stopped reading as stolen too.
+            std::map<RE::FormID, int> formOrd;
             for (const auto& [key, c] : cl->cells) {
                 // ★THE CELL IN HAND IS NOT ON THE SHELF, and that is the whole
                 // of it now. This used to be a per-unit test against an ordinal
@@ -3984,10 +4081,22 @@ namespace
                 // an owned container is somebody else's.
                 // ★An owned container's contents are stolen goods -- except
                 // what the player deposited, which the ledger remembers. The
-                // cells of one form are numbered by `ord`, so the first N of
+                // cells of one FORM are numbered by formOrd, so the first N of
                 // them are the N units the player put here: mark from there on.
+                // (pc.ord counts within the pool and belongs to the carry; the
+                // two were the same number only while a form had one pool.)
                 if (g_mode == Mode::kSteal) {
-                    pc.stolen = pc.ord >= DepositedCount(source, obj);
+                    if (xl && xl->GetOwner()) {
+                        // ★A unit that NAMES an owner is theirs whatever the
+                        // ledger says, and -- the point of putting this first
+                        // -- it must not eat a deposit credit. The credit then
+                        // lands on the unowned units, which are the ones the
+                        // player actually put here.
+                        pc.stolen = true;
+                    } else {
+                        const int fo = formOrd[obj->GetFormID()]++;
+                        pc.stolen = fo >= DepositedCount(source, obj);
+                    }
                 }
                 cells.push_back(std::move(pc));
             }
@@ -3996,22 +4105,42 @@ namespace
             // so a container/corpse/merchant blink could only ever be judged by
             // eye. Logged only when the cell set CHANGES, so it stays quiet.
             {
-                std::vector<std::string> ks;
-                ks.reserve(cells.size());
+                // ★★HASH EVERY FRAME, FORMAT ONLY WHEN IT CHANGES.
+                //
+                // This built one std::string per cell, sorted the lot, then
+                // concatenated them into a third -- every frame, on a merchant
+                // window that can carry two hundred items, to answer a question
+                // whose answer is "no" almost always. The check earns its place;
+                // paying for it while nothing moves does not (원칙 3).
+                //
+                // The mix is commutative on purpose: the order cells happen to
+                // come out in is not news, and a reordering that read as a
+                // change would make the log lie about blinking.
+                std::uint64_t sig = 1469598103934665603ull ^ cells.size();
                 for (const auto& c : cells) {
-                    ks.push_back(std::format("{}x{}{}", c.count,
-                        c.obj ? c.obj->GetName() : "?", c.worn ? "*" : ""));
+                    std::uint64_t h = c.obj ? c.obj->GetFormID() : 0u;
+                    h = h * 1099511628211ull + static_cast<std::uint64_t>(c.count);
+                    h = h * 1099511628211ull + (c.worn ? 1ull : 0ull);
+                    sig += h ^ (h >> 29);
                 }
-                std::sort(ks.begin(), ks.end());
-                std::string sig = std::to_string(cells.size());
-                for (const auto& k : ks) { sig += " | "; sig += k; }
-                static std::string s_prev;
+                static std::uint64_t s_prev = 0;
+                static std::size_t   s_prevN = 0;
                 if (sig != s_prev) {
+                    // the readable form, built once, on the frame it changed
+                    std::vector<std::string> ks;
+                    ks.reserve(cells.size());
+                    for (const auto& c : cells) {
+                        ks.push_back(std::format("{}x{}{}", c.count,
+                            c.obj ? c.obj->GetName() : "?", c.worn ? "*" : ""));
+                    }
+                    std::sort(ks.begin(), ks.end());
+                    std::string line = std::to_string(cells.size());
+                    for (const auto& k : ks) { line += " | "; line += k; }
                     SKSE::log::info("[PFLICK] cells {} -> {}  {}",
-                        s_prev.empty() ? std::string("-")
-                                       : s_prev.substr(0, s_prev.find(' ')),
-                        cells.size(), sig);
+                        s_prev == 0 ? std::string("-") : std::to_string(s_prevN),
+                        cells.size(), line);
                     s_prev = sig;
+                    s_prevN = cells.size();
                 }
             }
             return cells;
@@ -4323,6 +4452,7 @@ namespace
                             // the moment it is lifted (-1 = centre).
                             g_actingSpot = it.spotKey;   // GI20: this cell's slot
                             g_carryGlow = it.glow;       // (1.3.2) markers ride along
+                            g_carryStolen = it.stolen;   // ★including this one
                             Grid::BeginPartnerCarry(it.obj, it.count, it.value,
                                 -1.0f, -1.0f, it.uid, it.xlIdx, it.ord, it.rot);
                         }

@@ -84,8 +84,18 @@ namespace FUI::HostApi
 
         void OnRegisterProvider(SKSE::MessagingInterface::Message* a_msg)
         {
-            if (!a_msg->data || a_msg->dataLen < sizeof(std::uint32_t) * 2) {
-                logger::error("[API] provider registration with no payload");
+            // ★★MEASURE THE WHOLE STRUCT, NOT JUST THE TWO FIELDS WE CHECK.
+            // This read eight bytes and then trusted offsets 16..47 -- name and
+            // three function pointers -- from a buffer that was never proven to
+            // hold them. structSize and abiVersion both live inside the first
+            // eight, so a short payload sailed past the version gate below. And
+            // the listener takes EVERY sender, so any plugin that happens to
+            // reuse our message type arrives here with its own payload.
+            if (!a_msg->data || a_msg->dataLen < sizeof(GridInvAPI::Provider)) {
+                logger::error("[API] REFUSED '{}': payload is {} bytes, a Provider is {}",
+                              a_msg->sender ? a_msg->sender : "<unknown>",
+                              a_msg->data ? a_msg->dataLen : 0u,
+                              sizeof(GridInvAPI::Provider));
                 return;
             }
             const auto* p = static_cast<const GridInvAPI::Provider*>(a_msg->data);
