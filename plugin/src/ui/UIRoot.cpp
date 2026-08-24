@@ -688,9 +688,43 @@ namespace FUI::UIRoot
             const auto edge = [&](std::uint32_t a_bit) { return (changed & a_bit) != 0; };
             const auto down = [&](std::uint32_t a_bit) { return (now & a_bit) != 0; };
 
-            if (edge(kActPrimary))   io.AddMouseButtonEvent(0, down(kActPrimary));
+            // ★★★A POPUP SPEAKS KEYBOARD, SO THE PAD SPEAKS KEYBOARD TO IT.
+            //
+            // The quantity slider and the confirm dialogs listen for Enter /
+            // Space / Escape and the arrow keys -- none of which any pad
+            // button translated to. Every button below was a mouse button or
+            // a board shortcut, so "take 40 gold" on a controller meant
+            // steering the cursor onto each little button and clicking it
+            // (user report). While one of those windows is up, the face
+            // buttons become what vanilla's dialogs taught: A confirms, Y is
+            // Max, the d-pad walks the count. B already cancels through the
+            // user-event channel (ue->cancel closes the top window), so it
+            // needs nothing here.
+            //
+            // ★Resolved at PRESS and remembered per button -- the same rule
+            // the triggers follow. A popup that closes while A is held must
+            // release the Enter it pressed, not a mouse button it never did.
+            const bool modal = LootBarter::SliderActive() ||
+                               LootBarter::ConfirmActive() ||
+                               Grid::IsTrashConfirmOpen() ||
+                               Equip::IsPopupOpen();
+            static bool s_priAsEnter = false;
+            static bool s_dropAsMax  = false;
+            static bool s_nudgeLKey  = false;
+            static bool s_nudgeRKey  = false;
+
+            if (edge(kActPrimary)) {
+                if (down(kActPrimary)) s_priAsEnter = modal;
+                if (s_priAsEnter) io.AddKeyEvent(ImGuiKey_Enter, down(kActPrimary));
+                else              io.AddMouseButtonEvent(0, down(kActPrimary));
+            }
             if (edge(kActSecondary)) io.AddMouseButtonEvent(1, down(kActSecondary));
-            if (edge(kActDrop))      io.AddKeyEvent(ImGuiKey_R, down(kActDrop));
+            if (edge(kActDrop)) {
+                if (down(kActDrop)) s_dropAsMax = modal;
+                // M is the slider's Max key (see DrawSlider); R stays the
+                // board's drop/take-all everywhere else.
+                io.AddKeyEvent(s_dropAsMax ? ImGuiKey_M : ImGuiKey_R, down(kActDrop));
+            }
             if (edge(kActFavorite))  io.AddKeyEvent(ImGuiKey_F, down(kActFavorite));
             if (edge(kActInspect))   io.AddKeyEvent(ImGuiKey_C, down(kActInspect));
             if (edge(kActRotL))      io.AddKeyEvent(ImGuiKey_A, down(kActRotL));
@@ -700,10 +734,20 @@ namespace FUI::UIRoot
                 io.AddKeyEvent(ImGuiKey_LeftShift, down(kActSplit));
             }
             // d-pad nudges exactly one cell — the only way to hit a specific
-            // tile reliably without a mouse
+            // tile reliably without a mouse. In a popup the count is what
+            // needs walking, not the cursor: left/right become the arrow keys
+            // the slider already listens for (held, so key-repeat runs).
             const float step = Grid::CellPx();
-            if (edge(kActNudgeL) && down(kActNudgeL)) g_padCursor.x -= step;
-            if (edge(kActNudgeR) && down(kActNudgeR)) g_padCursor.x += step;
+            if (edge(kActNudgeL)) {
+                if (down(kActNudgeL)) s_nudgeLKey = modal;
+                if (s_nudgeLKey) io.AddKeyEvent(ImGuiKey_LeftArrow, down(kActNudgeL));
+                else if (down(kActNudgeL)) g_padCursor.x -= step;
+            }
+            if (edge(kActNudgeR)) {
+                if (down(kActNudgeR)) s_nudgeRKey = modal;
+                if (s_nudgeRKey) io.AddKeyEvent(ImGuiKey_RightArrow, down(kActNudgeR));
+                else if (down(kActNudgeR)) g_padCursor.x += step;
+            }
             if (edge(kActNudgeU) && down(kActNudgeU)) g_padCursor.y -= step;
             if (edge(kActNudgeD) && down(kActNudgeD)) g_padCursor.y += step;
 
@@ -2898,15 +2942,37 @@ namespace FUI::UIRoot
             // and cannot be reached from the settings window anyway
             } else if (ImGui::GetTime() < g_flatReloadNote) {
                 bits = { { "", T(S::IconReloadDone) } };
-            } else if (LootBarter::SliderActive() || Grid::IsPouchOpen()) {
+            } else if (LootBarter::SliderActive() || Grid::IsPouchOpen() ||
+                       LootBarter::ConfirmActive() || Grid::IsTrashConfirmOpen() ||
+                       Equip::IsPopupOpen()) {
                 // the pouch withdraw window answers the same keys as the
-                // quantity slider -- it just is not a LootBarter one
-                bits = { { "\xE2\x86\x90", "" }, { "\xE2\x86\x92", T(S::PromptStep) },
-                         { "Enter", T(S::Confirm), true },
-                         { "ESC", T(S::Cancel), true } };
-                if (LootBarter::SliderActive()) {
-                    bits.insert(bits.begin() + 2, { "MAX", T(S::PromptMax), true });
+                // quantity slider -- it just is not a LootBarter one.
+                // ★On a pad the row names the BUTTONS, now that the buttons
+                // work here (TranslatePadButtons remaps them while a popup is
+                // up): A confirms, Y is Max, the d-pad walks the count, and B
+                // cancels through the same user-event channel as ESC. A row
+                // that said "Enter" to a player holding a controller was a
+                // hint about somebody else's hands.
+                // ★The confirm dialogs (sell, trash, equip) join the branch:
+                // they answer the same keys minus the counting pair.
+                const bool pad = g_padActive.load();
+                const bool counting = LootBarter::SliderActive() || Grid::IsPouchOpen();
+                bits.clear();
+                if (counting) {
+                    if (pad) {
+                        bits.push_back({ "D-Pad", T(S::PromptStep) });
+                    } else {
+                        bits.push_back({ "\xE2\x86\x90", "" });
+                        bits.push_back({ "\xE2\x86\x92", T(S::PromptStep) });
+                    }
                 }
+                bits.push_back({ pad ? KeyLabel(Act::kPrimary) : "Enter",
+                                 T(S::Confirm), !bits.empty() });
+                if (LootBarter::SliderActive()) {
+                    bits.push_back({ pad ? KeyLabel(Act::kDrop) : "MAX",
+                                     T(S::PromptMax), true });
+                }
+                bits.push_back({ pad ? "B" : "ESC", T(S::Cancel), true });
             } else if (Grid::IsHolding()) {
                 bits = { { K(Act::kPrimary), T(S::PromptPlace) },
                          { K(Act::kSecondary), T(S::Cancel), true } };

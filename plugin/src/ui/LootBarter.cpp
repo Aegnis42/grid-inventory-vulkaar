@@ -2169,7 +2169,10 @@ namespace FUI::LootBarter
         // GI46: one-click whole-stack transfer. For barter the cap also folds
         // in the payer's purse -- buying 200 arrows with 50 arrows' gold moves
         // the 50, instead of buzzing "not enough gold" and moving nothing.
-        bool maxPress = Sfx::Button(Lang::T(Lang::Str::MaxLabel), ImVec2(btnW, 0));
+        // ★M is the Max KEY -- what the pad's Y arrives as (TranslatePadButtons
+        // remaps it while a popup is up), and a small bonus for the keyboard.
+        bool maxPress = Sfx::Button(Lang::T(Lang::Str::MaxLabel), ImVec2(btnW, 0)) ||
+                        (!typing && ImGui::IsKeyPressed(ImGuiKey_M, false));
         if (maxPress) {
             int cap = g_slider.max;
             if (g_slider.dir == XferDir::kBuy) {
