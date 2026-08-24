@@ -257,6 +257,11 @@ namespace FUI::Grid
     // board position -- what the equipment doll and the accessory drawer have.
     void ToggleFavoriteUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
                             std::uint16_t a_sig, int a_xlIdx = -1);
+    // ★B3: did a CLICK already take this form's tile off the board? The equip
+    // event sink asks before deciding what a declined partial update means --
+    // an equip from the wheel, a hotkey or a script has no click behind it and
+    // therefore nothing that removed the tile. Claiming clears the record.
+    [[nodiscard]] bool ClaimOptimisticRemove(RE::FormID a_form);
     void ClearPendingEquips();   // menu close / reset
     // ★A confirmed CONSUME releases its suppression entry at once. The entry
     // used to die only at the end of the rebuild it covered, and by then the

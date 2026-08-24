@@ -1416,6 +1416,27 @@ namespace FUI::Grid
             std::uint16_t       sig = 0;
         };
         std::vector<FavSync> g_favSync;
+
+        // ★★★FORMS A CLICK ALREADY TOOK OFF THE BOARD, waiting for the engine's
+        // equip event to catch up.
+        //
+        // The equip side of the event sink swallows a declined partial update,
+        // and the reason is sound as far as it goes: a click-path equip removed
+        // the tile optimistically the moment it was clicked, so there is
+        // nothing left for a rebuild to do, and a torch's "still worn" decline
+        // must not start one. What that reasoning never covered is an equip
+        // that did NOT come from a click -- the quick wheel, a hotkey, a
+        // script. Nothing removes the tile for those, and the decline that
+        // would have said so is thrown away, so the tile stands until some
+        // unrelated rebuild happens past it. Measured in a session log: a
+        // wheel equip of an iron helmet, no removal, decline swallowed, and
+        // seven seconds of luck before something else rebuilt.
+        //
+        // So the sink stops guessing and asks. A click that really removed a
+        // tile leaves its form here; the sink claims it and stays quiet.
+        // Nothing to claim means nothing removed the tile, and the decline is
+        // escalated after all.
+        std::unordered_set<RE::FormID> g_optimisticGone;
         // Last drawn set per gear pool, so a rebuild that changes what is on the
         // board can say so. A flicker is a change that comes back -- invisible
         // to the conservation check, which only sees one frame at a time, but
@@ -7116,6 +7137,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // survive into the next one, or a tile keeps being re-routed forever
         g_freshTiles.clear();
         g_arrivedTiles.clear();   // (1.3.2) same lifetime: one rebuild
+        // ★A full pass makes the board authoritative again, so an unclaimed
+        // optimistic removal has nothing left to say. Dropping them here is
+        // what bounds the set: a click whose equip event never arrived would
+        // otherwise leave a claim behind and swallow the NEXT decline for that
+        // form. The cost of being wrong in this direction is one extra
+        // rebuild; in the other it is a tile that stays on screen.
+        g_optimisticGone.clear();
         for (auto ti = g_transientArrivals.begin(); ti != g_transientArrivals.end();) {
             ti = (--ti->second <= 0) ? g_transientArrivals.erase(ti) : std::next(ti);
         }
@@ -7757,6 +7785,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 MarkCapacityDirty();
                 SKSE::log::info("[B3] ★use click '{}' -{} -> {} in '{}' -- no rebuild",
                     a_obj->GetName(), take, it.count, a_key);
+                g_optimisticGone.insert(a_obj->GetFormID());   // the sink asks
                 return true;
             }
 
@@ -7795,8 +7824,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             MarkCapacityDirty();
             SKSE::log::info("[B3] ★use click '{}' tile '{}' off the board -- no rebuild",
                 a_obj->GetName(), a_key);
+            g_optimisticGone.insert(a_obj->GetFormID());   // the sink asks
             return true;
         }
+    }
+
+    bool ClaimOptimisticRemove(RE::FormID a_form)
+    {
+        return g_optimisticGone.erase(a_form) > 0;   // see g_optimisticGone
     }
 
     void DropTileDisplay(const std::string& a_key, RE::TESBoundObject* a_obj)
@@ -14173,6 +14208,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // (they decay on their own, but not before poisoning a rebuild or three).
         g_clickAction.reset();
         g_transientArrivals.clear();
+        g_optimisticGone.clear();   // claims from the previous session
         RequestRebuild();
     }
 

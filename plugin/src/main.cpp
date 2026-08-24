@@ -236,6 +236,21 @@ namespace
             // the unit -- but `equipped` is exactly the one bit we need.
             FUI::DeltaWatch::OnEquip(a_event);
             if (a_event && a_event->actor && a_event->actor->IsPlayerRef()) {
+                // ★★★DID THE ENGINE ANNOUNCE IT? A question other authors keep
+                // asking about this mod -- "you are not firing OnObjectEquipped"
+                // -- and one nothing in the log could answer, because every
+                // consumer on this path (WornLedger, the equip queue) is
+                // silent.
+                //
+                // It is answerable, though, and cheaply: Papyrus's
+                // OnObjectEquipped rides the SAME event source this sink is
+                // subscribed to. Whatever reaches this line reached their
+                // script too. So an equip made through our UI either shows up
+                // here -- and their listener was told -- or it does not, and
+                // the fault is ours and upstream of both.
+                SKSE::log::info("[EQUIPEVT] {} {:08X}",
+                    a_event->equipped ? "equipped  " : "unequipped",
+                    a_event->baseObject);
                 // ★1.4/B3: an unequip puts a unit BACK on the board, and that
                 // is the only direction without an optimistic path. Includes
                 // the engine's own slot-conflict removals, which our equip code
@@ -305,8 +320,26 @@ namespace
                         // tile a rebuild had already been past. Which of the
                         // two it is decides where to look next.
                         if (!FUI::Grid::OnFormDelta(fid)) {
-                            SKSE::log::info("[B3] equip-side decline NOT escalated "
-                                            "({:08X}) -- no rebuild from here", fid);
+                            // ★★ASK WHETHER A CLICK ALREADY DID IT.
+                            //
+                            // The decline used to be dropped outright, on the
+                            // reasoning above -- true for an equip started by
+                            // a grid click, which takes the tile off the board
+                            // at the moment of the click. An equip from the
+                            // QUICK WHEEL has no such click, and neither does
+                            // a hotkey or a script: nothing removes the tile,
+                            // and throwing the decline away left it standing
+                            // until some unrelated rebuild wandered past.
+                            // Measured -- a wheel equip, no removal, decline
+                            // swallowed, and only luck cleaning up after.
+                            if (FUI::Grid::ClaimOptimisticRemove(fid)) {
+                                SKSE::log::info("[B3] equip-side decline ignored "
+                                    "({:08X}) -- the click already took the tile", fid);
+                            } else {
+                                SKSE::log::info("[B3] equip-side decline escalated "
+                                    "({:08X}) -- nothing removed the tile", fid);
+                                FUI::Grid::RequestRebuild();
+                            }
                         }
                         auto* ui = RE::UI::GetSingleton();
                         if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return;
