@@ -113,6 +113,19 @@ namespace FUI
         // engine's arrow is what a pad should be moving, so it has to stay up
         // for that path to work at all.
         if (!UIRoot::WantsGameCursor()) return;
+        // ★★★NOT WHILE THE CONSOLE IS UP. Measured: toggling the console with
+        // our menu open destroys CursorMenu and remakes it -- the movie comes
+        // back at a new address every time -- and this function, seeing it
+        // closed, asks for it again. So every frame the engine took the arrow
+        // away we handed it straight back, MouseHandler hid it, and the next
+        // frame did it again. That blink is a second cursor appearing and
+        // vanishing on the console's edges (user report).
+        //
+        // The probe that settled it: `visible=1 -> after hide 0`, frame after
+        // frame. Our hide was working perfectly; we were the ones turning it
+        // back on. The console owns the screen while it is up -- stop fighting
+        // it, and pick the pointer back up when it leaves.
+        if (UIRoot::IsConsoleOpen()) return;
         if (auto* ui = RE::UI::GetSingleton(); ui && !ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)) {
             SKSE::GetTaskInterface()->AddUITask([]() {
                 if (const auto mq = RE::UIMessageQueue::GetSingleton()) {

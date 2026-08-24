@@ -2430,7 +2430,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // it stands alone or sits in the middle of a freshly looted block,
             // and every new tile keeps its own mark (which the alternative --
             // outlining only the outside of a group -- gives up).
-            constexpr ImU32 kNewCol = IM_COL32(242, 245, 250, 22);
+            // ★★★...AND THE NEW MARK IS NO LONGER ONE OF THEM. It was a wash
+            // too -- IM_COL32(242, 245, 250, 22), near-white at 8.6% -- and
+            // that colour was a CONSTANT while the bag mark below reads its own
+            // from the skin. Tuned against the dark boards it works: on Simple
+            // Charcoal the occupied cell moves about +19 a channel. On Sumi
+            // Parchment the cell is already #9E9178 and the same wash moves it
+            // +7/+9/+11, under a paper texture. White on white. The mark was
+            // there and answered nothing -- a 1x1 broom read as never having
+            // arrived (user report).
+            //
+            // It draws as a corner dot now, in DrawItemsPass, for two reasons a
+            // wash cannot give: it does not depend on the ground it sits on, so
+            // twenty skins need no twenty values; and it survives being small,
+            // which is exactly the case that failed.
             // ★An OPEN bag tints its own tile, so "which of these five bags is
             // the window I am looking at" is answerable on the board instead of
             // by opening each one. Same wash treatment as the NEW mark, and for
@@ -2485,7 +2498,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (!itP) continue;
                 const auto& it = *itP;
                 if (it.overflow || it.col < 0) continue;
-                const bool isNew = g_newTiles.contains(it.key);
                 const bool bagOpen = it.def.bag != 0 && g_openBags.contains(it.key);
                 for (int y = 0; y < it.mask.h; ++y) {
                     for (int x = 0; x < it.mask.w; ++x) {
@@ -2507,7 +2519,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         //  pass 4 now — nothing rarity-related belongs in this
                         //  per-cell loop any more. See Grid.h.)
                         if (bagOpen) dl->AddRectFilled(q0, q1, kOpenBagCol);
-                        if (isNew)   dl->AddRectFilled(q0, q1, kNewCol);
                     }
                 }
             }
@@ -3062,6 +3073,70 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 DrawRarityWedge(dl, wedgeCell,
                                 ImVec2(wedgeCell.x + CellPx(), wedgeCell.y + CellPx()),
                                 it.glow);
+
+                // ★★★THE NEW MARK, and it goes AFTER the wedge on purpose.
+                //
+                // Both live in the footprint's top-right cell -- the rarity
+                // wedge is a triangle in that exact corner -- so whichever is
+                // drawn last is the one you see. New wins, and it should: the
+                // wedge is a permanent fact about the item and will still be
+                // there tomorrow, while "new" clears the moment the tile is
+                // looked at (GI65). Covering a lasting mark with a transient
+                // one costs nothing; the other order costs the whole feature,
+                // because the case that needs it most -- a small item in a
+                // full board -- is the case with a wedge on it.
+                //
+                // ★★FIXED WHITE WITH THE TRAY'S OWN RIM, and the argument is
+                // already written down a few functions along, at kFavCol: the
+                // favourite mark used to take the skin's accent and read as a
+                // different thing per skin, so it was pinned to white and given
+                // a near-black outline instead. That outline is what carries
+                // it on parchment -- the colour never has to fight the ground,
+                // because the ground never touches it.
+                //
+                // The same is true here, and more so: this mark means "arrived
+                // since you last looked", which is not a statement about the
+                // wallpaper either. Deriving it from the skin's luminance was
+                // one skin-dependent answer replacing another; a white dot
+                // ringed in black is one mark that means one thing on all
+                // twenty boards.
+                // ★The SIZE comes from the tray's own fractions, not from
+                // numbers that happen to look right. kMarkFrac and kInsetFrac
+                // are what a tray marker measures itself by, so the two marks
+                // stay the same size when the cell size changes and when
+                // somebody retunes one of those constants. Hand-picked pixels
+                // drifted small the first time and would have drifted again.
+                if (g_newTiles.contains(it.key)) {
+                    constexpr ImU32 kNewDot = IM_COL32(245, 242, 234, 255);
+                    constexpr ImU32 kNewRim = IM_COL32(11, 11, 11, 255);
+                    const float cell  = CellPx();
+                    const float inset = cell * kInsetFrac;
+                    // ★★SIZED BETWEEN THE TWO HONEST ANSWERS, because both were
+                    // measured and both were wrong. Area-matched (x0.80) the dot
+                    // read smaller than the diamond; width-matched (x1.00) it
+                    // read bigger -- a circle fills its width, a diamond only
+                    // touches it at four points, and the eye splits the
+                    // difference. So does this: the geometric mean of the two,
+                    // judged against the diamond in a screenshot at each step.
+                    const float r = cell * kMarkFrac * 0.5f * 0.89f;
+                    // ★...but the RIM has to be thicker than the tray's, which
+                    // is not a fudge. RimPx() is one pixel at ordinary UI
+                    // scales, and one antialiased pixel spread around a CURVE
+                    // covers less of any given pixel than the same pixel laid
+                    // along the diamond's four straight edges. Equal numbers,
+                    // unequal weight. This is the number that makes them look
+                    // like the same outline. 1.7 overshot -- the dot read as
+                    // bigger than the diamond, because a rim grows the mark on
+                    // BOTH sides of r. This is the smallest bump that still
+                    // reads as the same weight of line.
+                    const float rimW = RimPx() * 1.3f;
+                    // The tray hugs the bottom edge; this is the same corner
+                    // arithmetic mirrored to the top.
+                    const ImVec2 c(wedgeCell.x + cell - r - inset,
+                                   wedgeCell.y + r + inset);
+                    dl->AddCircleFilled(c, r, kNewDot, 20);
+                    dl->AddCircle(c, r, kNewRim, 20, rimW);
+                }
 
                 // H1: edit-mode selection highlight (skin sel colour)
                 // ★★1.0.5 — the GRID always uses an even outline, on every skin.
