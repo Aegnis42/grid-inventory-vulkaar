@@ -1073,6 +1073,41 @@ namespace FUI::GoldCoins
 
     void Tick()
     {
+        // [vulkaar] LE MIROIR D'OR DORT — l'or vanilla n'est pas une monnaie
+        // sur vulkaar (bourse à trois monnaies serveur, MonnaiesVulkaar). Ce
+        // miroir fabriquait des objets-pièces (0x800..0x803) CLIENT SEULEMENT :
+        // sous skymp le serveur ne les connaît pas, et UN SEUL objet inconnu
+        // fait rejeter TOUT l'update d'équipement — le joueur ne pouvait plus
+        // rien équiper hors dotation (vécu le 25/08/2026, 278 rejets au
+        // journal serveur). On ne coupe pas Ready()/IsCoinForm : le reste du
+        // sous-système (rendu, bourses) s'éteint de lui-même faute de pièces.
+        // Au premier passage, on balaie les pièces-fantômes déjà posées chez
+        // les joueurs qui ont subi l'ancien miroir. (Garde à l'exécution, pas
+        // constexpr : le corps d'origine reste compilé — le rallumer est un
+        // choix d'une ligne, pas une résurrection de code mort.)
+        static const bool kMiroirDormant = true;
+        if (kMiroirDormant) {
+            static bool balaye = false;
+            if (!balaye && Ready()) {
+                auto* p = RE::PlayerCharacter::GetSingleton();
+                if (p && p->Is3DLoaded()) {
+                    balaye = true;
+                    g_applying = true;
+                    for (int i = 0; i < 4; ++i) {
+                        const int cur = CountOf(p, g_coins[i]);
+                        if (cur > 0) {
+                            p->RemoveItem(g_coins[i], cur, RE::ITEM_REMOVE_REASON::kRemove,
+                                nullptr, nullptr);
+                        }
+                    }
+                    g_applying = false;
+                    SKSE::log::info("[GOLD] miroir vulkaar : dormant, pieces-fantomes balayees");
+                    Grid::RequestRebuild();
+                }
+            }
+            return;
+        }
+
         if (!g_dirty || g_applying || !Ready()) return;
         auto* p = RE::PlayerCharacter::GetSingleton();
         if (!p || !p->Is3DLoaded()) return;
