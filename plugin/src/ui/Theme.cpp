@@ -1067,7 +1067,18 @@ namespace FUI::Theme
     float ScaleSetting() { return g_cellScale; }
 
     // the board's actual multiplier — the setting against what 1.00 means
-    float CellScale() { return g_cellScale * kScaleBase; }
+    // [vulkaar] L echelle IMPOSEE par la disposition pleine hauteur. Le
+    // reglage du joueur decidait de la taille des cases ; desormais c est
+    // l ecran qui decide, pour que 10 x 24 le remplisse exactement — meme
+    // nombre de cases pour tout le monde, meme silhouette sur tout ecran.
+    static float g_cellScaleForce = -1.0f;
+    void ForceCellScale(float a_scale) { g_cellScaleForce = a_scale; }
+
+    float CellScale()
+    {
+        return g_cellScaleForce > 0.0f ? g_cellScaleForce
+                                       : g_cellScale * kScaleBase;
+    }
 
     void SetScaleSetting(float a_scale)
     {
@@ -2341,8 +2352,14 @@ namespace FUI::Theme
         // entry is accepted. Measure what is actually on screen.
         if (a_id) {
             if (auto* s = ImGui::GetInputTextState(ImGui::GetID(a_id))) {
-                const char* t = s->GetText();
-                tw = ImGui::CalcTextSize(t, t + s->TextLen).x;
+                // vulkaar, 25/08/2026 — `GetText()` n'existe pas dans l'ImGui
+                // 1.92.6 que sert notre vcpkg ; c'est un raccourci ajouté plus
+                // tard. Il rend le tampon d'édition, soit exactement `TextA`.
+                // On le lit directement plutôt que de faire monter tout ImGui
+                // pour une seule ligne — et le garde sur `Data` couvre l'état
+                // fraîchement créé, dont le tampon n'est pas encore alloué.
+                const char* t = s->TextA.Data;
+                if (t) tw = ImGui::CalcTextSize(t, t + s->TextLen).x;
             }
         }
         // ★Never narrower than the normal padding: once the text is long enough

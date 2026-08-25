@@ -194,6 +194,10 @@ namespace FUI::Theme
     inline constexpr float kScaleBase = 0.90f;   // the board size "1.00" means
     [[nodiscard]] float CellScale();
     [[nodiscard]] float ScaleSetting();
+    // [vulkaar] La grille remplit la hauteur de l ecran : UIRoot impose
+    // chaque frame l echelle de cellule qui fait tenir exactement
+    // Grid::kMinRows rangees. -1 rend la main au reglage du joueur.
+    void ForceCellScale(float a_scale);
     void SetScaleSetting(float a_scale);
 
     // ── GI59: glow + icon light are stored PER ICON STYLE ──────────────────

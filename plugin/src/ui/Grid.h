@@ -329,6 +329,39 @@ namespace FUI::Grid
     // is pushed below the inventory weight so the VANILLA over-encumbrance
     // (forced walk, no fast travel) kicks in.
     [[nodiscard]] bool IsOverloaded();   // S2 reads this for the crimson space value
+    // ── [vulkaar] les contenants portes, pour le panneau d equipement ──
+    //
+    // Un sac EQUIPE garde sa tuile sur le plateau (wornBagStays) : sa vue
+    // et sa cle restent donc stables, et sa grille peut se dessiner
+    // ailleurs — dans le panneau — sans rien perdre.
+    struct ZoneSac
+    {
+        std::string bagKey;
+        int         vue = 0;     // indice de vue, pour DessinerVueSac
+        int         cols = 0;
+        int         rows = 0;
+        bool        sacoche = false;   // petite grille ; grande = sac a dos
+    };
+    // Les sacs PORTES, classes par taille de grille. Rend le nombre trouve.
+    int  SacsPortes(std::vector<ZoneSac>& a_out);
+    // La vue d un sac, dessinee au curseur — ce que fait une fenetre de
+    // sac, sans la fenetre. Ses cases restent cibles de depot.
+    void DessinerVueSac(int a_vue);
+    // Les cles montrees dans le panneau : DrawBagWindows ne leur ouvre
+    // plus de fenetre flottante, sinon la meme grille vivrait deux fois.
+    void MarquerSacsEnPanneau(const std::vector<std::string>& a_cles);
+
+    // ── [vulkaar] la disposition par personnage, en FICHIER ────────────
+    //
+    // Le co-save GLAY ne s ecrit que quand le JEU sauvegarde — et sur un
+    // serveur skymp, le jeu ne sauvegarde jamais : chaque reconnexion
+    // relance le processus, recharge la sauvegarde de base, et tout
+    // repart en haut a gauche, premier arrive premier servi.
+    // Ecrite a la fermeture du menu (le seul moment ou elle change),
+    // relue quand l identifiant du personnage change.
+    void SauverDispositionFichier();
+    void ChargerDispositionFichierSiChange();
+
     void MarkCapacityDirty();            // inventory/equip/loadout changed — recompute
     void CapacityTick();                 // per-frame: recompute when dirty + enforce CW
 
@@ -856,7 +889,12 @@ namespace FUI::Grid
 
     // Grid pixel metrics (main window sizes itself around these).
     inline constexpr int   kCols    = 10;
-    inline constexpr int   kMinRows = 14;
+    // [vulkaar] 24 rangees, pas 14 : la grille du joueur fait 10 x 24 = 240
+    // cases, la dimension fixee par le proprietaire le 24/08/2026 et deja
+    // gravee cote serveur (content/inventaire/inventaire.json). Tout le
+    // monde a le MEME nombre de cases — jamais une grille qui depend de
+    // l ecran.
+    inline constexpr int   kMinRows = 24;
     inline constexpr float kCell    = 48.0f;   // base cell at UI scale 1.0
 
     // H′: every layout metric goes through the global UI scale.

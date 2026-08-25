@@ -5,6 +5,7 @@
 #include "game/DeltaWatch.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
+#include "game/MonnaiesVulkaar.h"
 #include "ui/Loadout.h"
 #include "ui/GridMenu.h"
 #include "ui/Fallback.h"
@@ -2229,6 +2230,29 @@ namespace FUI::UIRoot
         // translucent 5-6 = 6px). The full drop reads right against that
         // extra margin but sits too low without it. ONE function so the
         // amount cannot differ between the gold row and the trash can.
+        // ★LA HAUTEUR DU BANDEAU DU BAS — vulkaar, 25/08/2026.
+        //
+        // Elle valait 38 px en dur, ce qui suffit a une ligne de texte. La
+        // bourse y pose de VRAIES cases de grille, et une case fait 48 px a
+        // l echelle 1 : sans cette place, elles seraient coupees par le bas
+        // du panneau.
+        //
+        // ★Une seule source pour les deux usages. `GoldStripDrop` centre son
+        // contenu dans le bandeau et `BottomStripY` en deduit son ordonnee :
+        // les laisser porter chacun leur propre 38 aurait suffi a decentrer
+        // la ligne le jour ou l un des deux change.
+        //
+        // Sans nos monnaies, rien ne bouge : le bandeau garde ses 38 px et
+        // le mod se dessine exactement comme avant.
+        [[nodiscard]] float BottomStripH()
+        {
+            const float S = Theme::Scale();
+            if (FUI::MonnaiesVulkaar::Pret()) {
+                return Grid::CellPx() + 14.0f * S;
+            }
+            return 38.0f * S;
+        }
+
         [[nodiscard]] float GoldStripDrop()
         {
             const float S = Theme::Scale();
@@ -2237,7 +2261,7 @@ namespace FUI::UIRoot
             // and it is the only thing in that strip, with nothing beside it to
             // line up against. kStatGap*S is already added before this lands,
             // so it comes back out here.
-            const float centred = (38.0f * S - Theme::FontValue()) * 0.5f - kStatGap * S;
+            const float centred = (BottomStripH() - Theme::FontValue()) * 0.5f - kStatGap * S;
             // torn-frame skins carry a deeper margin below the strip; they
             // still want the extra step down that used to be hard-coded
             return centred + (Theme::FrameInsetY() > 0.0f ? 5.0f * S : 0.0f);
@@ -2271,7 +2295,7 @@ namespace FUI::UIRoot
         // right column cannot drift apart.
         [[nodiscard]] float BottomStripY(float a_bodyH)
         {
-            return a_bodyH - 38.0f * Theme::Scale();
+            return a_bodyH - BottomStripH();
         }
 
         // S1/S2: [divider, armor/damage/speed/crit, divider, space] pinned
@@ -2631,6 +2655,88 @@ namespace FUI::UIRoot
             const float gy = cp.y + BottomStripY(a_bodyH);   // the rule: unmoved
             const float ty = gy + kStatGap * S + GoldStripDrop();
             Theme::RuleLine(dl, ImVec2(cp.x, gy), ImVec2(cp.x + a_colW, gy));
+            const float vpx = StatValuePx();
+
+            // ── vulkaar : la BOURSE remplace l'or vanilla ──────────────────
+            //
+            // Trois monnaies INDEPENDANTES, sans conversion entre elles : cent
+            // Titus ne deviennent pas un Mede. Le taux de change, s'il en faut
+            // un, sera une decision d'economie prise ailleurs et plus tard.
+            //
+            // Elles n'occupent aucune case (voir la collecte dans Grid.cpp),
+            // donc leur nombre n'a aucune limite. C'est voulu : dans une
+            // economie tenue par les joueurs, l'argent ne doit pas etre ce qui
+            // remplit un sac.
+            //
+            // Le repli est complet : sans vulkaar_accueil.esp, on retombe sur
+            // la barre d'or d'origine, intacte.
+            if (MonnaiesVulkaar::Pret()) {
+                char lblB[48];
+                if (sk.diamondLabels) {
+                    std::snprintf(lblB, sizeof(lblB), "\xE2\x97\x87 %s", Lang::T(Lang::Str::Bourse));
+                } else {
+                    std::snprintf(lblB, sizeof(lblB), "%s", Lang::T(Lang::Str::Bourse));
+                }
+                Theme::TextOutlined(dl, ImVec2(cp.x + 2.0f, ty),
+                    sk.diamondLabels ? Theme::Col(sk.sel, 1.0f) : Theme::Chrome(1.0f),
+                    lblB, vpx);
+
+                static const ImU32 kTeintes[FUI::MonnaiesVulkaar::kNb] = {
+                    IM_COL32(214, 176,  82, 255),   // Septime — or
+                    IM_COL32(198, 202, 210, 255),   // Mede    — argent
+                    IM_COL32(198, 124,  74, 255),   // Titus   — cuivre
+                };
+                // ── LES TROIS CASES, DE VRAIES CASES DE GRILLE ──────
+                //
+                // ★On APPELLE les primitives du mod au lieu de les imiter :
+                // DrawCellLattice pose le treillis, DrawCountBadge le nombre
+                // dans le coin. Une case de bourse est donc, au pixel pres, une
+                // case d inventaire — et elle suivra toute seule le jour ou le
+                // joueur change de peau ou d echelle de grille.
+                //
+                // ★L ICONE VIENT DU MODELE 3D DE LA PIECE, photographie chez
+                // le joueur par le meme cache que la grille. Aucune image a
+                // livrer avec le serveur, et une quatrieme monnaie ajoutee un
+                // jour s afficherait toute seule. En attendant la capture, un
+                // disque a la teinte du metal tient la place — jamais un trou.
+                auto* icones = IconCache::GetSingleton();
+                const float cote  = Grid::CellPx();
+                const float ecart = 8.0f * S;
+                const float haut  = cp.y + BottomStripY(a_bodyH)
+                                  + (BottomStripH() - cote) * 0.5f;
+
+                // ★De la DROITE vers la gauche : la plus faible monnaie au bord,
+                // la plus forte vers le centre. Les cases ont une largeur FIXE,
+                // donc rien ne danse — c est tout l interet d une case sur un
+                // nombre nu.
+                float x = cp.x + a_colW - a_rightReserve - 2.0f - cote;
+                for (int i = FUI::MonnaiesVulkaar::kNb - 1; i >= 0; --i) {
+                    const ImVec2 p0(x, haut);
+                    Grid::DrawCellLattice(dl, p0, 1, 1);
+
+                    auto* forme = FUI::MonnaiesVulkaar::Forme(i);
+                    const IconCache::Icon* ic = (icones && forme) ? icones->Get(forme) : nullptr;
+                    if (ic && ic->srv) {
+                        const float m = 3.0f * S;
+                        dl->AddImage(reinterpret_cast<ImTextureID>(ic->srv),
+                            ImVec2(p0.x + m, p0.y + m),
+                            ImVec2(p0.x + cote - m, p0.y + cote - m));
+                    } else {
+                        dl->AddCircleFilled(ImVec2(p0.x + cote * 0.5f, p0.y + cote * 0.5f),
+                            cote * 0.26f, kTeintes[i], 20);
+                        if (forme && icones) icones->QueueCapture(forme);
+                    }
+
+                    char nb[24];
+                    std::snprintf(nb, sizeof(nb), "%s",
+                        Grouped(FUI::MonnaiesVulkaar::Compte(i)).c_str());
+                    Grid::DrawCountBadge(dl, p0, nb);
+
+                    x -= cote + ecart;
+                }
+                return;
+            }
+
             char buf[32];
             std::snprintf(buf, sizeof(buf), "%s", Grouped(Grid::GoldAmount()).c_str());
 
@@ -2640,8 +2746,8 @@ namespace FUI::UIRoot
             } else {
                 std::snprintf(lbl, sizeof(lbl), "%s", Lang::T(Lang::Str::Gold));
             }
-            // same single style the stats rows use
-            const float vpx = StatValuePx();
+            // same single style the stats rows use (vpx : remonte en tete de
+            // la fonction, la bourse s'en sert avant ce point)
             const ImVec2 ls = Theme::TrackedSize(lbl, vpx, 0.0f);
             Theme::TextOutlined(dl, ImVec2(cp.x + 2.0f, ty),
                 sk.diamondLabels ? Theme::Col(sk.sel, 1.0f) : Theme::Chrome(1.0f),
@@ -3087,89 +3193,61 @@ namespace FUI::UIRoot
 
         void DrawMainWindow()
         {
+            /*
+             * [vulkaar] DEUX PANNEAUX ANCRES AUX BORDS, LE MONDE AU MILIEU.
+             *
+             * La fenetre unique et centree devient deux panneaux : la GRILLE
+             * collee au bord gauche sur toute sa hauteur, le SET D EQUIPEMENT
+             * au bord droit avec les stats et la bourse en bas. Entre les
+             * deux, rien — le monde reste visible.
+             *
+             * Les deux restent des fenetres de WinManager : deplacables par
+             * leur bandeau, positions persistees, exactement comme les sacs.
+             * Les bords ne sont que des positions PAR DEFAUT.
+             *
+             * La cle « main » reste sur le panneau-grille : la cascade des
+             * fenetres de sac, le defaut de la fenetre de reglages et le
+             * docking racine s y referent tous.
+             */
             const auto& io = ImGui::GetIO();
             const auto& sk = Theme::S();
             const float S = Theme::Scale();
-            const float insX = Theme::FrameInsetX();   // tornFrame breathing room
+            const float insX = Theme::FrameInsetX();
             const float insY = Theme::FrameInsetY();
             auto* wm = WinManager::GetSingleton();
 
-            // A안: loot/barter mode hides the EQUIP doll + stats — the player
-            // window is just the item grid + GOLD bar, mirroring the partner
-            // window. Plain inventory keeps the full left column.
             const bool  compact = LootBarter::CurrentMode() != LootBarter::Mode::kNormal;
             const float barH   = 34.0f * S;
             const float pad    = Theme::PadX() * S;
-            // ★The BOTTOM margin is not the side margin. `pad` closes the
-            // window under the gold bar as well as spacing the columns, so
-            // narrowing the sides silently cropped the window's foot too.
             const float padB   = 12.0f * S;
-            const float leftW  = compact ? 0.0f : Equip::PanelW();
-            // exact grid width — the legacy +20 scrollbar slack made the
-            // right margin visibly wider than the left (v10.7 feedback)
-            const float gridW  = Grid::kCols * Grid::CellPx();
-            // grid column height = ITEMS label row + the grid itself + the
-            // 30px bottom strip (GOLD bar / trash button). The label row was
-            // missing here, so the strip's baseline sat ON the last grid row
-            // and the trash button overlapped the cells (user-reported).
-            float itemsLabelH = ImGui::GetTextLineHeightWithSpacing() + 3.0f * S;
-            // ★GI77: with the doll beside it, the grid starts on the SAME line
-            // as the first equipment slot. The two columns are read as one
-            // board, and a grid whose top edge floats above the doll's makes
-            // the window look like two panels that happened to be stacked.
-            // The offset is the tab strip's measured height from last frame —
-            // 0 only before the first draw, where the label height stands in.
-            if (!compact) {
-                if (const float slotsTop = Equip::SlotsTopOffset(); slotsTop > 0.0f) {
-                    itemsLabelH = slotsTop;
-                }
-            }
-            const float gridBodyH = itemsLabelH + Grid::kMinRows * Grid::CellPx() + 30.0f * S;
-            // left column must fit doll + stats panel + GOLD bar (S1); compact
-            // reserves the GOLD-bar strip under the grid instead
-            // ★The doll-to-stats gap is what's LEFT OVER, not a fixed 44.
-            // BottomStripY is derived from bodyH, so whenever the grid column
-            // is the taller of the two the stats panel's last rule lands on
-            // exactly the grid's last row line — the layout was always built
-            // to do that. A fixed gap made the left column win instead, by a
-            // different amount at every cell size (the grid shrinks with the
-            // cell, the stats panel doesn't — it is type). Letting the gap
-            // absorb the difference keeps the two columns level.
-            // ★★AND THE FLOOR HAS TO PAY FOR THE STRIP. BottomStripY reserves
-            // 38*S under the body for the GOLD bar and the stats block is
-            // pinned ABOVE that, while bodyH adds 8*S back at the end -- so the
-            // air the player actually sees between doll and stats is
-            // (dollGap - 30*S), not dollGap. A 12*S floor therefore started the
-            // block 18*S INSIDE the doll the moment the grid column stopped
-            // being the taller one, which is every cell scale below ~0.85: the
-            // stat rows landed on the bottom row of equipment slots. Only
-            // visible once the scale floor was lowered (1.2.1) -- the old
-            // minimum of 0.85 sat right on the edge of it.
-            constexpr float kDollStatsAir = 12.0f;   // what the eye should see
-            const float dollGap = (std::max)((kDollStatsAir + 38.0f - 8.0f) * S,
-                gridBodyH - Equip::PanelH() - StatsPanelH());
-            const float bodyH  = (compact
-                ? gridBodyH + 30.0f * S
-                : (std::max)(Equip::PanelH() + dollGap + StatsPanelH(), gridBodyH)) + 8.0f * S;
-            // ★PAID FOR HERE. TitleBar only spends the pad; the height has to
-            // grow by the same number or the extra clearance at the top comes
-            // straight out of the gold bar's margin at the foot.
+            const float itemsLabelH = ImGui::GetTextLineHeightWithSpacing() + 3.0f * S;
             const float topPad = Theme::TitleTopPad();
-            const ImVec2 mainSize(compact
-                    ? pad + gridW + pad + 2.0f * insX
-                    : pad + leftW + pad + 1.0f + pad + gridW + pad + 2.0f * insX,
-                barH + bodyH + padB + 2.0f * insY);
 
-            // ★Pin the RIGHT edge across the compact/normal size change. The
-            //  item grid is the half that exists in both layouts and it sits
-            //  against the right frame, so anchoring there keeps the grid --
-            //  and anything the user docked beside it -- perfectly still while
-            //  the equipment column folds away to the left, into the space the
-            //  partner window occupies anyway.
-            wm->ApplyNext("main",
-                ImVec2((io.DisplaySize.x - mainSize.x) * 0.5f,
-                       (io.DisplaySize.y - mainSize.y) * 0.5f),
-                mainSize, WinManager::Anchor::kTopRight, topPad);
+            /* ── PLEINE HAUTEUR, CELLULE AJUSTEE ─────────────────────────
+               Les deux panneaux vont du haut au bas de l ecran, et c est la
+               HAUTEUR qui decide de la taille des cases : on resout la
+               cellule pour que les 24 rangees, le bandeau du bas et les
+               marges remplissent exactement la colonne. Le nombre de cases
+               est le meme pour tout le monde ; leur taille suit l ecran.
+               La case de bourse mesurant elle-meme une cellule, elle entre
+               dans l equation (kMinRows + 1). */
+            const float hautPanneau = io.DisplaySize.y - topPad;
+            const float innerH = hautPanneau - barH - padB - 2.0f * insY;
+            {
+                const float fixe = itemsLabelH + 8.0f * S
+                                 + (FUI::MonnaiesVulkaar::Pret() ? 14.0f * S : 38.0f * S);
+                const float rangs = static_cast<float>(Grid::kMinRows)
+                                  + (FUI::MonnaiesVulkaar::Pret() ? 1.0f : 0.0f);
+                const float cellule = (innerH - fixe) / rangs;
+                Theme::ForceCellScale((std::max)(0.30f,
+                    cellule / (Grid::kCell * Theme::Scale())));
+            }
+            const float gridW  = Grid::kCols * Grid::CellPx();
+            const float grilleBodyH = innerH;
+            const ImVec2 tailleGrille(pad + gridW + pad + 2.0f * insX, hautPanneau);
+
+            wm->ApplyNext("main", ImVec2(0.0f, 0.0f),
+                tailleGrille, WinManager::Anchor::kTopLeft, topPad);
 
             if (!ImGui::Begin("##fablerim_main", nullptr, kManagedWinFlags)) {
                 ImGui::End();
@@ -3181,43 +3259,18 @@ namespace FUI::UIRoot
             const float setW = ImGui::CalcTextSize(setLbl).x;
             const float btnGap = 18.0f * S;
             const float closeW = ImGui::CalcTextSize("\xC3\x97").x * TitleCloseMul();
-            // strip excludes the right-aligned control zone (EDIT + SETTINGS
-            // + ✕) so the buttons below actually receive their clicks
             wm->TitleBar("main", Lang::T(Lang::Str::Inventory),
                 pad + insX + editW + setW + closeW + 2.0f * btnGap + 14.0f * S);
 
             const ImVec2 bodyTop = ImGui::GetCursorScreenPos();
-
-            DrawTitleBarControls(mainSize, editLbl, setLbl, editW, setW, btnGap);
-            ParkPreviewModel(mainSize);
-
-            // controls moved the cursor — body starts back under the titlebar
+            DrawTitleBarControls(tailleGrille, editLbl, setLbl, editW, setW, btnGap);
+            /* Le modele 3D des captures d icones se gare derriere CE panneau :
+               la grande fenetre opaque derriere laquelle il se cachait n existe
+               plus, et le milieu de l ecran montre le monde. */
+            ParkPreviewModel(tailleGrille);
             ImGui::SetCursorScreenPos(bodyTop);
 
-            // ---- left column: tabs + doll + GOLD bar (plain inventory only) ----
-            if (!compact) {
-                ImGui::BeginChild("fab_left", ImVec2(leftW, bodyH), ImGuiChildFlags_None,
-                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-                Equip::Draw();
-                DrawStatsPanel(leftW, bodyH);   // S1/S2: combat + space, above GOLD
-                DrawGoldBar(leftW, bodyH);
-                ImGui::EndChild();
-
-                // vertical divider
-                auto* dl = ImGui::GetWindowDrawList();
-                const float dx = bodyTop.x + leftW + pad;
-                // ★This one asked for Acc(0.18), not Rule(), which is why the
-                // first sweep over the dividers missed it: the search was for
-                // the rule COLOUR, and a divider that names a different colour
-                // is still a divider. Ask the skin instead.
-                Theme::RuleLine(dl, ImVec2(dx, bodyTop.y),
-                                ImVec2(dx, bodyTop.y + bodyH));
-            }
-
-            // ---- right column: ITEMS label + grid (+ GOLD bar when compact) ----
-            const float rightX = compact ? bodyTop.x : bodyTop.x + leftW + pad + 1.0f + pad;
-            ImGui::SetCursorScreenPos(ImVec2(rightX, bodyTop.y));
-            ImGui::BeginChild("fab_right", ImVec2(gridW, bodyH), ImGuiChildFlags_None,
+            ImGui::BeginChild("fab_right", ImVec2(gridW, grilleBodyH), ImGuiChildFlags_None,
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             {
                 SectionLabel(Lang::T(Lang::Str::Items));
@@ -3262,32 +3315,114 @@ namespace FUI::UIRoot
                     }
                 }
             }
-            // ★GI77: drop to the equipment column's first slot line. The label
-            // keeps its own place at the top; only the grid moves.
             ImGui::SetCursorPosY(itemsLabelH);
             Grid::Draw();
             if (compact) {
-                // GOLD strip under the grid; amount clears the trash button
-                DrawGoldBar(gridW, bodyH, 26.0f * S);
+                DrawGoldBar(gridW, grilleBodyH, 26.0f * S);
             }
-            DrawTrashButton(gridW, bodyH);   // F2: bottom-right of the grid column
+            DrawTrashButton(gridW, grilleBodyH);
             ImGui::EndChild();
-
-            // ★The accessory drawer hangs off this window's LEFT edge, which
-            // is outside it -- a window clips to its own rectangle, so the
-            // panel has to be its own. Drawn right after End() with the rect
-            // this frame actually used, so it tracks a window drag exactly.
-            const ImVec2 mainPos = ImGui::GetWindowPos();
-            const ImVec2 mainDim = ImGui::GetWindowSize();
-
             ImGui::End();
 
-            // ★No doll in compact mode, so no drawer hanging off it — the
-            // panel would belong to a column that is not on screen. (The
-            // button lives in the doll's own strip, so it goes with it.)
-            if (!compact) {
-                Equip::DrawDrawer(mainPos, mainDim, Equip::SlotsTopScreen());
+            /* ── le panneau droit : set d equipement, stats, bourse ──
+               En loot/barter il disparait entier, comme la colonne d avant :
+               la fenetre du partenaire occupe ce cote de l attention. */
+            if (compact) {
+                return;
             }
+
+            /* Meme hauteur que la grille : la poupee en haut, les stats et
+               la bourse EPINGLEES en bas (DrawStatsPanel et DrawGoldBar se
+               calent depuis le pied du panneau) — le vide du milieu absorbe
+               la difference, comme dans la reference du proprietaire. */
+            const float equipW = Equip::PanelW();
+            const float equipBodyH = innerH;
+            const ImVec2 tailleEquip(pad + equipW + pad + 2.0f * insX, hautPanneau);
+
+            wm->ApplyNext("vk_equip",
+                ImVec2(io.DisplaySize.x - tailleEquip.x, 0.0f),
+                tailleEquip, WinManager::Anchor::kTopRight, topPad);
+
+            if (!ImGui::Begin("##vulkaar_equip", nullptr, kManagedWinFlags)) {
+                ImGui::End();
+                return;
+            }
+            wm->TitleBar("vk_equip", Lang::T(Lang::Str::PanneauEquipement), pad + insX);
+
+            ImGui::BeginChild("fab_left", ImVec2(equipW, equipBodyH), ImGuiChildFlags_None,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            Equip::Draw();
+
+            /* ── [vulkaar] LES CONTENANTS PORTES VIVENT ICI ──────────────
+               Une sacoche ou un sac a dos EQUIPES (Bandolier et consorts :
+               de vraies pieces d armure) montrent leur grille dans le
+               panneau, sous la poupee — plus de fenetre flottante a aller
+               chercher. La taille de chaque zone est celle de la grille du
+               contenant, et le glisser-deposer y marche dans les deux sens
+               par construction : la cible de depot du mod est geometrique,
+               jamais liee a la fenetre.
+               Zone vide = un cadre en creux : l emplacement existe, le
+               contenant manque. */
+            {
+                std::vector<Grid::ZoneSac> sacs;
+                Grid::SacsPortes(sacs);
+                const Grid::ZoneSac* sacoches[2] = { nullptr, nullptr };
+                const Grid::ZoneSac* dos = nullptr;
+                for (const auto& z : sacs) {
+                    if (z.sacoche) {
+                        if (!sacoches[0]) sacoches[0] = &z;
+                        else if (!sacoches[1]) sacoches[1] = &z;
+                    } else if (!dos) {
+                        dos = &z;
+                    }
+                }
+                std::vector<std::string> montres;
+                const float celG = Grid::CellPx();
+                const float hZones = equipBodyH - StatsPanelH() - BottomStripH()
+                                   - 8.0f * S - ImGui::GetCursorPosY();
+                if (hZones > celG) {
+                    ImGui::BeginChild("vk_zones", ImVec2(equipW, hZones),
+                        ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+                    auto* dlz = ImGui::GetWindowDrawList();
+                    const float etiqH = ImGui::GetTextLineHeightWithSpacing();
+                    char titre[48];
+                    const auto zone = [&](const char* a_titre, const Grid::ZoneSac* a_z) {
+                        const ImVec2 dep = ImGui::GetCursorScreenPos();
+                        dlz->AddText(ImVec2(dep.x + 2.0f * S, dep.y),
+                            ImGui::GetColorU32(a_z ? sk.ink : sk.inkDim), a_titre);
+                        ImGui::SetCursorScreenPos(ImVec2(dep.x, dep.y + etiqH));
+                        if (a_z) {
+                            Grid::DessinerVueSac(a_z->vue);
+                            montres.push_back(a_z->bagKey);
+                        } else {
+                            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+                            const ImVec2 p1(p0.x + 3.0f * celG, p0.y + 2.0f * celG);
+                            dlz->AddRect(p0, p1, ImGui::GetColorU32(sk.inkDim), 3.0f * S);
+                            ImGui::Dummy(ImVec2(3.0f * celG, 2.0f * celG));
+                        }
+                        ImGui::Dummy(ImVec2(1.0f, 5.0f * S));
+                    };
+                    std::snprintf(titre, sizeof(titre), "%s 1", Lang::T(Lang::Str::ZoneSacoche));
+                    zone(titre, sacoches[0]);
+                    std::snprintf(titre, sizeof(titre), "%s 2", Lang::T(Lang::Str::ZoneSacoche));
+                    zone(titre, sacoches[1]);
+                    zone(Lang::T(Lang::Str::ZoneSacADos), dos);
+                    ImGui::EndChild();
+                }
+                Grid::MarquerSacsEnPanneau(montres);
+            }
+
+            DrawStatsPanel(equipW, equipBodyH);
+            DrawGoldBar(equipW, equipBodyH);
+            ImGui::EndChild();
+
+            /* Le tiroir d accessoires pend au bord du panneau — c est lui qui
+               porte les morceaux d armure modulaire en surplus. */
+            const ImVec2 eqPos = ImGui::GetWindowPos();
+            const ImVec2 eqDim = ImGui::GetWindowSize();
+            ImGui::End();
+
+            Equip::DrawDrawer(eqPos, eqDim, Equip::SlotsTopScreen());
         }
     }
 
@@ -3887,6 +4022,9 @@ namespace FUI::UIRoot
                                       // keeps WantTextInput true past the close
         }
         WinManager::GetSingleton()->Save();   // window layout persists (F6)
+        // [vulkaar] la disposition de la grille suit le personnage : le
+        // co-save ne s ecrit jamais sur skymp, ce fichier le remplace.
+        Grid::SauverDispositionFichier();
         if (g_onHide) g_onHide();
         if (ImGui::GetCurrentContext()) {
             ImGui::GetIO().ClearInputKeys();

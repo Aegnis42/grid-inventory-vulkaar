@@ -5067,6 +5067,12 @@ namespace
         ImVec2 defPos(120.0f, 200.0f);
         if (auto* m = wm->Find("main"); m && m->posKnown) {
             defPos = ImVec2(m->pos.x - size.x - 12.0f * S, m->pos.y);
+            // [vulkaar] la grille vit au bord GAUCHE de l ecran : quand il
+            // n y a plus la place a sa GAUCHE, le partenaire se pose a sa
+            // droite — sinon la fenetre du marchand naitrait hors champ.
+            if (defPos.x < 0.0f) {
+                defPos.x = m->pos.x + m->size.x + 12.0f * S;
+            }
         }
         wm->ApplyNext("partner", defPos, size, WinManager::Anchor::kTopLeft, topPad);
         // managed-window rule: WindowPadding must equal the frame inset, else

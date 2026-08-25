@@ -4,6 +4,7 @@
 #include "ui/Fallback.h"
 #include "ui/Grid.h"
 #include "game/Ledger.h"
+#include "game/MonnaiesVulkaar.h"
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
 #include "ui/Lang.h"
@@ -5439,6 +5440,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 auto* entry = pair.second.get();
                 if (!obj || count <= 0) continue;
                 if (obj->IsGold()) { g_gold = count; continue; }
+                // vulkaar : nos trois monnaies suivent le chemin de l'or
+                // vanilla, PAS celui des pieces du mod. Les siennes ont des
+                // tuiles ; les notres ne doivent en avoir aucune, et ne
+                // couter aucune case. C'est la seule facon d'obtenir le
+                // « sans limite » demande : la place ne s'applique pas a ce
+                // qui n'occupe rien.
+                if (MonnaiesVulkaar::NoterSiMonnaie(obj, count)) continue;
                 if (SkipInventoryEntry(obj, count)) continue;   // shared filter (Phase 2)
 
                 // Phase 4/5: cache the barter base value for this form. Coins are
@@ -7204,6 +7212,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     void Rebuild(const std::source_location& a_where)
     {
         NoteRebuildRan(a_where);   // B3-c: provenance, drained at the entry
+        // [vulkaar] la disposition du personnage entre en scene ICI, avant
+        // toute collecte : si le sas vient de changer de personnage, ses
+        // positions remplacent celles de la session precedente.
+        ChargerDispositionFichierSiChange();
         // ★The search set is keyed by tile, so any rebuild can invalidate it.
         // Bumping a counter here and recomputing lazily beats calling into the
         // search from every one of this function's exits.
@@ -7266,6 +7278,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_liveObjs.clear();   // rebuilt alongside g_items
         g_views.clear();
         g_gold = 0;
+        // Au meme endroit que g_gold, et pour la meme raison : une monnaie
+        // tombee a zero garderait sinon son dernier compte affiche.
+        MonnaiesVulkaar::RemettreComptesAZero();
         g_values.clear();   // Phase 4: rebuilt below from live inventory entries
 
         // B3: expire pending removals whose engine transfer never landed —
@@ -8584,7 +8599,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // tiles in open bags (same spill rules as Rebuild). Phase 7: stack
         // buy/take sliders clamp to this so a bulk purchase can't overflow.
         if (a_want <= 0) return 0;
-        if (!a_obj || a_obj->IsGold()) return a_want;
+        // vulkaar : nos monnaies sont exemptees comme l'or vanilla.
+        // CETTE LIGNE NE SE SEPARE PAS DE L'EXCLUSION DE LA COLLECTE. Un
+        // objet sans tuile qui resterait soumis au test de place rendrait
+        // l'argent IMPOSSIBLE A RAMASSER des que la grille est pleine —
+        // et le joueur n'aurait aucun moyen de comprendre pourquoi.
+        if (!a_obj || a_obj->IsGold() || MonnaiesVulkaar::EstMonnaie(a_obj)) return a_want;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) return a_want;
 
@@ -8980,6 +9000,200 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
         }
         return (std::max)(1, n);
+    }
+
+    // ── [vulkaar] les contenants portes ────────────────────────────────
+    namespace
+    {
+        // Sous ce nombre de cases, un contenant porte est une sacoche ;
+        // au-dela, un sac a dos. Le jour ou un contenant le classera mal,
+        // la metatable des defs accepte un champ dedie en une ligne — la
+        // taille suffit pour ceux d aujourd hui.
+        constexpr int kSeuilCasesSacoche = 12;
+        std::set<std::string> g_sacsEnPanneau;
+    }
+
+    int SacsPortes(std::vector<ZoneSac>& a_out)
+    {
+        a_out.clear();
+        for (int vi = 1; vi < static_cast<int>(g_views.size()); ++vi) {
+            const auto& v = g_views[vi];
+            if (v.bagKey == kTrashKey) continue;
+            for (const auto& it : g_items) {
+                if (it.key != v.bagKey) continue;
+                if (it.worn) {
+                    ZoneSac z;
+                    z.bagKey  = v.bagKey;
+                    z.vue     = vi;
+                    z.cols    = v.cols;
+                    z.rows    = v.rows;
+                    z.sacoche = v.cols * v.rows <= kSeuilCasesSacoche;
+                    a_out.push_back(std::move(z));
+                }
+                break;
+            }
+        }
+        return static_cast<int>(a_out.size());
+    }
+
+    void DessinerVueSac(int a_vue)
+    {
+        if (a_vue <= 0 || a_vue >= static_cast<int>(g_views.size())) return;
+        auto& v = g_views[a_vue];
+        // Ouverte tant qu elle vit dans le panneau : c est ce qui rend ses
+        // cases cibles de depot. Le drapeau revient de g_openBags au
+        // prochain Rebuild — des que le sac n est plus porte, il retombe.
+        v.open = true;
+        DrawGridView(v, a_vue);
+    }
+
+    void MarquerSacsEnPanneau(const std::vector<std::string>& a_cles)
+    {
+        g_sacsEnPanneau.clear();
+        g_sacsEnPanneau.insert(a_cles.begin(), a_cles.end());
+    }
+
+    // ── [vulkaar] la disposition par personnage, en fichier ────────────
+    namespace
+    {
+        constexpr const char* kCheminPersonnage =
+            "Data/SKSE/Plugins/GridInventory_personnage.txt";
+
+        // L identifiant que le client TypeScript ecrit au moment du sas.
+        // Chiffres seulement : il entre dans un nom de fichier.
+        std::string IdPersonnage()
+        {
+            std::ifstream f(kCheminPersonnage);
+            if (!f) return {};
+            std::string id;
+            std::getline(f, id);
+            while (!id.empty() &&
+                   (id.back() == '\r' || id.back() == '\n' || id.back() == ' '))
+                id.pop_back();
+            for (const char c : id)
+                if (c < '0' || c > '9') return {};
+            return id;
+        }
+
+        std::string CheminDisposition(const std::string& a_id)
+        {
+            return "Data/SKSE/Plugins/GridInventory_layout_" + a_id + ".ini";
+        }
+    }
+
+    // definie pres du cosave, plus bas dans ce fichier — meme regle pour les
+    // deux persistances.
+    bool IsPersistableKey(const std::string& a_key);
+
+    void SauverDispositionFichier()
+    {
+        const std::string id = IdPersonnage();
+        if (id.empty()) return;   // pas de personnage connu : rien a ecrire
+        std::ofstream f(CheminDisposition(id), std::ios::trunc);
+        if (!f) {
+            SKSE::log::warn("[GRID] disposition: ecriture impossible ({})", id);
+            return;
+        }
+        f << "; disposition du personnage " << id << " — genere, ne pas editer\n";
+        for (const auto& b : g_openBags) f << "b\t" << b << "\n";
+        for (const auto& [key, le] : g_layout) {
+            if (!IsPersistableKey(key)) continue;
+            const LayoutEntry* out = &le;
+            LayoutEntry back;
+            if (le.bag == kTrashKey) {
+                // meme regle que le cosave : une entree parquee en corbeille
+                // se sauve a sa place d AVANT — la corbeille ne survit pas.
+                back.col = -1;
+                back.row = -1;
+                back.count = le.count;
+                if (const auto ri = g_trashReturn.find(key); ri != g_trashReturn.end()) {
+                    back = ri->second;
+                    back.count = le.count;
+                }
+                out = &back;
+            }
+            f << "p\t" << key << "\t" << out->col << "\t" << out->row << "\t"
+              << out->bag << "\t" << out->count << "\t" << out->rot << "\t"
+              << out->coin << "\t" << out->uid << "\t" << out->sig << "\n";
+        }
+        // v7 du cosave : sans la base « deja vu », tout l inventaire se
+        // signalerait comme neuf a la prochaine ouverture.
+        for (const auto& [fid, n] : g_seenCount) {
+            if ((fid >> 24) == 0xFF) continue;
+            f << "s\t" << fid << "\t" << n << "\n";
+        }
+        SKSE::log::info("[GRID] disposition ecrite ({} entrees, personnage {})",
+            g_layout.size(), id);
+    }
+
+    void ChargerDispositionFichierSiChange()
+    {
+        static std::string s_charge;   // l identifiant deja applique
+        const std::string id = IdPersonnage();
+        if (id.empty() || id == s_charge) return;
+        s_charge = id;
+
+        std::ifstream f(CheminDisposition(id));
+        if (!f) {
+            // Premiere connexion de ce personnage : page blanche, plutot
+            // qu heriter de la disposition du personnage precedent.
+            SKSE::log::info("[GRID] disposition: aucun fichier pour {} — premiere fois", id);
+            g_layout.clear();
+            g_openBags.clear();
+            g_layoutLoaded = true;
+            MarkCapacityDirty();
+            return;
+        }
+        std::map<std::string, LayoutEntry> disp;
+        std::set<std::string> sacs;
+        std::string ligne;
+        int vus = 0;
+        while (std::getline(f, ligne)) {
+            if (!ligne.empty() && ligne.back() == '\r') ligne.pop_back();
+            if (ligne.empty() || ligne[0] == ';') continue;
+            std::stringstream ss(ligne);
+            std::string type;
+            std::getline(ss, type, '\t');
+            if (type == "b") {
+                std::string cle;
+                std::getline(ss, cle, '\t');
+                if (!cle.empty()) sacs.insert(cle);
+            } else if (type == "p") {
+                std::string cle;
+                std::string champ;
+                LayoutEntry le;
+                std::getline(ss, cle, '\t');
+                const auto entier = [&](int a_defaut) {
+                    if (!std::getline(ss, champ, '\t')) return a_defaut;
+                    try { return std::stoi(champ); } catch (...) { return a_defaut; }
+                };
+                le.col = entier(0);
+                le.row = entier(0);
+                std::getline(ss, le.bag, '\t');
+                le.count = entier(0);
+                le.rot = entier(0);
+                le.coin = entier(-1);
+                le.uid = static_cast<std::uint16_t>(entier(0));
+                le.sig = static_cast<std::uint16_t>(entier(0));
+                if (!cle.empty()) disp[cle] = le;
+            } else if (type == "s") {
+                std::string a, b;
+                if (std::getline(ss, a, '\t') && std::getline(ss, b, '\t')) {
+                    try {
+                        g_seenCount[static_cast<RE::FormID>(std::stoul(a))] = std::stoi(b);
+                        ++vus;
+                    } catch (...) {}
+                }
+            }
+        }
+        g_layout = std::move(disp);
+        g_openBags = std::move(sacs);
+        // Le fichier fait foi : LoadLayout ne doit pas repasser derriere.
+        g_layoutLoaded = true;
+        MarkCapacityDirty();
+        SKSE::log::info(
+            "[GRID] disposition relue : {} entrees, {} sacs ouverts, {} vus (personnage {})",
+            g_layout.size(), g_openBags.size(), vus, id);
     }
 
     std::vector<std::string> PouchTiles()
@@ -11523,7 +11737,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         const float S = Theme::Scale();
         for (int vi = 1; vi < static_cast<int>(g_views.size()); ++vi) {
             auto& v = g_views[vi];
-            if (!v.open) continue;   // closed bag: holds items, draws no window
+            if (!v.open) continue;
+            // [vulkaar] deja dessine dans le panneau d equipement : lui
+            // ouvrir une fenetre ferait vivre la meme grille deux fois.
+            if (g_sacsEnPanneau.count(v.bagKey)) continue;   // closed bag: holds items, draws no window
             // symmetric 12px margins around the bag grid (scale-aware) +
             // 2x frame inset for tornFrame skins (breathing room)
             // ★+ the skin's title clearance, and the height pays for it (see

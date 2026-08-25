@@ -37,6 +37,15 @@ namespace FUI::Lang
         X(SkinLabel, "SKIN")                                                                                \
         X(LanguageLabel, "LANGUAGE")                                                                        \
         X(Gold, "GOLD")                                                                                     \
+        X(Bourse, "BOURSE")                                                                         \
+        X(BourseSeptime, "Septime")                                                                 \
+        X(BourseMede, "Mède")                                                                       \
+        X(BourseTitus, "Titus")                                                                     \
+        X(PanneauEquipement, "EQUIPMENT SET")                                                       \
+        X(ZoneSacoche, "SATCHEL")                                                                   \
+        X(ZoneSacADos, "BACKPACK")                                                                  \
+        X(SlotWeapon, "Weapon")                                                                     \
+        X(SlotAmmo, "Ammo")                                                                         \
         X(Items, "ITEMS")                                                                                   \
         X(EquipTab, "EQUIP")                                                                                \
         X(CloseHint, "I / ESC to close")                                                                    \
@@ -69,10 +78,10 @@ namespace FUI::Lang
         X(SlotBody, "Body")                                                                                 \
         X(SlotHands, "Hands")                                                                               \
         X(SlotFeet, "Feet")                                                                                 \
+        X(SlotCirclet, "Circlet")                                                                           \
         X(SlotShield, "Shield")                                                                             \
         X(SlotAmulet, "Amulet")                                                                             \
         X(SlotRing, "Ring")                                                                                 \
-        X(SlotCirclet, "Circlet")                                                                           \
         X(SlotEars, "Ears")                                                                                 \
         X(SlotAccessory, "Accessory")                                                                       \
         X(WeapDagger, "Dagger")                                                                             \

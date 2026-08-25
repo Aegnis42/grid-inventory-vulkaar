@@ -4,6 +4,7 @@
 #include "game/Costume.h"
 #include "game/DeltaWatch.h"
 #include "game/Ledger.h"
+#include "game/MonnaiesVulkaar.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
@@ -696,6 +697,48 @@ namespace
                 // The game's Inventory key closes our menu. This sink sits
                 // UPSTREAM of input-context filtering, so it still sees the
                 // raw key while kMenuMode swallows the user event.
+                /*
+                 * [vulkaar] TAB ROUVRE LE MENU CARREFOUR, MEME SOUS SKYMP.
+                 *
+                 * Le client skymp laisse le jeu en mode chargen en permanence
+                 * (enforceLimitationsService : setInChargen(true, true, ...)),
+                 * pour interdire la sauvegarde et l attente en multijoueur.
+                 * Le moteur verrouille la TOUCHE du menu carrefour derriere ce
+                 * meme garde — alors que ses quatre boutons (Objets, Magie,
+                 * Competences, Carte) ne touchent ni a l un ni a l autre. Le
+                 * verrou est plus large que ce qu il protege.
+                 *
+                 * On passe donc par la file de messages : le garde est sur la
+                 * touche, pas sur le menu. La sauvegarde et l attente restent
+                 * interdites — on ne leve RIEN du mode chargen.
+                 */
+                {
+                    auto* uiT = RE::UI::GetSingleton();
+                    auto* cmT = RE::ControlMap::GetSingleton();
+                    auto* ue  = RE::UserEvents::GetSingleton();
+                    auto tscan = (cmT && ue)
+                        ? cmT->GetMappedKey(ue->tweenMenu, RE::INPUT_DEVICE::kKeyboard)
+                        : 0xFF;
+                    if (tscan == 0xFF || tscan == 0xFFFFFFFF) tscan = 0x0F;   // Tab
+                    if (btn->GetIDCode() == tscan && uiT && !uiT->GameIsPaused() &&
+                        !uiT->IsMenuOpen(RE::TweenMenu::MENU_NAME) &&
+                        !uiT->IsMenuOpen("GridInventoryMenu"sv) &&
+                        !FUI::UIRoot::IsTextInputActive()) {
+                        SKSE::GetTaskInterface()->AddUITask([]() {
+                            auto* ui2 = RE::UI::GetSingleton();
+                            // Reverifie sur le fil UI : l etat a pu bouger entre
+                            // la touche et la tache.
+                            if (!ui2 || ui2->GameIsPaused()) return;
+                            if (ui2->IsMenuOpen(RE::TweenMenu::MENU_NAME)) return;
+                            if (auto* mq = RE::UIMessageQueue::GetSingleton()) {
+                                mq->AddMessage(RE::TweenMenu::MENU_NAME,
+                                    RE::UI_MESSAGE_TYPE::kShow, nullptr);
+                                logger::info("[INV] Tab -> TweenMenu (contournement du mode chargen skymp)");
+                            }
+                        });
+                    }
+                }
+
                 if (auto* ui = RE::UI::GetSingleton();
                     ui && ui->IsMenuOpen("GridInventoryMenu"sv)) {
                     auto* cm = RE::ControlMap::GetSingleton();
@@ -2221,6 +2264,7 @@ namespace
         case SKSE::MessagingInterface::kDataLoaded:
             Setup();
             FUI::GoldCoins::InitForms();   // G1: resolve Grid Inventory.esp
+            FUI::MonnaiesVulkaar::InitForms();   // vulkaar : Septime / Mede / Titus
             // ★B3-a: close the loop the ledger opened. Registered once, here,
             // where the forms are already resolved.
             // ★A confirmation commits ITS OWN cell and no other: the slot key

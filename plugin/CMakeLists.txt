@@ -67,6 +67,8 @@ set(SOURCES
     src/game/Inv3D.h
     src/game/GoldCoins.h
     src/game/GoldCoins.cpp
+    src/game/MonnaiesVulkaar.h
+    src/game/MonnaiesVulkaar.cpp
     src/game/BagFilter.h
     src/game/BagFilter.cpp
     src/game/Costume.h
