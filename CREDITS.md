@@ -1,5 +1,19 @@
 # Grid Inventory — Credits / 크레딧
 
+## Fork vulkaar
+
+This fork is maintained by the **vulkaar** project (Skyrim RP multiplayer
+server on skymp) and carries its modifications on top of the upstream
+source — marked `[vulkaar]` in the code and described in the fork section
+of `README.md`. All original work remains credited below; the fork's
+changes are distributed under the same **GPL-3.0** with the same
+modding/linking exceptions.
+
+Ce fork est maintenu par le projet **vulkaar** (serveur RP multijoueur
+Skyrim sur skymp). Les modifications sont marquées `[vulkaar]` dans la
+source et décrites dans `README.md` ; elles sont distribuées sous la même
+licence que l'amont (**GPL-3.0** + exceptions modding/linking).
+
 ## License / 라이선스
 
 This SKSE plugin's source contains code ported from Modex (GPL-3.0).

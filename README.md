@@ -1,4 +1,29 @@
-# Grid Inventory
+# Grid Inventory — fork vulkaar
+
+> **This is a modified fork** of
+> [skypia0147-dev/grid-inventory](https://github.com/skypia0147-dev/grid-inventory)
+> (Grid Inventory by lSmoothl,
+> [Nexus 188733](https://www.nexusmods.com/skyrimspecialedition/mods/188733)),
+> maintained for the **vulkaar** Skyrim RP multiplayer server (skymp).
+> Modifications began on 2026-08-24; each change is dated in the git history
+> and marked `[vulkaar]` in the source. Same license as upstream: GPL-3.0
+> with the modding/linking exceptions (`LICENSE-GPL`, `EXCEPTIONS.txt`).
+>
+> **Ce dépôt est le fork vulkaar** du mod Grid Inventory, modifié pour le
+> serveur RP multijoueur vulkaar (skymp). C'est la source correspondante de
+> la `GridInventory.dll` que le launcher vulkaar installe. Ce qui change par
+> rapport à l'amont :
+>
+> - **la bourse** : trois monnaies (septime, mède, titus) comptées hors
+>   grille, trois vraies cases sans limite au bas du panneau d'équipement ;
+> - **deux panneaux pleine hauteur** : la grille au bord gauche, l'équipement
+>   (mannequin, zones de sacoches et de sac mesurées sur le contenant porté,
+>   statistiques, bourse) au bord droit ;
+> - **240 cases (10×24) pour tous**, et la disposition de chaque personnage
+>   survit à la reconnexion (fichier par personnage — le cosave ne passe
+>   jamais sous skymp) ;
+> - **le menu carrefour (Tab) rendu au joueur** malgré le mode chargen
+>   permanent de skymp.
 
 An SKSE plugin that replaces the Skyrim SE/AE inventory with a Tetris-style
 grid. Every item occupies real squares; containers, merchants and
