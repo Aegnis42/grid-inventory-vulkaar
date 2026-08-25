@@ -2217,11 +2217,30 @@ namespace
                 // bookkeeping — closing after an in-menu right-click fired a
                 // POWER ATTACK (the legacy PrismaUI-era block was for a
                 // context-less overlay and no longer applies).
+                //
+                // [vulkaar] A3 disait vrai À DEUX CONDITIONS — et kPausesGame
+                // est tombée le 25/08/2026 (menu sans pause) : R (dégainer) et
+                // le clic droit atteignaient la couche gameplay pendant que la
+                // grille est ouverte. On suspend les CONTRÔLES DE COMBAT par la
+                // voie haute (ControlMap::ToggleControls), jamais par
+                // inputEventHandlingEnabled — A3 a mesuré ce que ce bricolage
+                // coûte. Les touches du menu (R = jeter un, clic droit =
+                // inspection) ne passent pas par ces handlers : elles
+                // continuent de marcher.
+                if (auto* cm = RE::ControlMap::GetSingleton()) {
+                    cm->ToggleControls(RE::ControlMap::UEFlag::kFighting, false, true);
+                    SKSE::log::info("[INV] controles de combat suspendus (grille ouverte)");
+                }
             },
             []() {   // menu hidden
                 // [vulkaar] une capture pendante meurt avec le menu : jamais
                 // d'impulsion de pause tenue sans pompe pour la relâcher.
                 FUI::IconCache::GetSingleton()->RelacherImpulsionPause();
+                // [vulkaar] ...et le combat revient, symétrique de l'ouverture.
+                if (auto* cm = RE::ControlMap::GetSingleton()) {
+                    cm->ToggleControls(RE::ControlMap::UEFlag::kFighting, true, true);
+                    SKSE::log::info("[INV] controles de combat rendus (grille fermee)");
+                }
             });
 
         if (auto* idm = RE::BSInputDeviceManager::GetSingleton()) {
