@@ -119,9 +119,17 @@ namespace
                 g_movementOff = false;
             }
             // apply capture defs + park the preview model BEFORE this frame
-            // renders. While the menu is open (game paused) GridInventoryMenu::
-            // AdvanceMovie drives Tick - this path covers unpaused frames.
-            FUI::UIRoot::Tick();
+            // renders. While the menu is open GridInventoryMenu::AdvanceMovie
+            // drives Tick - this path covers the frames where it is closed.
+            // [vulkaar] la garde est devenue NÉCESSAIRE : le menu ne met plus
+            // pause, donc ce hook tourne aussi menu ouvert — sans elle,
+            // UIRoot::Tick courrait deux fois par trame.
+            {
+                auto* ui = RE::UI::GetSingleton();
+                if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) {
+                    FUI::UIRoot::Tick();
+                }
+            }
             // ★Every tick, open or not: the CLOSE animation has to keep running
             // after the hotkey is already released, and it is what finally takes
             // the overlay menu down.

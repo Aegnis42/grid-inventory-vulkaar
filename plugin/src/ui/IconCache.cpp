@@ -1599,6 +1599,15 @@ namespace FUI
         bool Capturable(RE::TESBoundObject* a_obj)
         {
             if (!a_obj || a_obj->Is(RE::FormType::LeveledItem)) return false;
+            // [vulkaar] JAMAIS DE CAPTURE SANS VRAIE PAUSE (25/08/2026). Le
+            // menu ne met plus pause (GridMenu.cpp) et Inventory3DManager ne
+            // rend RIEN quand le jeu tourne : une capture armée quand même
+            // écrirait une icône NOIRE dans le pak — un poison persistant.
+            // Cette porte est partagée par tous les chemins de mise en file :
+            // sans pause, pas de file, et l'objet vit sur l'icône 2D de repli.
+            if (auto* ui = RE::UI::GetSingleton(); !ui || !ui->GameIsPaused()) {
+                return false;
+            }
             // GI52 flat style: nothing is ever drawn from a capture, so don't
             // spend a single engine render on one. This is what makes the
             // style's "no first scan" claim literally true.

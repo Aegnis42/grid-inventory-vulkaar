@@ -321,12 +321,17 @@ namespace FUI
         menu->depthPriority = 11;
 
 
-        // kPausesGame is REQUIRED for the engine's item 3D preview: Modex's own
-        // config notes "show3DPreview requires pauseGame; effective only when
-        // both are on" — Inventory3DManager::Render() draws nothing while the
-        // game runs. Realtime policy (PLAN_B A5) is revisited at B-2 via the
-        // icon cache (captures become rare one-shots).
-        menu->menuFlags.set(Flags::kPausesGame, Flags::kDisablePauseMenu);
+        // [vulkaar] PLUS DE PAUSE (25/08/2026, demande du propriétaire) : sur
+        // un serveur skymp le monde continue de toute façon — un client figé
+        // ne fait que se téléporter au retour. Le menu vit donc comme les
+        // menus vanilla dépausés par SkyrimSouls (le contexte kInventory
+        // ci-dessous isole déjà clics et touches de la couche gameplay, note
+        // A3 de main.cpp). Ce que la pause achetait — la capture d'icônes 3D
+        // (Inventory3DManager::Render ne rend rien quand le jeu tourne) — est
+        // verrouillé à la source : Capturable() (IconCache.cpp) refuse de
+        // mettre en file sans vraie pause, et les objets absents du pak
+        // retombent sur l'icône 2D (Fallback), jamais sur une capture noire.
+        menu->menuFlags.set(Flags::kDisablePauseMenu);
 
         // kInventory, NOT kMenuMode/kItemMenu: this is the vanilla
         // InventoryMenu's own context — its controlmap section TRANSLATES the
