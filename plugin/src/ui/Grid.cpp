@@ -5,6 +5,7 @@
 #include "ui/Grid.h"
 #include "game/Ledger.h"
 #include "game/MonnaiesVulkaar.h"
+#include "game/SortiesVulkaar.h"
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
 #include "ui/Lang.h"
@@ -14116,6 +14117,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // where the suppression used to arm -- so the ledger covers the
             // confirm-to-Tick window the counters once covered. The event
             // this call fires confirms the entry; nothing drains by hand.
+            // [vulkaar] la destruction n'emet AUCUNE reference monde : sans ce
+            // mot au serveur skymp, sa reapplication rend l'objet detruit.
+            FUI::SortiesVulkaar::Noter("detruire", d.form, count);
             player->RemoveItem(obj, count, RE::ITEM_REMOVE_REASON::kRemove,
                 ResolveExitUnit(obj, d.uid, d.sig, count, d.fav ? count : 0,
                                 d.xlIdx), nullptr);

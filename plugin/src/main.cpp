@@ -5,6 +5,7 @@
 #include "game/DeltaWatch.h"
 #include "game/Ledger.h"
 #include "game/MonnaiesVulkaar.h"
+#include "game/SortiesVulkaar.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
@@ -2022,6 +2023,9 @@ namespace
                 // create expires into the rebuild sweep once its layout entry
                 // is pruned.
                 FUI::Ledger::Submit(a_obj->GetFormID(), -count, "drop");
+                // [vulkaar] le serveur skymp doit APPRENDRE ce jet, sinon sa
+                // reapplication d'inventaire le defait — voir SortiesVulkaar.h.
+                FUI::SortiesVulkaar::Noter("jeter", a_obj->GetFormID(), count);
                 player->RemoveItem(a_obj, count, RE::ITEM_REMOVE_REASON::kDropping,
                     a_xl, nullptr);   // GI25: the named sub-stack
             });
@@ -2276,6 +2280,7 @@ namespace
             Setup();
             FUI::GoldCoins::InitForms();   // G1: resolve Grid Inventory.esp
             FUI::MonnaiesVulkaar::InitForms();   // vulkaar : Septime / Mede / Titus
+            FUI::SortiesVulkaar::Initialiser();  // vulkaar : journal jets/destructions
             // ★B3-a: close the loop the ledger opened. Registered once, here,
             // where the forms are already resolved.
             // ★A confirmation commits ITS OWN cell and no other: the slot key
