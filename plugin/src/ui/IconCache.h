@@ -111,6 +111,17 @@ namespace FUI
         size_t RetryDeferred();    // queue them with a generous window
         void   ClearDeferred();    // give up on them (they become plain misses)
 
+        // [vulkaar] L'IMPULSION DE PAUSE (25/08/2026). Le menu ne met plus
+        // pause ; or sur certaines machines Inventory3DManager::Render ne rend
+        // rien quand le jeu court. Politique apprise en session : on tente
+        // d'abord SANS pause ; un premier succès prouve qu'aucune impulsion
+        // n'est nécessaire ; un premier timeout à rendus vides active, pour la
+        // session, une pause (numPausesGame) tenue le temps de chaque capture
+        // pendante — quelques trames, imperceptible, et le monde skymp continue
+        // côté serveur. À appeler à la fermeture du menu : jamais d'impulsion
+        // tenue sans pompe pour la relâcher.
+        void RelacherImpulsionPause();
+
         // Editor pin: keep this item's model loaded between captures so a
         // rotation edit re-captures every frame (live editing). While pinned,
         // captures replace a single in-memory slot and skip the disk write —
@@ -244,6 +255,18 @@ namespace FUI
 
     private:
         IconCache() = default;
+
+        // [vulkaar] voir RelacherImpulsionPause() : la politique s'apprend en
+        // session, l'impulsion se tient par trame depuis PostRender.
+        enum class PolitiquePause
+        {
+            kInconnue,   // aucune preuve encore : on capture sans pause
+            kInutile,    // un succès sans pause l'a prouvé : jamais d'impulsion
+            kRequise,    // rendus vides sans pause : impulsion par capture
+        };
+        PolitiquePause m_politiquePause{ PolitiquePause::kInconnue };
+        bool           m_impulsionTenue{ false };
+        void TenirImpulsionPause(bool a_voulue);
 
         // Phase 3: PostRender's front half — timeouts / soft-skip / capture &
         // model / rotation gates. kReady = harvest the capture this frame.

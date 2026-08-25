@@ -2215,6 +2215,9 @@ namespace
                 // context-less overlay and no longer applies).
             },
             []() {   // menu hidden
+                // [vulkaar] une capture pendante meurt avec le menu : jamais
+                // d'impulsion de pause tenue sans pompe pour la relâcher.
+                FUI::IconCache::GetSingleton()->RelacherImpulsionPause();
             });
 
         if (auto* idm = RE::BSInputDeviceManager::GetSingleton()) {

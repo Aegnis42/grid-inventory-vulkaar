@@ -1599,15 +1599,6 @@ namespace FUI
         bool Capturable(RE::TESBoundObject* a_obj)
         {
             if (!a_obj || a_obj->Is(RE::FormType::LeveledItem)) return false;
-            // [vulkaar] JAMAIS DE CAPTURE SANS VRAIE PAUSE (25/08/2026). Le
-            // menu ne met plus pause (GridMenu.cpp) et Inventory3DManager ne
-            // rend RIEN quand le jeu tourne : une capture armée quand même
-            // écrirait une icône NOIRE dans le pak — un poison persistant.
-            // Cette porte est partagée par tous les chemins de mise en file :
-            // sans pause, pas de file, et l'objet vit sur l'icône 2D de repli.
-            if (auto* ui = RE::UI::GetSingleton(); !ui || !ui->GameIsPaused()) {
-                return false;
-            }
             // GI52 flat style: nothing is ever drawn from a capture, so don't
             // spend a single engine render on one. This is what makes the
             // style's "no first scan" claim literally true.
@@ -2082,6 +2073,27 @@ namespace FUI
         // an inspect frame carries no cache key (0): its failures must never
         // reach the PERSISTED fail list
         if (m_pendingInspect) return;
+        // [vulkaar] LE PREMIER TIMEOUT « À RENDUS VIDES » SANS PAUSE tranche la
+        // politique, il ne condamne pas l'objet. Signature exacte : le stamp a
+        // avancé (ItemPreview::Render A tourné, le modèle était là) et pourtant
+        // rien n'a été accepté — c'est le rendu Inventory3D qui reste vide
+        // quand le jeu court, pas un modèle absent ni un disque lent. On passe
+        // en kRequise, et CET objet part en DIFFÉRÉ : il repassera sous
+        // impulsion au lieu de pourrir dans la liste d'échec persistée.
+        if (m_politiquePause == PolitiquePause::kInconnue && !m_impulsionTenue &&
+            std::strstr(a_why, "timeout") != nullptr &&
+            ItemPreview::GetSingleton()->GetCaptureStamp() != m_stampBefore) {
+            m_politiquePause = PolitiquePause::kRequise;
+            SKSE::log::warn(
+                "[ICONS] capture sans pause VIDE : impulsions de pause activees "
+                "pour la session ; '{}' repassera en differe",
+                m_pending.obj->GetName());
+            if (m_deferred.insert(m_pending.key).second) {
+                m_deferredObj[m_pending.key] = m_pending.obj;
+                PersistSlow(m_pending.key);
+            }
+            return;
+        }
         // GI68: one verdict, no attempt counting. Reaching here means either the
         // engine never even started a load (more time cannot help) or the retry
         // pass already gave it ten seconds. Either way it is done.
@@ -2292,7 +2304,19 @@ namespace FUI
             return GateResult::kAbandoned;
         }
 
-        return CaptureAccepted() ? GateResult::kReady : GateResult::kNotReady;
+        if (CaptureAccepted()) {
+            // [vulkaar] Une capture de cache acceptée SANS pause ni impulsion
+            // prouve que cette machine rend très bien sans : la politique est
+            // tranchée pour la session, aucune impulsion ne sera jamais tenue.
+            if (m_politiquePause == PolitiquePause::kInconnue && !m_impulsionTenue &&
+                !m_pendingInspect) {
+                m_politiquePause = PolitiquePause::kInutile;
+                SKSE::log::info(
+                    "[ICONS] capture sans pause reussie : aucune impulsion necessaire ici");
+            }
+            return GateResult::kReady;
+        }
+        return GateResult::kNotReady;
     }
 
     // Are all four acceptance gates open RIGHT NOW?
@@ -2355,8 +2379,38 @@ namespace FUI
         return nullptr;   // accepted
     }
 
+    // [vulkaar] Tient ou relâche l'impulsion de pause — le compteur même que
+    // le moteur incrémente pour un menu kPausesGame (RE::UI::numPausesGame).
+    // Toujours symétrique : une impulsion tenue sans pompe pour la relâcher
+    // gèlerait le jeu pour de bon, d'où RelacherImpulsionPause() sur la
+    // fermeture du menu.
+    void IconCache::TenirImpulsionPause(bool a_voulue)
+    {
+        if (a_voulue == m_impulsionTenue) return;
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui) return;
+        if (a_voulue) {
+            ui->numPausesGame += 1;
+        } else if (ui->numPausesGame > 0) {
+            ui->numPausesGame -= 1;
+        }
+        m_impulsionTenue = a_voulue;
+    }
+
+    void IconCache::RelacherImpulsionPause()
+    {
+        TenirImpulsionPause(false);
+    }
+
     void IconCache::PostRender()
     {
+        // [vulkaar] L'impulsion se décide ICI, une fois par trame de menu :
+        // tenue seulement quand une capture de cache est pendante ET que la
+        // session a prouvé que le rendu sans pause reste vide (kRequise).
+        // Relâchée sitôt la file vide — quelques trames de gel par icône
+        // neuve, rien de plus.
+        TenirImpulsionPause(m_pendingBusy && !m_pendingInspect &&
+                            m_politiquePause == PolitiquePause::kRequise);
         if (!m_pendingBusy) return;
         ++m_frames;
 
