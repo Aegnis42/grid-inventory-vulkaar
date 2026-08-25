@@ -14,6 +14,12 @@
 // L'OFFRE EST VIRTUELLE : glisser un objet dans son panneau ne déplace RIEN
 // (Grid::PorteVersEchange abandonne le carry, l'objet n'a jamais quitté
 // l'inventaire). Les monnaies s'offrent par leurs trois cases dédiées.
+//
+// LE MENU D'INTERACTION vit aussi ici : la touche X (client) écrit son état
+// dans GridInventory_interaction.txt (seq/ouvert/aCible/étiquette), la DLL
+// dessine « Se présenter / Se présenter à tous / Échanger » et répond par
+// les gestes du même nom sur le pont des gestes. Un chien de garde prévient
+// le client quand la racine s'est refermée sous le menu (Échap).
 
 #include <RE/Skyrim.h>
 

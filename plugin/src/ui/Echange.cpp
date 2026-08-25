@@ -27,6 +27,7 @@ namespace FUI::Echange
     {
         constexpr const char* kCheminEtat = "Data/SKSE/Plugins/GridInventory_echange_etat.txt";
         constexpr const char* kCheminGestes = "Data/SKSE/Plugins/GridInventory_echange.txt";
+        constexpr const char* kCheminInteraction = "Data/SKSE/Plugins/GridInventory_interaction.txt";
 
         struct Ligne
         {
@@ -63,6 +64,13 @@ namespace FUI::Echange
         bool g_pret = false;
         int g_ticAttente = 0;
         int g_toastRestant = 0;
+
+        // ---- menu d'interaction (la touche X, côté client) ----
+        unsigned long long g_interSeq = 0;
+        bool g_interOuvert = false;
+        bool g_interACible = false;
+        std::string g_interEtiquette;
+        int g_interDernierDessin = 0;
 
         void EcrireGeste(const char* a_action, const std::string& a_reste)
         {
@@ -181,6 +189,41 @@ namespace FUI::Echange
             }
         }
 
+        /** L'état du menu d'interaction, poussé par le client à chaque appui
+         *  sur X : `seq TAB ouvert TAB aCible TAB étiquette`. Une seule ligne,
+         *  réécrite entière. */
+        void LireInteraction()
+        {
+            std::FILE* f = std::fopen(kCheminInteraction, "r");
+            if (!f) return;
+            char ligne[512];
+            const bool lu = std::fgets(ligne, sizeof(ligne), f) != nullptr;
+            std::fclose(f);
+            if (!lu) return;
+
+            unsigned long long seq = 0;
+            int ouvert = 0, aCible = 0, pos = 0;
+            if (std::sscanf(ligne, "%llu\t%d\t%d\t%n", &seq, &ouvert, &aCible, &pos) < 3) return;
+            if (seq == 0 || seq == g_interSeq) return;
+            g_interSeq = seq;
+
+            std::string etiquette = ligne + pos;
+            while (!etiquette.empty() &&
+                   (etiquette.back() == '\n' || etiquette.back() == '\r')) {
+                etiquette.pop_back();
+            }
+
+            g_interOuvert = (ouvert == 1);
+            g_interACible = (aCible == 1);
+            g_interEtiquette = std::move(etiquette);
+            if (g_interOuvert) {
+                // Le rendu ne tourne que la racine ouverte : on l'ouvre, et la
+                // grâce du chien de garde repart d'ici (kShow prend des trames).
+                g_interDernierDessin = g_ticAttente;
+                UIRoot::Open();
+            }
+        }
+
         // ---- dessin ----
 
         void CaseObjet(ImDrawList* a_dl, const ImVec2& a_p0, RE::FormID a_form, int a_count,
@@ -265,6 +308,54 @@ namespace FUI::Echange
                 }
             }
             ImGui::Dummy(ImVec2(MonnaiesVulkaar::kNb * (cote + ecart), cote));
+        }
+
+        /** LE MENU D'INTERACTION — ce que X ouvre (voulu par le propriétaire,
+         *  25/08/2026) : se présenter (à la cible), se présenter à tous (8 m),
+         *  échanger. Sans cible visée à l'appui, les entrées ciblées sont
+         *  éteintes. Chaque choix envoie son geste et le menu se ferme. */
+        void FenetreInteraction()
+        {
+            g_interDernierDessin = g_ticAttente;
+            const float S = Theme::Scale();
+            const ImGuiIO& io = ImGui::GetIO();
+            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.38f),
+                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::Begin("##vk_interaction", nullptr,
+                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
+                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
+
+            if (g_interACible) {
+                ImGui::Text("Face à %s",
+                    g_interEtiquette.empty() ? "un inconnu" : g_interEtiquette.c_str());
+            } else {
+                ImGui::TextDisabled("Personne dans le regard");
+            }
+            ImGui::Spacing();
+
+            const ImVec2 taille(220.0f * S, 0.0f);
+            ImGui::BeginDisabled(!g_interACible);
+            if (ImGui::Button("Se présenter", taille)) {
+                EcrireGeste("presenter", "");
+                g_interOuvert = false;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::Button("Se présenter à tous", taille)) {
+                EcrireGeste("presenterTous", "");
+                g_interOuvert = false;
+            }
+            ImGui::BeginDisabled(!g_interACible);
+            if (ImGui::Button("Échanger", taille)) {
+                EcrireGeste("echanger", "");
+                g_interOuvert = false;
+            }
+            ImGui::EndDisabled();
+            ImGui::Spacing();
+            if (ImGui::Button("Fermer", taille)) {
+                EcrireGeste("fermerMenu", "");
+                g_interOuvert = false;
+            }
+            ImGui::End();
         }
 
         void FenetreInvitation()
@@ -402,20 +493,40 @@ namespace FUI::Echange
         } else {
             SKSE::log::warn("[ECHANGE] impossible d'ouvrir {} — l'echange restera sourd", kCheminGestes);
         }
+        // Un état d'interaction rescapé d'un crash ferait surgir le menu au
+        // boot : on repart d'une page blanche, le client réécrira au premier X.
+        if (std::FILE* f = std::fopen(kCheminInteraction, "w")) {
+            std::fclose(f);
+        }
     }
 
     void Tick()
     {
         if (!g_pret) return;
-        if (++g_ticAttente % 15 == 0) LireEtat();
+        if (++g_ticAttente % 15 == 0) {
+            LireEtat();
+            LireInteraction();
+        }
         if (g_offreSale && ++g_offreStable >= 20) {
             g_offreSale = false;
             EcrireGeste("offrir", OffreEnTexte());
+        }
+        // Chien de garde : la racine s'est refermée (Échap, Tab) alors que le
+        // client croit le menu ouvert — on le lui dit, sinon le prochain X ne
+        // ferait que « fermer » un menu déjà invisible.
+        if (g_interOuvert && g_ticAttente - g_interDernierDessin > 120) {
+            g_interOuvert = false;
+            EcrireGeste("fermerMenu", "");
         }
     }
 
     void DrawFenetres()
     {
+        // Le menu d'interaction s'efface devant la session d'échange — les
+        // deux ne se chevauchent qu'un battement, le temps de l'aller-retour.
+        if (g_interOuvert && g_phase != Phase::kInvitation && g_phase != Phase::kOuverte) {
+            FenetreInteraction();
+        }
         switch (g_phase) {
         case Phase::kInvitation:
             FenetreInvitation();
