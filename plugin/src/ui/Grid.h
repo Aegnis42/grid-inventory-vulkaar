@@ -792,6 +792,11 @@ namespace FUI::Grid
     // stored into a shelf bag (not a bag itself, not a coin tile, not
     // quest-locked). nullptr otherwise -- peek before committing.
     [[nodiscard]] RE::TESBoundObject* HeldShelfStorable();
+    // [vulkaar] L echange prend le porte SANS transfert moteur : le carry
+    // n est qu un visuel, l objet n a jamais quitte l inventaire, l offre est
+    // virtuelle. Memes exclusions que l etagere ; les MONNAIES vulkaar se
+    // proposent par leurs cases dediees de la fenetre d echange, jamais ici.
+    bool PorteVersEchange(RE::FormID& a_form, int& a_count);
     // Commit it into the open shelf bag: queue the store, note the pending
     // remove, drop the carry. Fills the bundle entry's identity. False when
     // nothing eligible rides the cursor.

@@ -14151,6 +14151,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return g_held->obj;
     }
 
+    // [vulkaar] voir Grid.h : peek + abandon du carry, aucun transfert.
+    bool PorteVersEchange(RE::FormID& a_form, int& a_count)
+    {
+        auto* obj = HeldShelfStorable();
+        if (!obj) return false;
+        if (MonnaiesVulkaar::EstMonnaie(obj)) return false;
+        a_form = obj->GetFormID();
+        a_count = g_held->count;
+        g_held.reset();
+        RequestRebuild();
+        return true;
+    }
+
     bool CommitHeldToShelfBag(RE::FormID& a_form, int& a_count,
                               std::uint16_t& a_sig, int& a_rot,
                               std::uint8_t& a_glow, bool& a_stolen)

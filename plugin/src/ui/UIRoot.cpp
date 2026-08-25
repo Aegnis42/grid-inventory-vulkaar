@@ -13,6 +13,7 @@
 #include "ui/LootBarter.h"
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
+#include "ui/Echange.h"
 #include "ui/Lang.h"
 #include "ui/Sfx.h"
 #include "ui/Theme.h"
@@ -4408,6 +4409,7 @@ namespace FUI::UIRoot
         DrawMainWindow();
         Grid::DrawBagWindows();   // one managed window per open bag (E2/E5)
         LootBarter::DrawWindows();  // container/merchant partner window (loot/barter)
+        Echange::DrawFenetres();    // [vulkaar] invitation / fenetre d echange / toasts
         DrawSettingsWindow();     // ⚙ popup (scale / skin / language)
         Equip::DrawLoadoutWindows();   // L2: loadout +buy / delete confirm (top level)
         Grid::DrawPouchWindow();       // G2: coin-pouch withdraw (top level)
@@ -4475,6 +4477,7 @@ namespace FUI::UIRoot
         // back (sold, dropped, taken by a script) and stands the carrier down.
         DualRing::Tick();
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
+        Echange::Tick();                  // [vulkaar] pont etat/gestes de l echange
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)
         Grid::CapacityTick();       // W1+W2: weight bypass / space overload
         GoldCoins::Tick();          // G1: mirror the gold ledger into coins

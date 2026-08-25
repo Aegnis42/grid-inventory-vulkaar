@@ -6,6 +6,7 @@
 #include "game/Ledger.h"
 #include "game/MonnaiesVulkaar.h"
 #include "game/SortiesVulkaar.h"
+#include "ui/Echange.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
@@ -2300,6 +2301,7 @@ namespace
             FUI::GoldCoins::InitForms();   // G1: resolve Grid Inventory.esp
             FUI::MonnaiesVulkaar::InitForms();   // vulkaar : Septime / Mede / Titus
             FUI::SortiesVulkaar::Initialiser();  // vulkaar : journal jets/destructions
+            FUI::Echange::Initialiser();         // vulkaar : pont de la fenetre d echange
             // ★B3-a: close the loop the ledger opened. Registered once, here,
             // where the forms are already resolved.
             // ★A confirmation commits ITS OWN cell and no other: the slot key
