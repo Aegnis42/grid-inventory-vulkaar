@@ -1352,6 +1352,70 @@ namespace
         }
         g_modelDefsDirty = true;
 
+        // [vulkaar] Le bois du bucheron a SA place dans la planche (decision
+        // du proprietaire, 27/08/2026) : le tronc barre 9 cases de large sur
+        // 3 de haut et ne s'empile que par 2 -- porter du bois coute de la
+        // place, c'est le metier. Semees comme les sacs d'usine : une ligne
+        // utilisateur dans GridInventory_items.ini gagne toujours.
+        static constexpr std::pair<const char*, const char*> kVulkaarDefs[] = {
+            // ---- le tronc (8 qualites, vulkaar_metiers.esp) ----
+            { "vulkaar_metiers.esp|0x0009A0",
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+            { "vulkaar_metiers.esp|0x0009A1",
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+            { "vulkaar_metiers.esp|0x0009A2",
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+            { "vulkaar_metiers.esp|0x0009A3",
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+            { "vulkaar_metiers.esp|0x0009A4",
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+            { "vulkaar_metiers.esp|0x0009A5",
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+            { "vulkaar_metiers.esp|0x0009A6",
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+            { "vulkaar_metiers.esp|0x0009A7",
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+            // ---- la buche (8 qualites, vulkaar_metiers.esp) ----
+            { "vulkaar_metiers.esp|0x0009B0",
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+            { "vulkaar_metiers.esp|0x0009B1",
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+            { "vulkaar_metiers.esp|0x0009B2",
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+            { "vulkaar_metiers.esp|0x0009B3",
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+            { "vulkaar_metiers.esp|0x0009B4",
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+            { "vulkaar_metiers.esp|0x0009B5",
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+            { "vulkaar_metiers.esp|0x0009B6",
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+            { "vulkaar_metiers.esp|0x0009B7",
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+            // ---- le petit bois (8 qualites, vulkaar_metiers.esp) ----
+            { "vulkaar_metiers.esp|0x0009B8",
+              "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
+            { "vulkaar_metiers.esp|0x0009B9",
+              "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
+            { "vulkaar_metiers.esp|0x0009BA",
+              "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
+            { "vulkaar_metiers.esp|0x0009BB",
+              "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
+            { "vulkaar_metiers.esp|0x0009BC",
+              "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
+            { "vulkaar_metiers.esp|0x0009BD",
+              "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
+            { "vulkaar_metiers.esp|0x0009BE",
+              "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
+            { "vulkaar_metiers.esp|0x0009BF",
+              "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
+        };
+        for (const auto& [key, val] : kVulkaarDefs) {
+            if (!g_itemDefs.contains(key)) {
+                g_itemDefs[key] = ParseItemDef(val, ItemDef{});
+            }
+        }
+
         // ★Typed bags: an accept token naming a filter that does not exist is
         // the quiet failure mode of this whole feature — the bag simply takes
         // nothing and looks like a routing bug. Name it at load, once.
