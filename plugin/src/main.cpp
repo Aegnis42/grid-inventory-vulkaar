@@ -1352,72 +1352,71 @@ namespace
         }
         g_modelDefsDirty = true;
 
-        // [vulkaar] Le bois du bucheron a SA place dans la planche. Revu le
-        // 27/08/2026 sur retour du proprietaire (« le tronc n'est pas dans le
-        // bon sens ; divise sa taille par 2 en largeur ; la buche = le tronc
-        // divise par 4 en longueur »).
+        // [vulkaar] Le bois du bucheron a SA place dans la planche.
         //
-        // LA CAPTURE DRESSE LE TRONC, elle ne le couche pas. MESURE au journal
-        // du greffon (« [ICONS] cached 'Tronc' 389x193 », « 'Buche' 389x48 »,
-        // remontees a travers les passes) : a rx:-90 le sprite brut fait
-        // 192 x 778 -- LONGUEUR SUR Y, DIAMETRE SUR X, et 778/192 = 4.05 colle
-        // a l'OBND du nif (432/106 = 4.08). Une premiere lecture avait conclu
-        // l'inverse depuis une capture d'ecran ou l'objet avait ete tourne a la
-        // main dans la planche : croire le journal, jamais l'oeil.
+        // ★LA VIGNETTE EST UNE PHOTO, PAS UN DESSIN RETOUCHE. Regle posee par
+        // le proprietaire le 27/08/2026, apres qu'il eut lache une buche au
+        // sol : « ce n'est pas le meme model 3d que celui de l'inventaire ».
+        // Il avait raison, et c'etait ma faute — j'avais fait emprunter a la
+        // buche le modele du tronc (modelfrom) puis coupe l'image au quart
+        // (cropy), et aminci le tronc au dessin (sqx). L'objet du monde, lui,
+        // n'avait pas bouge : l'inventaire mentait sur ce qu'on portait.
         //
-        // Crop et squish se raisonnent donc dans CES axes-la, puis spin:1
-        // couche les pixels dans le cadre 9x3 voulu par le proprietaire :
-        //   tronc  sqx:0.50  le DIAMETRE de moitie -- « par 2 en largeur »
-        //                    (« longueur » designe l'autre axe : il l'emploie
-        //                    pour la buche, les deux mots ne se confondent pas)
-        //          spin:1    couche : le cadre fait 9 de large sur 3 de haut
-        //          w:9 h:3   l'empreinte qu'il avait demandee, inchangee
-        //   buche  modelfrom le TRONC lui-meme : c'est le meme bois
-        //          cropy:0.25 le quart CENTRAL de la LONGUEUR ; les deux
-        //                    bouts nets sont les traits de scie
-        //          sqx:0.50  le meme diametre aminci que son tronc
-        //          scale:0.75 pour que le rondin affiche fasse EXACTEMENT le
-        //                    quart du tronc affiche (fit 3x3 : 2.85 cases
-        //                    x0.75 = 2.14 = 8.55/4) et garde son diametre
+        // Ces champs de cuisson EXISTENT toujours (ItemDef.h) et restent bons
+        // a prendre pour un cas ou l'image doit differer sciemment. Ils ne
+        // servent PLUS ici : deux objets qui different a l'oeil doivent
+        // differer par leur MODELE, dans l'esp, pas par leur vignette.
+        //
+        // Ce qui reste est du CADRAGE, qui ne change pas l'objet :
+        //   spin:1  couche les pixels. A rx:-90 la capture sort DEBOUT
+        //           (192 x 778 mesure au journal du greffon : longueur sur Y,
+        //           diametre sur X, 778/192 = 4.05 colle a l'OBND du nif,
+        //           432/106 = 4.08) alors que le cadre du tronc fait 9 de
+        //           large sur 3 de haut. Une premiere lecture avait conclu
+        //           l'inverse depuis une capture d'ecran ou l'objet avait ete
+        //           tourne a la main : croire le journal, jamais l'oeil.
+        //   w/h     l'emprise demandee par le proprietaire, et scale le zoom
+        //           dans la tuile (draw seul, hors cle de cache).
+        //
         // Semees comme les sacs d'usine : une ligne utilisateur dans
         // GridInventory_items.ini gagne toujours -- le proprietaire ajuste en
         // jeu (bouton EDIT), Save, et sa ligne prime sur celles-ci.
         static constexpr std::pair<const char*, const char*> kVulkaarDefs[] = {
             // ---- le tronc (8 qualites, vulkaar_metiers.esp) ----
             { "vulkaar_metiers.esp|0x0009A0",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, spin:1" },
             { "vulkaar_metiers.esp|0x0009A1",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, spin:1" },
             { "vulkaar_metiers.esp|0x0009A2",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, spin:1" },
             { "vulkaar_metiers.esp|0x0009A3",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, spin:1" },
             { "vulkaar_metiers.esp|0x0009A4",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, spin:1" },
             { "vulkaar_metiers.esp|0x0009A5",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, spin:1" },
             { "vulkaar_metiers.esp|0x0009A6",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, spin:1" },
             { "vulkaar_metiers.esp|0x0009A7",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, spin:1" },
             // ---- la buche (8 qualites) : le tronc de la meme planche,
             //      scie au quart -- voir l'en-tete du bloc ----
             { "vulkaar_metiers.esp|0x0009B0",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, spin:1" },
             { "vulkaar_metiers.esp|0x0009B1",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, spin:1" },
             { "vulkaar_metiers.esp|0x0009B2",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, spin:1" },
             { "vulkaar_metiers.esp|0x0009B3",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, spin:1" },
             { "vulkaar_metiers.esp|0x0009B4",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, spin:1" },
             { "vulkaar_metiers.esp|0x0009B5",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, spin:1" },
             { "vulkaar_metiers.esp|0x0009B6",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, spin:1" },
             { "vulkaar_metiers.esp|0x0009B7",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, spin:1" },
             // ---- le petit bois (8 qualites, vulkaar_metiers.esp) ----
             { "vulkaar_metiers.esp|0x0009B8",
               "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
