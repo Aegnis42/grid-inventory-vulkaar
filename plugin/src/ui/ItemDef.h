@@ -62,6 +62,32 @@ namespace FUI
         // and has to keep behaving exactly as before.
         std::string accept;
         int   stack = 0;     // G3: per-item stack cap (0 = category default)
+        // ★[vulkaar] Bake-time sprite tailoring. Skyrim nodes only scale
+        // uniformly, so per-axis work happens on the CAPTURED sprite instead:
+        // crop keeps the CENTRAL fraction of the capture (a log cropped to a
+        // quarter of its height becomes a sawn round, both cut ends clean),
+        // squish then area-resamples per axis (a log at sqx 0.5 is a slimmer
+        // log). Both run at bake time in IconCache::PostRender, so every
+        // screen (grid, shadow, trade, wheel) receives an already-tailored
+        // sprite and no draw site knows these fields exist. Both join the
+        // cache key ONLY when set, so untouched items keep their pak entries.
+        float sqx = 1.0f;    // per-axis sprite squish, X (1 = untouched)
+        float sqy = 1.0f;    // per-axis sprite squish, Y
+        float cropx = 1.0f;  // central fraction of the capture kept, X
+        float cropy = 1.0f;  // central fraction of the capture kept, Y
+        // ★[vulkaar] Quarter turns applied to the BAKED sprite (0..3,
+        // clockwise). rx/ry/rz turn the MODEL and depend on the engine's
+        // Euler convention, which cannot be reasoned out from the source —
+        // whereas a quarter turn on the pixels is exact, lossless and
+        // verifiable. Use it to stand a long item up; keep rx/ry/rz for the
+        // face it shows. Crop and squish are expressed in CAPTURE axes and
+        // run BEFORE this, so they never move under a spin.
+        int spin = 0;
+        // ★[vulkaar] Capture ANOTHER form's model in this item's place —
+        // "Plugin.esp|0xNNNNNN". The world object keeps its own nif; only the
+        // icon borrows. Born for the log family: a firewood round whose icon
+        // is the felled-log nif cropped to a quarter.
+        std::string modelfrom;
     };
 
     // the old per-module names — every one is THIS struct now. Kept so call
@@ -140,6 +166,12 @@ namespace FUI
             // add nothing to their line.
             { "laz",    &ItemDef::lightAz, nullptr,      -180.0f,  180.0f,   0, DefRule::kIfNonZero },
             { "lel",    &ItemDef::lightEl, nullptr,       -80.0f,   80.0f,   0, DefRule::kIfNonZero },
+            // [vulkaar] bake-time tailoring — 1.0 means "untouched", omitted
+            { "sqx",    &ItemDef::sqx,     nullptr,        0.05f,    4.0f,    2, DefRule::kIfNotOne },
+            { "sqy",    &ItemDef::sqy,     nullptr,        0.05f,    4.0f,    2, DefRule::kIfNotOne },
+            { "cropx",  &ItemDef::cropx,   nullptr,        0.05f,    1.0f,    2, DefRule::kIfNotOne },
+            { "cropy",  &ItemDef::cropy,   nullptr,        0.05f,    1.0f,    2, DefRule::kIfNotOne },
+            { "spin",   nullptr,          &ItemDef::spin,  0.0f,     3.0f,    0, DefRule::kIfPositive },
         };
 
         // token position ANCHORED at a field boundary (start / after ',' or
@@ -189,6 +221,8 @@ namespace FUI
         if (d.shape.empty()) d.shape = a_base.shape;
         d.accept = detail::FieldStr(a_val, "accept");
         if (d.accept.empty()) d.accept = a_base.accept;
+        d.modelfrom = detail::FieldStr(a_val, "modelfrom");
+        if (d.modelfrom.empty()) d.modelfrom = a_base.modelfrom;
         for (const auto& f : detail::kDefFields) {
             const float base = f.fmem ? a_base.*(f.fmem)
                                       : static_cast<float>(a_base.*(f.imem));
@@ -236,6 +270,7 @@ namespace FUI
         // accept is the general-purpose bag — writing "accept:" for those would
         // churn every existing line in the shipped ini for no information
         if (a_def.bag && !a_def.accept.empty()) emit("accept:" + a_def.accept);
+        if (!a_def.modelfrom.empty()) emit("modelfrom:" + a_def.modelfrom);
         return line;
     }
 }

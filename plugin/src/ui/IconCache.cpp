@@ -14,6 +14,7 @@
 // this is the same trade the D3D11 dependency already makes.
 #include <wincodec.h>
 
+#include <cstdlib>   // strtoul: the local id half of a "Plugin.esp|0xNNNN" token
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -615,11 +616,24 @@ namespace FUI
         // angles costs one re-capture each way rather than two.
         float laz = 0.0f, lel = 0.0f;
         CaptureLightFor(a_def, laz, lel);
-        return static_cast<std::uint32_t>(static_cast<int>(a_def.rx)) * 73856093u ^
+        std::uint32_t h =
+               static_cast<std::uint32_t>(static_cast<int>(a_def.rx)) * 73856093u ^
                static_cast<std::uint32_t>(static_cast<int>(a_def.ry)) * 19349663u ^
                static_cast<std::uint32_t>(static_cast<int>(a_def.rz)) * 83492791u ^
                static_cast<std::uint32_t>(static_cast<int>(laz)) * 2654435761u ^
                static_cast<std::uint32_t>(static_cast<int>(lel)) * 40503u;
+        // ★[vulkaar] Bake-time tailoring changes the PIXELS, so it belongs in
+        // the key — but ONLY when set: folding a constant term in for every
+        // item would shift every key at once and orphan the whole pak. An
+        // untouched item hashes exactly as it always has.
+        const auto q = [](float v) { return static_cast<std::uint32_t>(
+            static_cast<int>(v * 100.0f + 0.5f)); };
+        if (a_def.cropx < 0.995f) h ^= q(a_def.cropx) * 97u;
+        if (a_def.cropy < 0.995f) h ^= q(a_def.cropy) * 57885161u;
+        if (std::fabs(a_def.sqx - 1.0f) > 0.005f) h ^= q(a_def.sqx) * 31u;
+        if (std::fabs(a_def.sqy - 1.0f) > 0.005f) h ^= q(a_def.sqy) * 8191u;
+        if (a_def.spin > 0) h ^= static_cast<std::uint32_t>(a_def.spin) * 2971215073u;
+        return h;
     }
 
     // Model-shared slot: FNV-1a of the normalised world-model path. Items
@@ -732,9 +746,99 @@ namespace FUI
         return s_ids.contains(a_obj->GetFormID());
     }
 
+    // ★[vulkaar] The form the CAPTURE actually photographs. A def may say
+    // modelfrom:"Plugin.esp|0xNNNNNN" — then the icon borrows THAT form's
+    // model (the firewood round shows the felled-log nif) while the world
+    // object keeps its own. Resolving the substitute form here, before the
+    // engine is ever involved, means the model-shared cache slot, the
+    // mesh-exists probe and the same-nif fast path all follow for free.
+    static RE::TESBoundObject* CaptureSubject(RE::TESBoundObject* a_obj, const IconDef& a_def)
+    {
+        if (a_def.modelfrom.empty()) return a_obj;
+        // ★Memoised: this sits on KeyFor, which every visible tile calls every
+        // frame — a plugin lookup per tile per frame would be pure waste. The
+        // load order cannot change while the game runs, so one resolution per
+        // token holds for the session. A failed lookup is NOT cached: too
+        // early (no data handler yet) must be retried, not latched.
+        static std::unordered_map<std::string, RE::TESBoundObject*> s_resolved;
+        if (const auto it = s_resolved.find(a_def.modelfrom); it != s_resolved.end()) {
+            return it->second;
+        }
+        const auto bar = a_def.modelfrom.find('|');
+        if (bar == std::string::npos) return a_obj;
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        if (!dh) return a_obj;   // too early — try again next call
+        const auto local = static_cast<RE::FormID>(
+            std::strtoul(a_def.modelfrom.c_str() + bar + 1, nullptr, 16));
+        // same resolution IsUnobtainable uses, a few lines up: local id +
+        // plugin name through the data handler, then the form by full id
+        const auto full = dh->LookupFormID(local, a_def.modelfrom.substr(0, bar));
+        if (!full) {
+            SKSE::log::warn("[ICONS] modelfrom '{}' resolves to nothing", a_def.modelfrom);
+            return a_obj;
+        }
+        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(full);
+        if (!obj) return a_obj;
+        s_resolved[a_def.modelfrom] = obj;
+        return obj;
+    }
+
+    // ★[vulkaar] Per-axis area resample of an RGBA sprite — the SAME
+    // alpha-weighted box filter the budget downscale below uses (a plain
+    // average pulls edge colour toward the transparent margin and rings the
+    // sprite). Split out because the bake-time squish needs it with an
+    // ARBITRARY per-axis ratio, where the budget pass always preserves
+    // aspect.
+    static std::vector<std::uint8_t> ResampleArea(
+        const std::vector<std::uint8_t>& a_src, int a_sw, int a_sh, int a_nw, int a_nh)
+    {
+        std::vector<std::uint8_t> out(static_cast<size_t>(a_nw) * a_nh * 4);
+        const double fx = static_cast<double>(a_sw) / a_nw;
+        const double fy = static_cast<double>(a_sh) / a_nh;
+        for (int y = 0; y < a_nh; ++y) {
+            const double y0 = y * fy, y1 = (y + 1) * fy;
+            const int iy0 = static_cast<int>(y0);
+            const int iy1 = (std::min)(a_sh - 1, static_cast<int>(std::ceil(y1)) - 1);
+            for (int x = 0; x < a_nw; ++x) {
+                const double x0 = x * fx, x1 = (x + 1) * fx;
+                const int ix0 = static_cast<int>(x0);
+                const int ix1 = (std::min)(a_sw - 1, static_cast<int>(std::ceil(x1)) - 1);
+                double aw = 0.0, wsum = 0.0, c[3] = { 0.0, 0.0, 0.0 };
+                for (int sy = iy0; sy <= iy1; ++sy) {
+                    const double wy = (std::min)(y1, sy + 1.0) - (std::max)(y0, 1.0 * sy);
+                    if (wy <= 0.0) continue;
+                    for (int sx = ix0; sx <= ix1; ++sx) {
+                        const double wx = (std::min)(x1, sx + 1.0) - (std::max)(x0, 1.0 * sx);
+                        if (wx <= 0.0) continue;
+                        const auto* s = &a_src[(static_cast<size_t>(sy) * a_sw + sx) * 4];
+                        const double w = wx * wy;
+                        const double a = s[3] * w;
+                        wsum += w;
+                        aw += a;
+                        c[0] += s[0] * a; c[1] += s[1] * a; c[2] += s[2] * a;
+                    }
+                }
+                auto* dp = &out[(static_cast<size_t>(y) * a_nw + x) * 4];
+                if (aw > 0.0) {
+                    dp[0] = static_cast<std::uint8_t>(std::lround(c[0] / aw));
+                    dp[1] = static_cast<std::uint8_t>(std::lround(c[1] / aw));
+                    dp[2] = static_cast<std::uint8_t>(std::lround(c[2] / aw));
+                } else {
+                    dp[0] = dp[1] = dp[2] = 0;
+                }
+                dp[3] = wsum > 0.0
+                    ? static_cast<std::uint8_t>(std::clamp<long>(
+                          std::lround(aw / wsum), 0, 255))
+                    : 0;
+            }
+        }
+        return out;
+    }
+
     std::uint64_t IconCache::KeyFor(RE::TESBoundObject* a_obj, const IconDef& a_def) const
     {
-        return (static_cast<std::uint64_t>(ModelSlot32(a_obj)) << 32) | RotHash(a_def);
+        return (static_cast<std::uint64_t>(ModelSlot32(CaptureSubject(a_obj, a_def))) << 32) |
+               RotHash(a_def);
     }
 
     std::uint64_t IconCache::LegacyKeyFor(RE::TESBoundObject* a_obj, const IconDef& a_def) const
@@ -1937,9 +2041,12 @@ namespace FUI
                 // fail list on purpose: the probe is instant, so re-deciding
                 // every session costs nothing and the item heals itself the
                 // moment the missing mesh is installed.
-                if (MeshMissing(p.obj)) {
+                // [vulkaar] probe the form the capture will PHOTOGRAPH — with
+                // modelfrom set, that is another form's mesh, not this one's
+                RE::TESBoundObject* subject = CaptureSubject(p.obj, ResolveDef(p.obj));
+                if (MeshMissing(subject)) {
                     SKSE::log::warn("[ICONS] '{}' skipped: mesh not found ('{}')",
-                        p.obj->GetName(), ModelPathOf(p.obj));
+                        p.obj->GetName(), ModelPathOf(subject));
                     continue;
                 }
                 if (!m_icons.contains(p.key)) {
@@ -2020,7 +2127,9 @@ namespace FUI
         const float screenCap =
             ImGui::GetIO().DisplaySize.y / ItemPreview::kSafetyMargin - 8.0f;
         if (screenCap > 64.0f) boxPx = (std::min)(boxPx, screenCap);
-        pv->Request(m_pending.obj, ImVec2(0.0f, 0.0f),
+        // [vulkaar] the engine loads the CAPTURE SUBJECT's model — the def
+        // (angles, light, bake tailoring) stays the TILE item's own
+        pv->Request(CaptureSubject(m_pending.obj, def), ImVec2(0.0f, 0.0f),
             ImVec2(boxPx, boxPx), -1.0f, 0.0f, 0.0f, &def);
         if (m_pending.boost > 0.0f) {
             pv->BoostCapture(m_pending.boost);   // B4: resume the clip-boost ladder
@@ -2820,6 +2929,67 @@ namespace FUI
             }
         }
 
+
+        // ★[vulkaar] BAKE-TIME TAILORING, before the budget downscale. Two
+        // passes, both keyed in RotHash so the pak never serves a stale cut:
+        //   crop  — keep the CENTRAL cropx/cropy fraction of the capture. A
+        //           felled log cropped to a quarter of its height becomes a
+        //           sawn round: both cut ends are the crop's clean edges.
+        //   squish — per-axis area resample (sqx/sqy). Skyrim nodes only
+        //           scale uniformly, so a slimmer log is made HERE, on the
+        //           pixels. Every screen then receives the tailored sprite —
+        //           no draw site knows these fields exist.
+        // The full-screen inspect is exempt: it rotates freely, and a fixed
+        // crop on a turning model would cut through the wrong axis.
+        if (!m_pendingInspect) {
+            const IconDef vd = ResolveDef(m_pending.obj);
+            if (vd.cropx < 0.995f || vd.cropy < 0.995f) {
+                const int cw = std::clamp(
+                    static_cast<int>(trimW * (std::min)(1.0f, vd.cropx) + 0.5f), 1, trimW);
+                const int ch = std::clamp(
+                    static_cast<int>(trimH * (std::min)(1.0f, vd.cropy) + 0.5f), 1, trimH);
+                const int cx = (trimW - cw) / 2;
+                const int cy = (trimH - ch) / 2;
+                std::vector<std::uint8_t> cropped(static_cast<size_t>(cw) * ch * 4);
+                for (int y = 0; y < ch; ++y) {
+                    std::memcpy(cropped.data() + static_cast<size_t>(y) * cw * 4,
+                        sprite.data() + (static_cast<size_t>(cy + y) * trimW + cx) * 4,
+                        static_cast<size_t>(cw) * 4);
+                }
+                sprite.swap(cropped);
+                trimW = cw;
+                trimH = ch;
+            }
+            if (std::fabs(vd.sqx - 1.0f) > 0.005f || std::fabs(vd.sqy - 1.0f) > 0.005f) {
+                const int nw = (std::max)(1, static_cast<int>(trimW * vd.sqx + 0.5f));
+                const int nh = (std::max)(1, static_cast<int>(trimH * vd.sqy + 0.5f));
+                auto squished = ResampleArea(sprite, trimW, trimH, nw, nh);
+                sprite.swap(squished);
+                trimW = nw;
+                trimH = nh;
+            }
+            // ★Quarter turns LAST, on the finished pixels: a transpose plus a
+            // flip, so standing a log up costs no resample and no guess about
+            // the engine's Euler convention.
+            if (const int turns = vd.spin & 3; turns != 0) {
+                for (int t = 0; t < turns; ++t) {
+                    std::vector<std::uint8_t> turned(
+                        static_cast<size_t>(trimW) * trimH * 4);
+                    // clockwise: dst(x,y) = src(x' = y, y' = trimH-1-x)
+                    const int nw = trimH, nh = trimW;
+                    for (int y = 0; y < nh; ++y) {
+                        for (int x = 0; x < nw; ++x) {
+                            const auto* s =
+                                &sprite[(static_cast<size_t>(trimH - 1 - x) * trimW + y) * 4];
+                            std::memcpy(&turned[(static_cast<size_t>(y) * nw + x) * 4], s, 4);
+                        }
+                    }
+                    sprite.swap(turned);
+                    trimW = nw;
+                    trimH = nh;
+                }
+            }
+        }
 
         // ★Store at the size the TILE can actually show, not the size we
         // captured at. Rendering the model large is what buys the detail

@@ -1,4 +1,4 @@
-﻿#include "api/HostApi.h"
+#include "api/HostApi.h"
 #include "game/BagFilter.h"
 #include "game/Census.h"
 #include "game/Costume.h"
@@ -1352,46 +1352,64 @@ namespace
         }
         g_modelDefsDirty = true;
 
-        // [vulkaar] Le bois du bucheron a SA place dans la planche (decision
-        // du proprietaire, 27/08/2026) : le tronc barre 9 cases de large sur
-        // 3 de haut et ne s'empile que par 2 -- porter du bois coute de la
-        // place, c'est le metier. Semees comme les sacs d'usine : une ligne
-        // utilisateur dans GridInventory_items.ini gagne toujours.
+        // [vulkaar] Le bois du bucheron a SA place dans la planche. Revu le
+        // 27/08/2026 sur retour du proprietaire (« le tronc n'est pas dans le
+        // bon sens ; divise sa taille par 2 en largeur ; la buche = le tronc
+        // divise par 4 en longueur »).
+        //
+        // LA CAPTURE COUCHE LE TRONC : a rx:-90 le sprite sort horizontal --
+        // longueur sur X, diametre sur Y (mesure a l'ecran, la convention
+        // d'Euler du moteur ne se deduit pas de la source). Tout se regle donc
+        // dans les axes de la CAPTURE, puis spin:1 redresse les pixels :
+        //   tronc  sqy:0.50  le diametre de moitie -- « par 2 en largeur »
+        //          spin:1    debout, comme toute piece longue de la planche
+        //          w:3 h:9   l'empreinte suit le sens du dessin
+        //   buche  modelfrom le TRONC lui-meme : c'est le meme bois
+        //          cropx:0.25 le quart CENTRAL de la longueur ; les deux
+        //                    bouts nets sont les traits de scie
+        //          sqy:0.50  le meme diametre aminci que son tronc
+        //          scale:0.75 pour que le rondin affiche fasse EXACTEMENT le
+        //                    quart du tronc affiche (fit 3x3 : 2.85 cases
+        //                    x0.75 = 2.14 = 8.55/4) et garde son diametre
+        // Semees comme les sacs d'usine : une ligne utilisateur dans
+        // GridInventory_items.ini gagne toujours -- le proprietaire ajuste en
+        // jeu (bouton EDIT), Save, et sa ligne prime sur celles-ci.
         static constexpr std::pair<const char*, const char*> kVulkaarDefs[] = {
             // ---- le tronc (8 qualites, vulkaar_metiers.esp) ----
             { "vulkaar_metiers.esp|0x0009A0",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A1",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A2",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A3",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A4",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A5",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A6",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
+              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A7",
-              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2" },
-            // ---- la buche (8 qualites, vulkaar_metiers.esp) ----
+              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
+            // ---- la buche (8 qualites) : le tronc de la meme planche,
+            //      scie au quart -- voir l'en-tete du bloc ----
             { "vulkaar_metiers.esp|0x0009B0",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B1",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B2",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B3",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B4",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B5",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B6",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B7",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:5" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             // ---- le petit bois (8 qualites, vulkaar_metiers.esp) ----
             { "vulkaar_metiers.esp|0x0009B8",
               "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
