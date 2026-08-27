@@ -1357,17 +1357,25 @@ namespace
         // bon sens ; divise sa taille par 2 en largeur ; la buche = le tronc
         // divise par 4 en longueur »).
         //
-        // LA CAPTURE COUCHE LE TRONC : a rx:-90 le sprite sort horizontal --
-        // longueur sur X, diametre sur Y (mesure a l'ecran, la convention
-        // d'Euler du moteur ne se deduit pas de la source). Tout se regle donc
-        // dans les axes de la CAPTURE, puis spin:1 redresse les pixels :
-        //   tronc  sqy:0.50  le diametre de moitie -- « par 2 en largeur »
-        //          spin:1    debout, comme toute piece longue de la planche
-        //          w:3 h:9   l'empreinte suit le sens du dessin
+        // LA CAPTURE DRESSE LE TRONC, elle ne le couche pas. MESURE au journal
+        // du greffon (« [ICONS] cached 'Tronc' 389x193 », « 'Buche' 389x48 »,
+        // remontees a travers les passes) : a rx:-90 le sprite brut fait
+        // 192 x 778 -- LONGUEUR SUR Y, DIAMETRE SUR X, et 778/192 = 4.05 colle
+        // a l'OBND du nif (432/106 = 4.08). Une premiere lecture avait conclu
+        // l'inverse depuis une capture d'ecran ou l'objet avait ete tourne a la
+        // main dans la planche : croire le journal, jamais l'oeil.
+        //
+        // Crop et squish se raisonnent donc dans CES axes-la, puis spin:1
+        // couche les pixels dans le cadre 9x3 voulu par le proprietaire :
+        //   tronc  sqx:0.50  le DIAMETRE de moitie -- « par 2 en largeur »
+        //                    (« longueur » designe l'autre axe : il l'emploie
+        //                    pour la buche, les deux mots ne se confondent pas)
+        //          spin:1    couche : le cadre fait 9 de large sur 3 de haut
+        //          w:9 h:3   l'empreinte qu'il avait demandee, inchangee
         //   buche  modelfrom le TRONC lui-meme : c'est le meme bois
-        //          cropx:0.25 le quart CENTRAL de la longueur ; les deux
+        //          cropy:0.25 le quart CENTRAL de la LONGUEUR ; les deux
         //                    bouts nets sont les traits de scie
-        //          sqy:0.50  le meme diametre aminci que son tronc
+        //          sqx:0.50  le meme diametre aminci que son tronc
         //          scale:0.75 pour que le rondin affiche fasse EXACTEMENT le
         //                    quart du tronc affiche (fit 3x3 : 2.85 cases
         //                    x0.75 = 2.14 = 8.55/4) et garde son diametre
@@ -1377,39 +1385,39 @@ namespace
         static constexpr std::pair<const char*, const char*> kVulkaarDefs[] = {
             // ---- le tronc (8 qualites, vulkaar_metiers.esp) ----
             { "vulkaar_metiers.esp|0x0009A0",
-              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A1",
-              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A2",
-              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A3",
-              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A4",
-              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A5",
-              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A6",
-              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
             { "vulkaar_metiers.esp|0x0009A7",
-              "w:3, h:9, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqy:0.50, spin:1" },
+              "w:9, h:3, rx:-90, ry:0, rz:0, scale:1.00, stack:2, sqx:0.50, spin:1" },
             // ---- la buche (8 qualites) : le tronc de la meme planche,
             //      scie au quart -- voir l'en-tete du bloc ----
             { "vulkaar_metiers.esp|0x0009B0",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B1",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B2",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B3",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B4",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B5",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B6",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             { "vulkaar_metiers.esp|0x0009B7",
-              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqy:0.50, cropx:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
+              "w:3, h:3, rx:-90, ry:0, rz:0, scale:0.75, stack:5, sqx:0.50, cropy:0.25, spin:1, modelfrom:vulkaar_metiers.esp|0x0009A0" },
             // ---- le petit bois (8 qualites, vulkaar_metiers.esp) ----
             { "vulkaar_metiers.esp|0x0009B8",
               "w:2, h:2, rx:-90, ry:0, rz:0, scale:1.00, stack:10" },
