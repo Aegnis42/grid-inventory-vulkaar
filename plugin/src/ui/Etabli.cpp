@@ -1,0 +1,564 @@
+#include "ui/Etabli.h"
+
+#include "ui/Grid.h"
+#include "ui/IconCache.h"
+#include "ui/Theme.h"
+#include "ui/UIRoot.h"
+
+#include <imgui.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+// Voir Etabli.h pour l'architecture. Ici : le parsing TSV de l'état, la
+// composition de l'écran, et l'écriture des gestes.
+
+namespace FUI::Etabli
+{
+    namespace
+    {
+        constexpr const char* kCheminEtat = "Data/SKSE/Plugins/GridInventory_etabli_etat.txt";
+        constexpr const char* kCheminGestes = "Data/SKSE/Plugins/GridInventory_etabli.txt";
+
+        constexpr int kNbQualites = 8;
+
+        struct Ingredient
+        {
+            RE::FormID  form = 0;
+            std::string edid;              // repli quand la forme est introuvable
+            int         requis = 0;
+            int         possede[kNbQualites] = {};
+        };
+
+        struct Geste
+        {
+            std::string id;
+            std::string nom;
+            std::string rayon;
+            std::string metier;
+            int         niveau = 1;
+            RE::FormID  produit = 0;
+            std::string produitNom;
+            int         min = 1;
+            int         max = 1;
+            int         qualiteMax = 1;
+            std::vector<Ingredient> ingredients;
+        };
+
+        struct Rayon
+        {
+            std::string id;
+            std::string nom;
+        };
+
+        // ---- état reçu (le serveur fait foi) ----
+        bool                      g_ouvert = false;
+        std::string               g_titre;
+        std::string               g_message;
+        std::string               g_qualites[kNbQualites];
+        std::vector<Rayon>        g_rayons;
+        std::vector<Geste>        g_gestes;
+        unsigned long long        g_seqEtat = 0;
+
+        // ---- état de l'écran (local, jamais envoyé) ----
+        std::string g_rayonChoisi;          // vide = tous
+        int         g_qualiteChoisie = 1;
+        char        g_recherche[64] = {};
+        std::string g_gesteChoisi;
+        int         g_messageRestant = 0;   // trames avant effacement du bandeau
+
+        // ---- l'aperçu (mode INSPECT de l'IconCache : sa propre texture) ----
+        RE::FormID g_apercuArme = 0;        // ce que Tick a demandé
+        float      g_apRx = -90.0f, g_apRy = 0.0f, g_apRz = 0.0f;
+        bool       g_apercuActif = false;
+
+        // ---- plomberie ----
+        unsigned long long g_seqGeste = 0;
+        bool               g_pret = false;
+
+        void EcrireGeste(const char* a_action, const std::string& a_reste)
+        {
+            if (!g_pret) return;
+            std::FILE* f = std::fopen(kCheminGestes, "a");
+            if (!f) return;
+            if (a_reste.empty()) std::fprintf(f, "%llu\t%s\n", ++g_seqGeste, a_action);
+            else std::fprintf(f, "%llu\t%s\t%s\n", ++g_seqGeste, a_action, a_reste.c_str());
+            std::fclose(f);
+        }
+
+        /** La forme du jeu derrière un formId. Nulle = le plugin n'est pas
+         *  chargé chez ce joueur : on retombera sur l'EDID du serveur. */
+        RE::TESBoundObject* Forme(RE::FormID a_id)
+        {
+            return a_id == 0 ? nullptr : RE::TESForm::LookupByID<RE::TESBoundObject>(a_id);
+        }
+
+        /** Le nom LISIBLE d'un objet. Le serveur ne l'a pas pour les
+         *  ingrédients — sa table ne porte qu'un EDID technique. Nous, si. */
+        std::string NomDe(RE::FormID a_id, const std::string& a_repli)
+        {
+            if (auto* f = Forme(a_id)) {
+                const char* n = f->GetName();
+                if (n && *n) return n;
+            }
+            return a_repli;
+        }
+
+        const Geste* GesteChoisi()
+        {
+            for (const auto& g : g_gestes) {
+                if (g.id == g_gesteChoisi) return &g;
+            }
+            return nullptr;
+        }
+
+        /** Combien de lots ce geste permet à cette qualité, sac en main. Le
+         *  serveur refera le calcul : ceci n'est QUE de l'affichage. */
+        int LotsFaisables(const Geste& a_g, int a_qualite)
+        {
+            if (a_qualite < 1 || a_qualite > kNbQualites) return 0;
+            if (a_qualite > a_g.qualiteMax) return 0;
+            if (a_g.ingredients.empty()) return 0;
+            int mini = 999;
+            for (const auto& i : a_g.ingredients) {
+                if (i.requis <= 0) continue;
+                mini = (std::min)(mini, i.possede[a_qualite - 1] / i.requis);
+            }
+            return mini == 999 ? 0 : mini;
+        }
+
+        std::string EnMinuscules(const std::string& a_s)
+        {
+            std::string r = a_s;
+            std::transform(r.begin(), r.end(), r.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return r;
+        }
+
+        // ── la lecture de l'état ──────────────────────────────────────────
+
+        /** Découpe une ligne TSV en champs. Le lecteur reste sans état : un
+         *  simple parcours, comme celui de l'échange. */
+        int Champs(char* a_ligne, char* a_out[], int a_max)
+        {
+            int n = 0;
+            char* p = a_ligne;
+            a_out[n++] = p;
+            while (*p && n < a_max) {
+                if (*p == '\t') {
+                    *p = '\0';
+                    a_out[n++] = p + 1;
+                }
+                ++p;
+            }
+            // Le saut de ligne final ne fait partie d'aucun champ.
+            for (int i = 0; i < n; ++i) {
+                char* fin = a_out[i] + std::strlen(a_out[i]);
+                while (fin > a_out[i] && (fin[-1] == '\n' || fin[-1] == '\r')) *--fin = '\0';
+            }
+            return n;
+        }
+
+        void LireEtat()
+        {
+            std::FILE* f = std::fopen(kCheminEtat, "r");
+            if (!f) return;
+
+            unsigned long long seq = 0;
+            bool ouvert = false;
+            std::string titre, message;
+            std::string qualites[kNbQualites];
+            std::vector<Rayon> rayons;
+            std::vector<Geste> gestes;
+
+            char ligne[2048];
+            char* c[16];
+            while (std::fgets(ligne, sizeof(ligne), f)) {
+                const int n = Champs(ligne, c, 16);
+                if (n < 2) continue;
+                if (std::strcmp(c[0], "seq") == 0) {
+                    seq = std::strtoull(c[1], nullptr, 10);
+                } else if (std::strcmp(c[0], "phase") == 0) {
+                    ouvert = std::strcmp(c[1], "ouverte") == 0;
+                } else if (std::strcmp(c[0], "titre") == 0) {
+                    titre = c[1];
+                } else if (std::strcmp(c[0], "message") == 0) {
+                    message = c[1];
+                } else if (std::strcmp(c[0], "qual") == 0 && n >= 3) {
+                    const int rang = std::atoi(c[1]);
+                    if (rang >= 1 && rang <= kNbQualites) qualites[rang - 1] = c[2];
+                } else if (std::strcmp(c[0], "cat") == 0 && n >= 3) {
+                    rayons.push_back(Rayon{ c[1], c[2] });
+                } else if (std::strcmp(c[0], "geste") == 0 && n >= 11) {
+                    Geste g;
+                    g.id = c[1];
+                    g.nom = c[2];
+                    g.rayon = c[3];
+                    g.niveau = std::atoi(c[4]);
+                    g.produit = static_cast<RE::FormID>(std::strtoul(c[5], nullptr, 16));
+                    g.produitNom = c[6];
+                    g.min = std::atoi(c[7]);
+                    g.max = std::atoi(c[8]);
+                    g.qualiteMax = std::atoi(c[9]);
+                    g.metier = c[10];
+                    gestes.push_back(std::move(g));
+                } else if (std::strcmp(c[0], "ing") == 0 && n >= 6) {
+                    // Une ligne `ing` suit TOUJOURS le geste qu'elle décrit :
+                    // le service les écrit dans cet ordre. On la range donc
+                    // sur le dernier geste lu, sans rechercher son id.
+                    if (gestes.empty() || gestes.back().id != c[1]) continue;
+                    Ingredient i;
+                    i.form = static_cast<RE::FormID>(std::strtoul(c[2], nullptr, 16));
+                    i.edid = c[3];
+                    i.requis = std::atoi(c[4]);
+                    const char* p = c[5];
+                    for (int q = 0; q < kNbQualites && p && *p; ++q) {
+                        i.possede[q] = std::atoi(p);
+                        const char* virgule = std::strchr(p, ',');
+                        p = virgule ? virgule + 1 : nullptr;
+                    }
+                    gestes.back().ingredients.push_back(std::move(i));
+                }
+            }
+            std::fclose(f);
+
+            // RIEN N'EST COMMIS TANT QUE LE SEQ N'A PAS BOUGÉ : le fichier est
+            // relu quatre fois par seconde, et une lecture qui tombe pendant
+            // la réécriture verrait des lignes tronquées.
+            if (seq == 0 || seq == g_seqEtat) return;
+            g_seqEtat = seq;
+
+            const bool avant = g_ouvert;
+            g_ouvert = ouvert;
+            g_titre = std::move(titre);
+            g_rayons = std::move(rayons);
+            g_gestes = std::move(gestes);
+            for (int q = 0; q < kNbQualites; ++q) g_qualites[q] = std::move(qualites[q]);
+
+            if (!message.empty()) {
+                g_message = std::move(message);
+                g_messageRestant = 420;   // ~7 s à 60 fps
+            }
+
+            if (g_ouvert && !avant) {
+                // L'établi s'ouvre : on repart d'un écran neuf, et on ouvre la
+                // racine — sans elle, UIRoot::Render n'est jamais appelé.
+                g_rayonChoisi.clear();
+                g_recherche[0] = '\0';
+                g_gesteChoisi = g_gestes.empty() ? std::string() : g_gestes.front().id;
+                g_qualiteChoisie = 1;
+                UIRoot::Open();
+            }
+            if (!g_ouvert && avant) {
+                g_gesteChoisi.clear();
+            }
+
+            // Le geste choisi a pu disparaître du plateau (niveau perdu à
+            // l'oubli, ingrédient consommé) : on ne garde jamais un pointeur
+            // sur du vide.
+            if (!g_gesteChoisi.empty() && GesteChoisi() == nullptr) {
+                g_gesteChoisi = g_gestes.empty() ? std::string() : g_gestes.front().id;
+            }
+        }
+
+        // ── les morceaux de l'écran ───────────────────────────────────────
+
+        /** La rangée des rayons, en tête de colonne. « Tous » d'abord. */
+        void RangeeRayons(float a_largeur)
+        {
+            const float S = Theme::Scale();
+            const int nb = static_cast<int>(g_rayons.size()) + 1;
+            const float espace = 4.0f * S;
+            const float cote = (std::max)(28.0f * S, (a_largeur - espace * (nb - 1)) / (std::max)(1, nb));
+
+            for (int i = 0; i < nb; ++i) {
+                const bool tous = (i == 0);
+                const std::string& id = tous ? std::string() : g_rayons[i - 1].id;
+                const char* libelle = tous ? "Tous" : g_rayons[i - 1].nom.c_str();
+                const bool actif = (g_rayonChoisi == id);
+
+                if (i > 0) ImGui::SameLine(0.0f, espace);
+                if (actif) ImGui::PushStyleColor(ImGuiCol_Button, Theme::Acc(0.35f));
+                ImGui::PushID(i);
+                if (ImGui::Button(libelle, ImVec2(cote, 34.0f * S))) {
+                    g_rayonChoisi = id;
+                }
+                ImGui::PopID();
+                if (actif) ImGui::PopStyleColor();
+            }
+        }
+
+        /** Les huit qualités. Un rang que la main ne sait pas faire, ou que le
+         *  sac ne peut pas fournir, est ÉTEINT — et pour deux raisons
+         *  différentes, qui ne se confondent pas. */
+        void RangeeQualites(float a_largeur, const Geste* a_g)
+        {
+            const float S = Theme::Scale();
+            const float espace = 3.0f * S;
+            const float cote = (std::max)(22.0f * S, (a_largeur - espace * (kNbQualites - 1)) / kNbQualites);
+
+            for (int q = 1; q <= kNbQualites; ++q) {
+                const bool horsMain = (a_g == nullptr) || (q > a_g->qualiteMax);
+                const bool horsSac = (a_g != nullptr) && !horsMain && LotsFaisables(*a_g, q) == 0;
+                const bool actif = (g_qualiteChoisie == q);
+
+                if (q > 1) ImGui::SameLine(0.0f, espace);
+                ImGui::PushID(1000 + q);
+                if (actif) ImGui::PushStyleColor(ImGuiCol_Button, Theme::Acc(0.45f));
+                ImGui::BeginDisabled(horsMain);
+                char n[8];
+                std::snprintf(n, sizeof(n), "%d", q);
+                if (ImGui::Button(n, ImVec2(cote, 28.0f * S))) g_qualiteChoisie = q;
+                ImGui::EndDisabled();
+                if (actif) ImGui::PopStyleColor();
+                ImGui::PopID();
+
+                if (ImGui::IsItemHovered()) {
+                    const char* nom = g_qualites[q - 1].empty() ? "?" : g_qualites[q - 1].c_str();
+                    if (horsMain) ImGui::SetTooltip("%s — ta main ne sait pas encore", nom);
+                    else if (horsSac) ImGui::SetTooltip("%s — il te manque de quoi", nom);
+                    else ImGui::SetTooltip("%s", nom);
+                }
+            }
+        }
+
+        /** La liste des fabrications, filtrée par rayon et par recherche. */
+        void ListeGestes()
+        {
+            const float S = Theme::Scale();
+            const std::string filtre = EnMinuscules(g_recherche);
+
+            for (const auto& g : g_gestes) {
+                if (!g_rayonChoisi.empty() && g.rayon != g_rayonChoisi) continue;
+                if (!filtre.empty() && EnMinuscules(g.nom).find(filtre) == std::string::npos) continue;
+
+                const bool actif = (g.id == g_gesteChoisi);
+                ImGui::PushID(g.id.c_str());
+                if (ImGui::Selectable("##ligne", actif, 0, ImVec2(0.0f, 26.0f * S))) {
+                    g_gesteChoisi = g.id;
+                    // Une qualité hors de portée du nouveau geste se replie
+                    // sur ce qu'il sait faire, plutôt que de rester éteinte.
+                    if (g_qualiteChoisie > g.qualiteMax) g_qualiteChoisie = g.qualiteMax;
+                }
+                ImGui::SameLine(8.0f * S);
+                const bool faisable = LotsFaisables(g, g_qualiteChoisie) > 0;
+                if (!faisable) ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.45f));
+                ImGui::TextUnformatted(g.nom.c_str());
+                if (!faisable) ImGui::PopStyleColor();
+
+                char niv[24];
+                std::snprintf(niv, sizeof(niv), "NIV %d", g.niveau);
+                const float largeurNiv = ImGui::CalcTextSize(niv).x;
+                ImGui::SameLine(ImGui::GetContentRegionMax().x - largeurNiv - 6.0f * S);
+                ImGui::TextDisabled("%s", niv);
+                ImGui::PopID();
+            }
+        }
+
+        /** L'aperçu de l'objet : la capture d'inspection, dessinée en grand
+         *  par-dessus le monde. Pas d'icône encore ? On ne met rien : un carré
+         *  de couleur au milieu de l'écran serait pire que du vide. */
+        void Apercu(const ImVec2& a_centre, float a_cote)
+        {
+            auto* icones = IconCache::GetSingleton();
+            if (!icones) return;
+            const IconCache::Icon* ic = icones->InspectIcon();
+            if (!ic || !ic->srv) return;
+
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            const ImVec2 p0(a_centre.x - a_cote * 0.5f, a_centre.y - a_cote * 0.5f);
+            const ImVec2 p1(a_centre.x + a_cote * 0.5f, a_centre.y + a_cote * 0.5f);
+            dl->AddImage(reinterpret_cast<ImTextureID>(ic->srv), p0, p1);
+        }
+
+        /** Le panneau de droite : le nom, la recette, et le bouton. */
+        void PanneauDetail(const Geste* a_g, const ImVec2& a_pos, const ImVec2& a_taille)
+        {
+            const float S = Theme::Scale();
+            ImGui::SetNextWindowPos(a_pos, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(a_taille, ImGuiCond_Always);
+            ImGui::Begin("##vk_etabli_detail", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
+
+            if (a_g == nullptr) {
+                ImGui::TextDisabled("Rien à fabriquer ici.");
+                ImGui::Spacing();
+                ImGui::TextWrapped("Cet établi ne sert que les métiers que tu exerces.");
+                ImGui::End();
+                return;
+            }
+
+            const std::string nom = NomDe(a_g->produit, a_g->produitNom);
+            ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
+            ImGui::TextUnformatted(nom.c_str());
+            ImGui::PopStyleColor();
+
+            const char* nomQualite = g_qualites[g_qualiteChoisie - 1].empty()
+                ? "?" : g_qualites[g_qualiteChoisie - 1].c_str();
+            if (a_g->min == a_g->max) {
+                ImGui::TextDisabled("×%d, qualité %s", a_g->min, nomQualite);
+            } else {
+                ImGui::TextDisabled("×%d à %d, qualité %s", a_g->min, a_g->max, nomQualite);
+            }
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextDisabled("Recette");
+            for (const auto& i : a_g->ingredients) {
+                const int ai = i.possede[g_qualiteChoisie - 1];
+                const bool assez = ai >= i.requis;
+                if (!assez) ImGui::PushStyleColor(ImGuiCol_Text, Theme::Col(ImVec4(0.80f, 0.32f, 0.28f, 1.0f)));
+                ImGui::Text("%s  %d / %d", NomDe(i.form, i.edid).c_str(), ai, i.requis);
+                if (!assez) ImGui::PopStyleColor();
+            }
+
+            const int lots = LotsFaisables(*a_g, g_qualiteChoisie);
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::BeginDisabled(lots <= 0);
+            if (ImGui::Button("Fabriquer", ImVec2(-1.0f, 32.0f * S))) {
+                char reste[128];
+                std::snprintf(reste, sizeof(reste), "%s\t%d", a_g->id.c_str(), g_qualiteChoisie);
+                EcrireGeste("crafter", reste);
+            }
+            ImGui::EndDisabled();
+            if (lots > 0) ImGui::TextDisabled("de quoi en faire %d", lots);
+            else ImGui::TextDisabled("il te manque de quoi");
+
+            ImGui::End();
+        }
+    }
+
+    // ── l'interface publique ──────────────────────────────────────────────
+
+    void Initialiser()
+    {
+        if (std::FILE* f = std::fopen(kCheminGestes, "w")) {
+            std::fclose(f);
+            g_pret = true;
+            SKSE::log::info("[ETABLI] pont pret ({})", kCheminGestes);
+        } else {
+            SKSE::log::warn("[ETABLI] impossible d'ouvrir {} — l'etabli restera sourd", kCheminGestes);
+        }
+        // UN ÉTAT RESCAPÉ D'UN PLANTAGE ferait surgir l'établi au lancement du
+        // jeu : au boot g_seqEtat repart à 0, et le premier Tick lirait un
+        // « phase ouverte » vieux d'une session. On repart d'une page blanche.
+        if (std::FILE* f = std::fopen(kCheminEtat, "w")) {
+            std::fclose(f);
+        }
+    }
+
+    void Tick()
+    {
+        LireEtat();
+
+        if (g_messageRestant > 0) {
+            if (--g_messageRestant == 0) g_message.clear();
+        }
+
+        /* L'APERÇU S'ARME ICI, hors de la trame : ClearInspect libère une SRV
+           que la liste d'affichage de la trame en cours peut encore référencer
+           (le motif est écrit dans IconCache.h). */
+        auto* icones = IconCache::GetSingleton();
+        if (!icones) return;
+
+        const Geste* g = g_ouvert ? GesteChoisi() : nullptr;
+        const RE::FormID voulu = (g != nullptr) ? g->produit : 0;
+        if (voulu == g_apercuArme) return;
+
+        g_apercuArme = voulu;
+        if (voulu == 0) {
+            if (g_apercuActif) {
+                icones->ClearInspect();
+                g_apercuActif = false;
+            }
+            return;
+        }
+        if (auto* forme = Forme(voulu)) {
+            icones->SetInspect(forme, g_apRx, g_apRy, g_apRz);
+            g_apercuActif = true;
+        }
+    }
+
+    bool Ouvert()
+    {
+        return g_ouvert;
+    }
+
+    bool Fermer()
+    {
+        if (!g_ouvert) return false;
+        EcrireGeste("fermer", "");
+        g_ouvert = false;
+        g_gesteChoisi.clear();
+        return true;
+    }
+
+    void Dessiner()
+    {
+        if (!g_ouvert) return;
+
+        const ImGuiIO& io = ImGui::GetIO();
+        const float S = Theme::Scale();
+        const float insX = Theme::FrameInsetX();
+        const float pad = Theme::PadX() * S;
+
+        /* LA COLONNE DE GAUCHE prend la place du sac : même bord, même
+           hauteur. La maquette du propriétaire (28/08/2026) la veut étroite —
+           le monde reste visible au milieu, et l'objet s'y montre en grand. */
+        const float largeur = (std::min)(io.DisplaySize.x * 0.40f, 560.0f * S);
+        ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(largeur, io.DisplaySize.y), ImGuiCond_Always);
+        ImGui::Begin("##vk_etabli", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoCollapse);
+
+        const float interne = largeur - 2.0f * (pad + insX);
+        const Geste* choisi = GesteChoisi();
+
+        RangeeRayons(interne);
+        ImGui::Spacing();
+        RangeeQualites(interne, choisi);
+        ImGui::Spacing();
+
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##vk_etabli_rech", "recherche", g_recherche, sizeof(g_recherche));
+        ImGui::Separator();
+
+        ImGui::BeginChild("##vk_etabli_liste", ImVec2(0.0f, 0.0f), false);
+        ListeGestes();
+        ImGui::EndChild();
+        ImGui::End();
+
+        /* L'APERÇU, au milieu du monde — comme la maquette. */
+        const float libre = io.DisplaySize.x - largeur;
+        const ImVec2 centre(largeur + libre * 0.5f, io.DisplaySize.y * 0.34f);
+        Apercu(centre, (std::min)(libre * 0.55f, io.DisplaySize.y * 0.42f));
+
+        /* LA RECETTE, sous l'aperçu et calée à droite. */
+        const ImVec2 tailleDetail((std::min)(libre * 0.55f, 420.0f * S), 260.0f * S);
+        const ImVec2 posDetail(
+            largeur + libre * 0.5f - tailleDetail.x * 0.5f,
+            io.DisplaySize.y * 0.60f);
+        PanneauDetail(choisi, posDetail, tailleDetail);
+
+        /* LE BANDEAU : ce que le serveur vient de répondre. */
+        if (!g_message.empty()) {
+            ImGui::SetNextWindowPos(ImVec2(largeur + libre * 0.5f, io.DisplaySize.y - 60.0f * S),
+                ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+            ImGui::Begin("##vk_etabli_msg", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
+                    ImGuiWindowFlags_NoFocusOnAppearing);
+            ImGui::TextUnformatted(g_message.c_str());
+            ImGui::End();
+        }
+    }
+}

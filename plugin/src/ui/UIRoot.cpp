@@ -14,6 +14,7 @@
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
 #include "ui/Echange.h"
+#include "ui/Etabli.h"
 #include "ui/Lang.h"
 #include "ui/Sfx.h"
 #include "ui/Theme.h"
@@ -3827,7 +3828,9 @@ namespace FUI::UIRoot
         // closing out of turn.
         enum class Layer : std::uint8_t {
             kInspect, kTrashConfirm, kLootPopup, kEquipPopup,
-            kTrash, kPouch, kRecharge, kSettings, kEdit, kSearch, kCount
+            kTrash, kPouch, kRecharge, kSettings, kEdit, kSearch,
+            kEtabli,   // [vulkaar] l ecran de fabrication
+            kCount
         };
 
         [[nodiscard]] bool LayerOpen(Layer a_l)
@@ -3843,6 +3846,7 @@ namespace FUI::UIRoot
             case Layer::kSettings:     return g_showSettings.load();
             case Layer::kEdit:         return Editor::IsEditMode();
             case Layer::kSearch:       return Grid::SearchActive();
+            case Layer::kEtabli:       return Etabli::Ouvert();
             default:                   return false;
             }
         }
@@ -3866,6 +3870,13 @@ namespace FUI::UIRoot
                 Editor::ToggleEditMode();   // same path as clicking EDIT off
                 return true;
             case Layer::kSearch:       return Grid::ClearSearch();
+            case Layer::kEtabli:
+                /* L etabli a ouvert la racine lui-meme : la refermer avec
+                   lui evite au joueur un second Echap devant un inventaire
+                   qu il n a pas demande. */
+                if (!Etabli::Fermer()) return false;
+                UIRoot::Close();
+                return true;
             default: return false;
             }
         }
@@ -4406,7 +4417,13 @@ namespace FUI::UIRoot
         // leaving and re-entering the same widget ticks again
         if (!ImGui::IsAnyItemHovered()) Sfx::HoverReset();
         WinManager::GetSingleton()->SetDragLock(Grid::IsHolding());   // F1
-        DrawMainWindow();
+        /* [vulkaar] L ETABLI REMPLACE LES DEUX PANNEAUX. La racine doit
+           rester ouverte (UIRoot::Render n est appele que par elle), mais
+           le sac et le set d equipement n ont rien a faire la : la maquette
+           veut la liste de fabrication a gauche et l objet en grand au
+           milieu du monde. Les fenetres de sac, elles, restent permises. */
+        if (Etabli::Ouvert()) Etabli::Dessiner();
+        else DrawMainWindow();
         Grid::DrawBagWindows();   // one managed window per open bag (E2/E5)
         LootBarter::DrawWindows();  // container/merchant partner window (loot/barter)
         Echange::DrawFenetres();    // [vulkaar] invitation / fenetre d echange / toasts
@@ -4478,6 +4495,7 @@ namespace FUI::UIRoot
         DualRing::Tick();
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
         Echange::Tick();                  // [vulkaar] pont etat/gestes de l echange
+        Etabli::Tick();                   // [vulkaar] pont etat/gestes de l etabli
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)
         Grid::CapacityTick();       // W1+W2: weight bypass / space overload
         GoldCoins::Tick();          // G1: mirror the gold ledger into coins

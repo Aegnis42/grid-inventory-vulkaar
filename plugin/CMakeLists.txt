@@ -73,6 +73,8 @@ set(SOURCES
     src/game/SortiesVulkaar.cpp
     src/ui/Echange.h
     src/ui/Echange.cpp
+    src/ui/Etabli.h
+    src/ui/Etabli.cpp
     src/game/BagFilter.h
     src/game/BagFilter.cpp
     src/game/Costume.h

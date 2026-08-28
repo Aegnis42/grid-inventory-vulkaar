@@ -7,6 +7,7 @@
 #include "game/MonnaiesVulkaar.h"
 #include "game/SortiesVulkaar.h"
 #include "ui/Echange.h"
+#include "ui/Etabli.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
@@ -2391,6 +2392,7 @@ namespace
             FUI::MonnaiesVulkaar::InitForms();   // vulkaar : Septime / Mede / Titus
             FUI::SortiesVulkaar::Initialiser();  // vulkaar : journal jets/destructions
             FUI::Echange::Initialiser();         // vulkaar : pont de la fenetre d echange
+            FUI::Etabli::Initialiser();        // vulkaar : pont de l ecran d etabli
             // ★B3-a: close the loop the ledger opened. Registered once, here,
             // where the forms are already resolved.
             // ★A confirmation commits ITS OWN cell and no other: the slot key
