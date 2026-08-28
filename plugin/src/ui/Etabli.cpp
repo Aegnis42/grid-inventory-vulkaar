@@ -159,6 +159,50 @@ namespace FUI::Etabli
             return a_repli;
         }
 
+        /** L'ENCOMBREMENT dans la grille : hauteur x largeur en cases, et le
+         *  nombre de cases VRAIMENT occupees — une piece trouee en prend moins
+         *  que sa boite. Rend faux quand la forme est introuvable : ResolveDef
+         *  rendrait alors un def vide, soit « 1 x 1 », un mensonge silencieux. */
+        bool Encombrement(RE::FormID a_id, int& a_haut, int& a_larg, int& a_cases)
+        {
+            RE::TESBoundObject* obj = Forme(a_id);
+            if (obj == nullptr) return false;
+            const auto def = Grid::ResolveDef(obj);
+            // Le def borne la largeur a 16, le plateau n'en fait que kCols :
+            // annoncer 16 promettrait une place qui n'existe pas.
+            a_larg = (std::min)((std::max)(1, def.w), Grid::kCols);
+            a_haut = (std::max)(1, def.h);
+            a_cases = (std::max)(1, Grid::CellSpanOf(obj));
+            return true;
+        }
+
+        /** LA FICHE DE L'OBJET — ce que le proprietaire appelle « les stats »
+         *  (28/08/2026) : l'encombrement, puis les degats ou l'armure.
+         *
+         *  Les valeurs sont celles de la FORME DE BASE, jamais celles ajustees
+         *  au porteur : `GetDamage(entree)` du joueur replie sa competence et
+         *  ses perks, et deux joueurs devant le meme etabli liraient alors des
+         *  nombres differents pour le meme produit. */
+        void Fiche(RE::FormID a_id)
+        {
+            int h = 0, l = 0, cases = 0;
+            if (Encombrement(a_id, h, l, cases)) {
+                if (cases == h * l) ImGui::Text("Encombrement   %d x %d", h, l);
+                // Une piece trouee : la boite ment sur ce qu'elle coute vraiment.
+                else ImGui::Text("Encombrement   %d x %d  (%d cases)", h, l, cases);
+            }
+            RE::TESBoundObject* obj = Forme(a_id);
+            if (obj == nullptr) return;
+            if (auto* arme = obj->As<RE::TESObjectWEAP>()) {
+                ImGui::Text("Degats   %d", static_cast<int>(arme->GetAttackDamage()));
+            } else if (auto* armure = obj->As<RE::TESObjectARMO>()) {
+                // GetArmorRating n'est PAS const et rend un float : le pointeur
+                // doit rester non const, et la valeur se tronque a l'entier.
+                ImGui::Text("Armure   %d", static_cast<int>(armure->GetArmorRating()));
+            }
+            ImGui::Text("Valeur   %d", static_cast<int>(obj->GetGoldValue()));
+        }
+
         const Geste* GesteChoisi()
         {
             for (const auto& g : g_gestes) {
@@ -320,8 +364,8 @@ namespace FUI::Etabli
             const float S = Theme::Scale();
             const int nb = static_cast<int>(g_rayons.size()) + 1;
             const float espace = 4.0f * S;
-            const float cote = (std::max)(46.0f * S, (a_largeur - espace * (nb - 1)) / (std::max)(1, nb));
-            const float haut = 52.0f * S;
+            const float cote = (std::max)(56.0f * S, (a_largeur - espace * (nb - 1)) / (std::max)(1, nb));
+            const float haut = 60.0f * S;
 
             for (int i = 0; i < nb; ++i) {
                 const bool tous = (i == 0);
@@ -346,8 +390,8 @@ namespace FUI::Etabli
         {
             const float S = Theme::Scale();
             const float espace = 3.0f * S;
-            const float cote = (std::max)(28.0f * S, (a_largeur - espace * (kNbQualites - 1)) / kNbQualites);
-            const float haut = 30.0f * S;
+            const float cote = (std::max)(34.0f * S, (a_largeur - espace * (kNbQualites - 1)) / kNbQualites);
+            const float haut = 36.0f * S;
 
             for (int q = 1; q <= kNbQualites; ++q) {
                 const bool horsMain = (a_g == nullptr) || (q > a_g->qualiteMax);
@@ -380,7 +424,7 @@ namespace FUI::Etabli
         void ListeGestes()
         {
             const float S = Theme::Scale();
-            const float haut = 30.0f * S;
+            const float haut = 38.0f * S;
             const std::string filtre = EnMinuscules(g_recherche);
 
             for (const auto& g : g_gestes) {
@@ -500,11 +544,17 @@ namespace FUI::Etabli
             ImGui::Begin("##vk_etabli_detail", nullptr,
                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
+            /* Le detail se lit de loin : sa propre taille de texte. ATTENTION,
+               cette fonction a DEUX sorties — le retour anticipe et la fin —
+               et la pile de polices deborderait dans le reste de la trame si
+               l une des deux oubliait son PopFont. */
+            ImGui::PushFont(nullptr, Theme::SnapPx(21.0f));
 
             if (a_g == nullptr) {
                 ImGui::TextDisabled("Rien à fabriquer ici.");
                 ImGui::Spacing();
                 ImGui::TextWrapped("Cet établi ne sert que les métiers que tu exerces.");
+                ImGui::PopFont();
                 ImGui::End();
                 ImGui::PopStyleColor();
                 return;
@@ -519,6 +569,12 @@ namespace FUI::Etabli
                 ? "?" : g_qualites[g_qualiteChoisie - 1].c_str();
             if (a_g->min == a_g->max) ImGui::TextDisabled("×%d, qualité %s", a_g->min, nomQualite);
             else ImGui::TextDisabled("×%d à %d, qualité %s", a_g->min, a_g->max, nomQualite);
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fiche");
+            Fiche(a_g->produit);
 
             ImGui::Spacing();
             ImGui::Separator();
@@ -538,7 +594,7 @@ namespace FUI::Etabli
             ImGui::Spacing();
 
             ImGui::BeginDisabled(lots <= 0);
-            if (ImGui::Button("Fabriquer", ImVec2(-1.0f, 32.0f * S))) {
+            if (ImGui::Button("Fabriquer", ImVec2(-1.0f, 40.0f * S))) {
                 char reste[128];
                 std::snprintf(reste, sizeof(reste), "%s\t%d", a_g->id.c_str(), g_qualiteChoisie);
                 EcrireGeste("crafter", reste);
@@ -547,6 +603,7 @@ namespace FUI::Etabli
             if (lots > 0) ImGui::TextDisabled("de quoi en faire %d", lots);
             else ImGui::TextDisabled("il te manque de quoi");
 
+            ImGui::PopFont();
             ImGui::End();
             ImGui::PopStyleColor();
         }
@@ -632,7 +689,13 @@ namespace FUI::Etabli
            un fond OPAQUE. La première mouture la laissait transparente et sans
            marges — le propriétaire n'y a reconnu ni sa maquette ni un panneau
            (28/08/2026). */
-        const float largeur = (std::min)(io.DisplaySize.x * 0.34f, 620.0f * S);
+        /* LA LARGEUR EST UNE FRACTION DE L ECRAN, jamais un plafond en
+           unites de design : Theme::Scale() vaut 0.75 en 1080p (il derive
+           de la hauteur d ecran), et « 620 * S » rendait 465 px la ou la
+           maquette en demandait 768 — 24 % au lieu de 40 %. Mesure du
+           28/08/2026. Les bornes en pixels gardent l ecran utilisable des
+           deux cotes : lisible en 1280, pas demesure en 4K. */
+        const float largeur = std::clamp(io.DisplaySize.x * 0.40f, 420.0f, 900.0f);
         ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(largeur, io.DisplaySize.y), ImGuiCond_Always);
         ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(10, 9, 8, 236));
@@ -642,6 +705,11 @@ namespace FUI::Etabli
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
                 ImGuiWindowFlags_NoScrollWithMouse);
+        /* IL N EXISTE AUCUNE POLICE PLUS GRANDE : les deux faces du greffon
+           sont cuites a 17. On demande donc une taille a la trame — c est la
+           voie d imgui 1.92, dont l atlas est dynamique. La taille DOIT etre
+           entiere (SnapPx l arrondit), sans quoi le rendu bave. */
+        ImGui::PushFont(nullptr, Theme::SnapPx(20.0f));
 
         const float interne = ImGui::GetContentRegionAvail().x;
         const Geste* choisi = GesteChoisi();
@@ -666,20 +734,24 @@ namespace FUI::Etabli
         ImGui::BeginChild("##vk_etabli_liste", ImVec2(0.0f, 0.0f), false);
         ListeGestes();
         ImGui::EndChild();
+        ImGui::PopFont();
         ImGui::End();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor();
 
         /* L'APERÇU, au milieu du monde — comme la maquette. Tournable. */
         const float libre = io.DisplaySize.x - largeur;
-        const ImVec2 tailleAp((std::min)(libre * 0.62f, io.DisplaySize.y * 0.52f),
-                              io.DisplaySize.y * 0.52f);
-        const ImVec2 posAp(largeur + (libre - tailleAp.x) * 0.5f, io.DisplaySize.y * 0.07f);
+        const ImVec2 tailleAp((std::min)(libre * 0.62f, io.DisplaySize.y * 0.46f),
+                              io.DisplaySize.y * 0.46f);
+        const ImVec2 posAp(largeur + (libre - tailleAp.x) * 0.5f, io.DisplaySize.y * 0.06f);
         Apercu(posAp, tailleAp);
 
         /* LA RECETTE, sous l'aperçu. */
-        const ImVec2 tailleDetail((std::min)(libre * 0.52f, 460.0f * S), 250.0f * S);
-        const ImVec2 posDetail(largeur + (libre - tailleDetail.x) * 0.5f, io.DisplaySize.y * 0.62f);
+        /* Agrandir le texte n agrandit NI la fenetre NI les marges : la boite
+           doit monter du meme facteur, et la fiche y ajoute trois lignes. */
+        const ImVec2 tailleDetail(std::clamp(libre * 0.50f, 340.0f, 640.0f),
+                                  std::clamp(io.DisplaySize.y * 0.36f, 260.0f, 520.0f));
+        const ImVec2 posDetail(largeur + (libre - tailleDetail.x) * 0.5f, io.DisplaySize.y * 0.58f);
         PanneauDetail(choisi, posDetail, tailleDetail);
 
         /* LE BANDEAU : ce que le serveur vient de répondre. */
@@ -696,7 +768,10 @@ namespace FUI::Etabli
 
         /* L'AIDE, discrète, en pied de l'aperçu : sans elle personne ne
            devinerait qu'on peut tourner l'objet. */
+        /* Dessinee hors de toute fenetre : aucun PushFont ne l atteint, sa
+           taille doit etre passee explicitement (forme a cinq arguments). */
         ImGui::GetForegroundDrawList()->AddText(
+            ImGui::GetFont(), Theme::SnapPx(15.0f),
             ImVec2(posAp.x, posAp.y + tailleAp.y + 4.0f * S), Theme::Chrome(0.45f),
             "glisser : tourner   ·   maj+glisser : lacet   ·   molette : zoom   ·   R : remettre");
     }
