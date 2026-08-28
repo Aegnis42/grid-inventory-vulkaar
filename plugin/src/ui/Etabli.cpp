@@ -200,7 +200,6 @@ namespace FUI::Etabli
                 // doit rester non const, et la valeur se tronque a l'entier.
                 ImGui::Text("Armure   %d", static_cast<int>(armure->GetArmorRating()));
             }
-            ImGui::Text("Valeur   %d", static_cast<int>(obj->GetGoldValue()));
         }
 
         const Geste* GesteChoisi()
