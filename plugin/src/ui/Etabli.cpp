@@ -48,6 +48,10 @@ namespace FUI::Etabli
             int         min = 1;
             int         max = 1;
             int         qualiteMax = 1;
+            /** Les 8 formes du produit décliné, dans l ordre des qualités.
+             *  Vide pour un produit d atelier, dont la qualité vit dans un
+             *  extra et non dans la forme. */
+            std::vector<RE::FormID> declines;
             std::vector<Ingredient> ingredients;
         };
 
@@ -202,6 +206,27 @@ namespace FUI::Etabli
             }
         }
 
+        /** LE NOM DE CE QU ON VA FABRIQUER, à la qualité choisie.
+ *
+         *  Le propriétaire l a demandé le 28/08/2026 : la liste affichait
+         *  « Petite meule », le nom du TOUR DE MAIN, quand le joueur cherche
+         *  « Charbon pauvre (qualité grossière) » — ce qu il obtient.
+ *
+         *  Un objet décliné existe en huit FORMES, et chacune porte sa qualité
+         *  dans son nom : il suffit de prendre la bonne. Un produit d atelier,
+         *  lui, n en a qu une — sa qualité vit dans un extra — alors on la lui
+         *  ajoute, pour que la liste réponde toujours à la même question. */
+        std::string NomFabrique(const Geste& a_g, int a_qualite)
+        {
+            const int q = (a_qualite < 1 || a_qualite > kNbQualites) ? 1 : a_qualite;
+            if (static_cast<size_t>(q) <= a_g.declines.size()) {
+                return NomDe(a_g.declines[static_cast<size_t>(q) - 1], a_g.produitNom);
+            }
+            std::string nom = NomDe(a_g.produit, a_g.produitNom);
+            if (!g_qualites[q - 1].empty()) nom += " (qualité " + g_qualites[q - 1] + ")";
+            return nom;
+        }
+
         const Geste* GesteChoisi()
         {
             for (const auto& g : g_gestes) {
@@ -298,6 +323,17 @@ namespace FUI::Etabli
                     g.max = std::atoi(c[8]);
                     g.qualiteMax = std::atoi(c[9]);
                     g.metier = c[10];
+                    // Le 12e champ est facultatif : un produit non décliné
+                    // n a pas de formes, et la ligne s arrête au 11e.
+                    if (n >= 12) {
+                        const char* d = c[11];
+                        while (d && *d) {
+                            const RE::FormID f = static_cast<RE::FormID>(std::strtoul(d, nullptr, 16));
+                            if (f != 0) g.declines.push_back(f);
+                            const char* virgule = std::strchr(d, ',');
+                            d = virgule ? virgule + 1 : nullptr;
+                        }
+                    }
                     gestes.push_back(std::move(g));
                 } else if (std::strcmp(c[0], "ing") == 0 && n >= 6) {
                     // Une ligne `ing` suit TOUJOURS le geste qu'elle décrit :
@@ -428,7 +464,10 @@ namespace FUI::Etabli
 
             for (const auto& g : g_gestes) {
                 if (!g_rayonChoisi.empty() && g.rayon != g_rayonChoisi) continue;
-                if (!filtre.empty() && EnMinuscules(g.nom).find(filtre) == std::string::npos) continue;
+                // La recherche porte sur CE QU ON FABRIQUE, comme la liste :
+                // taper « charbon » doit trouver la meule qui en donne.
+                const std::string affiche = NomFabrique(g, g_qualiteChoisie);
+                if (!filtre.empty() && EnMinuscules(affiche).find(filtre) == std::string::npos) continue;
 
                 const bool actif = (g.id == g_gesteChoisi);
                 const bool faisable = LotsFaisables(g, g_qualiteChoisie) > 0;
@@ -446,7 +485,7 @@ namespace FUI::Etabli
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 const float milieu = depart.y + (haut - ImGui::GetTextLineHeight()) * 0.5f;
                 dl->AddText(ImVec2(depart.x + 10.0f * S, milieu),
-                    faisable ? Theme::Chrome(0.95f) : Theme::Chrome(0.45f), g.nom.c_str());
+                    faisable ? Theme::Chrome(0.95f) : Theme::Chrome(0.45f), affiche.c_str());
 
                 char niv[24];
                 std::snprintf(niv, sizeof(niv), "NIV %d", g.niveau);
@@ -559,15 +598,17 @@ namespace FUI::Etabli
                 return;
             }
 
-            const std::string nom = NomDe(a_g->produit, a_g->produitNom);
+            const std::string nom = NomFabrique(*a_g, g_qualiteChoisie);
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
             ImGui::TextUnformatted(nom.c_str());
             ImGui::PopStyleColor();
 
             const char* nomQualite = g_qualites[g_qualiteChoisie - 1].empty()
                 ? "?" : g_qualites[g_qualiteChoisie - 1].c_str();
-            if (a_g->min == a_g->max) ImGui::TextDisabled("×%d, qualité %s", a_g->min, nomQualite);
-            else ImGui::TextDisabled("×%d à %d, qualité %s", a_g->min, a_g->max, nomQualite);
+            // Le NOM porte déjà la qualité : la répéter ici serait du bruit.
+            (void)nomQualite;
+            if (a_g->min == a_g->max) ImGui::TextDisabled("×%d", a_g->min);
+            else ImGui::TextDisabled("×%d à %d", a_g->min, a_g->max);
 
             ImGui::Spacing();
             ImGui::Separator();
