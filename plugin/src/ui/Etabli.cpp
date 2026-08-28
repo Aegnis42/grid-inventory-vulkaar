@@ -555,7 +555,17 @@ namespace FUI::Etabli
                par seconde pour une image identique. */
             if (bouge) icones->SetInspectRot(g_apRx, g_apRy, g_apRz);
 
-            if (const IconCache::Icon* ic = icones->InspectIcon(); ic && ic->srv && ic->w > 0 && ic->h > 0) {
+            /* LA CAPTURE PEUT ÊTRE REFUSÉE, et c est voulu : sous 2 Go de
+               mémoire libre le greffon suspend ses prises, parce que le
+               chargeur de maillages du moteur a déjà planté sous pression.
+               Constaté en jeu le 28/08/2026 — l écran ne montrait alors RIEN
+               du tout. On se rabat sur l icône de la tuile, qui est déjà en
+               cache et ne coûte pas une prise de plus. */
+            const IconCache::Icon* ic = icones->InspectIcon();
+            if (ic == nullptr || ic->srv == nullptr) {
+                if (auto* forme = Forme(g_apercuArme)) ic = icones->Get(forme);
+            }
+            if (ic && ic->srv && ic->w > 0 && ic->h > 0) {
                 /* À SON RAPPORT D'ASPECT. Le forcer en carré étirait la capture
                    et rendait une bouillie — constaté en jeu le 28/08/2026. */
                 const float boite = (std::min)(a_taille.x, a_taille.y) * g_apZoom;
@@ -566,6 +576,14 @@ namespace FUI::Etabli
                 ImGui::GetWindowDrawList()->AddImage(reinterpret_cast<ImTextureID>(ic->srv),
                     ImVec2(c.x - sz.x * 0.5f, c.y - sz.y * 0.5f),
                     ImVec2(c.x + sz.x * 0.5f, c.y + sz.y * 0.5f));
+            } else {
+                // Ni prise ni icône : on le DIT. Un cadre vide passerait
+                // pour une panne alors que le greffon attend simplement.
+                const char* mot = "l'aperçu attend que la mémoire se libère";
+                const ImVec2 t = ImGui::CalcTextSize(mot);
+                ImGui::GetWindowDrawList()->AddText(
+                    ImVec2(a_pos.x + (a_taille.x - t.x) * 0.5f, a_pos.y + a_taille.y * 0.5f),
+                    Theme::Chrome(0.45f), mot);
             }
             ImGui::End();
             ImGui::PopStyleVar();
