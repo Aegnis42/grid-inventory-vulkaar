@@ -63,6 +63,45 @@ namespace FUI
         void End();
         void Render();
 
+        // ══ LE RENDU VIVANT (29/08/2026) ══════════════════════════════════
+        //
+        // Demande du proprietaire : « je veut vraiment le meme que celui du
+        // jeu qui tourne via le moteur du jeu ».
+        //
+        // Render() ci-dessus fait CINQ etapes : il SAUVE le fond d'ecran,
+        // laisse le moteur peindre le modele, copie le resultat dans une
+        // texture, puis RESTAURE le fond. C'est pourquoi le modele vivant
+        // n'est jamais visible : il est efface dans la trame meme ou il est
+        // peint. Le rendu vivant, c'est l'etape 3 TOUTE SEULE.
+        //
+        // ET IL NE PASSE PAS PAR LA FILE DE CAPTURE. Mesure du 29/08 : sous
+        // pression memoire, IconCache::PreRender sort avant d'armer la prise
+        // — donc avant de CHARGER le modele — et l'ecran de l'etabli est
+        // reste vide douze minutes durant. Ici on charge nous-memes.
+
+        /** Charge cet objet, le gare a ce point de l'ecran et lui donne cette
+         *  orientation. Idempotent : ne recharge que si l'objet a change. */
+        void MontrerVivant(RE::TESBoundObject* a_item, ImVec2 a_centre,
+                           float a_rx, float a_ry, float a_rz, float a_echelle);
+
+        /** Fait peindre le modele par le moteur, dans la trame courante, sans
+         *  rien restaurer derriere. Depuis PostDisplay, APRES Render() :
+         *  appele avant, l'etape 5 de la capture l'effacerait. */
+        void RendreVivant();
+
+        /** Decharge le modele — sans quoi il reste gare, et vivant, sur un
+         *  ecran ferme. */
+        void CacherVivant();
+
+        /** Charge et pose posee ? L'ecran s'en sert pour dire « ca charge »
+         *  plutot que de ne rien montrer du tout. */
+        [[nodiscard]] bool VivantPret() const;
+
+        /** Le moteur a-t-il un chargement en cours ? Distingue « lent »
+         *  de « jamais parti » — la question que le journal ne savait pas
+         *  repondre le 29/08. */
+        [[nodiscard]] bool ChargementEnVol() const { return LoadPending(); }
+
         void Request(RE::TESBoundObject* a_item, ImVec2 a_screenPos, ImVec2 a_screenSize,
                      float a_modelScale = -1.0f, float a_offsetX = 0.0f, float a_offsetY = 0.0f,
                      const IconDef* a_def = nullptr);
@@ -173,6 +212,10 @@ namespace FUI
         // stays in a single spot.
         void LoadForCapture(RE::Inventory3DManager* a_mgr, RE::TESBoundObject* a_item);
 
+        /** Relance un chargement qui n'a jamais atterri. Partagee par la
+         *  capture et par le rendu vivant depuis le 29/08 : enfermee dans
+         *  Render(), elle laissait le chemin vivant sans filet. */
+        void AutoReparerChargement(RE::Inventory3DManager* a_inv, int a_frame);
         void UpdateParking();   // apply def + move model under the park point
         // Engine scene teardown, retried via main-thread tasks until no model
         // load is in flight (see ResetScene note). Aborts when a_session no
@@ -204,6 +247,9 @@ namespace FUI
         bool    m_hasPark = false;
         // GI68: consecutive self-heal repairs, for log throttling only.
         int     m_healRun = 0;
+        /* Depuis combien de trames une tache de chargement est armee sur
+           une scene VIDE. Au-dela, ce n'est plus du travail en cours. */
+        int     m_bloqueDepuis = 0;
         float   m_inspectScale  = 0.0f;   // 0 = off
         float   m_savedItemScale = 0.0f;  // engine value to restore
         bool    m_hasSavedScale = false;

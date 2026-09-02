@@ -8,6 +8,7 @@
 #include "game/SortiesVulkaar.h"
 #include "ui/Echange.h"
 #include "ui/Etabli.h"
+#include "ui/EssaiSwf.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
@@ -29,6 +30,9 @@
 #include <cstdio>
 
 #include <fstream>
+#include <filesystem>
+#include <unordered_set>
+#include <vector>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -105,6 +109,8 @@ namespace
         }
     }
     void LockpickReopenTick();      // defined below (lockpick auto-open fallback)
+    void RecolteTick();             // [vulkaar] defini plus bas (recolte par metier)
+    void RecolteInitialiser();      // [vulkaar] page blanche a chaque session
     void MenuCloseEchoTick();        // defined below (⑫ — the close nobody heard)
 
     // ---- PlayerCharacter::Update vtable hook (index 0xAD) ----
@@ -138,6 +144,7 @@ namespace
             // the overlay menu down.
             FUI::Wheeler::Tick();
             LockpickReopenTick();      // lockpick auto-open fallback
+            RecolteTick();              // [vulkaar] la liste des recoltes interdites
             MenuCloseEchoTick();        // ⑫ — the close, when it is true
         }
         static inline REL::Relocation<decltype(thunk)> func;
@@ -368,6 +375,126 @@ namespace
         }
     }
 
+    // ── [vulkaar] LA RECOLTE RESERVEE AU METIER ───────────────────────────
+    //
+    // Demande du proprietaire (30/08/2026) : « je veut que il ne puisse pas
+    // interagire avec si il ne sont pas herboriste ».
+    //
+    // POURQUOI C EST ICI ET PAS SUR LE SERVEUR, et c est mesure : pour la
+    // FLORE le moteur du client cueille TOUT SEUL — animation, don, marquage,
+    // repousse — et ne previent le serveur qu une trame plus tard. Le veto
+    // serveur arrive donc APRES : il retire bien l ingredient de l inventaire
+    // qui fait foi, mais la plante, elle, est deja cueillie. Le joueur perd la
+    // plante et ne recoit rien. (Pour les VEINES le chemin natif est inerte,
+    // d ou un veto serveur qui « marche » — ce n est pas la meme mecanique.)
+    //
+    // Le seul point qui refuse AVANT que rien ne soit consomme est ce hook.
+    // Le serveur calcule la liste — lui seul sait quels gestes sont ouverts a
+    // ce joueur, a ce niveau — et le client TypeScript la pose en clair, un
+    // formId de base par ligne en hexa, comme il pose deja l identifiant de
+    // personnage pour la grille.
+    //
+    // On lit l INTERDIT, pas le permis : une base absente du fichier n est
+    // pas a nous, et rien ne doit la bloquer.
+    namespace
+    {
+        constexpr const char* kCheminRecolte =
+            "Data/SKSE/Plugins/GridInventory_recolte.txt";
+
+        std::unordered_set<RE::FormID> g_recolteInterdite;
+        std::filesystem::file_time_type g_recolteDate{};
+        bool                            g_recolteLue = false;
+    }
+
+    // ETAT D EXECUTION : la liste appartient au personnage de la session en
+    // cours. Rescapee d une session precedente elle applique les metiers de
+    // QUELQU UN D AUTRE — un herboriste laisse un fichier presque vide, et le
+    // profane suivant cueille tout. Page blanche au chargement des donnees ;
+    // le serveur repose la liste a l entree (relaisMetiers.surEntree).
+    //
+    // A ACCROCHER A kDataLoaded ET NULLE PART AILLEURS : kPreLoadGame et
+    // kPostLoadGame arrivent APRES la connexion et effaceraient la liste
+    // fraiche du bon personnage.
+    void RecolteInitialiser()
+    {
+        std::error_code ec;
+        std::filesystem::remove(kCheminRecolte, ec);
+        g_recolteInterdite.clear();
+        g_recolteDate = {};
+        g_recolteLue  = false;
+        logger::info("[vulkaar] recolte : page blanche, en attente de la liste du serveur");
+    }
+
+    // Relu quand le fichier bouge — le serveur le repose a chaque changement
+    // d etat des metiers (entree, prise, abandon, passage de niveau, oubli).
+    //
+    // SEQUENCE ET SENTINELLE, comme les ponts freres (Echange.cpp jette toute
+    // lecture sans seq). Une ecriture est TRONQUABLE : on peut lire pendant
+    // que le client ecrit. Pour une liste d INTERDITS une lecture partielle ne
+    // veut pas dire « anciennes valeurs » mais MOINS D INTERDITS — donc des
+    // plantes rouvertes en silence, ce que personne ne verrait jamais. On
+    // exige les deux bornes, et on NE MEMORISE PAS la date d une lecture
+    // rejetee : sinon la troncature se figerait pour toujours.
+    void RecolteTick()
+    {
+        std::error_code ec;
+        const auto date = std::filesystem::last_write_time(kCheminRecolte, ec);
+        if (ec) {
+            // Pas de fichier : rien d interdit. C est le cas hors vulkaar, et
+            // c est le bon defaut — on ne bloque jamais par accident.
+            if (g_recolteLue) {
+                g_recolteInterdite.clear();
+                g_recolteLue = false;
+            }
+            return;
+        }
+        if (g_recolteLue && date == g_recolteDate) return;
+
+        std::ifstream            f(kCheminRecolte);
+        std::vector<std::string> lignes;
+        std::string              ligne;
+        while (std::getline(f, ligne)) {
+            while (!ligne.empty() &&
+                   (ligne.back() == '\r' || ligne.back() == '\n' || ligne.back() == ' '))
+                ligne.pop_back();
+            if (!ligne.empty()) lignes.push_back(ligne);
+        }
+        // Les deux bornes, sans quoi la lecture est jetee TELLE QUELLE : on
+        // garde l ensemble precedent et on reessaiera au prochain tic.
+        if (lignes.size() < 2 || lignes.front().rfind("seq", 0) != 0 ||
+            lignes.back() != "fin") {
+            return;
+        }
+
+        std::unordered_set<RE::FormID> neuf;
+        for (std::size_t k = 1; k + 1 < lignes.size(); ++k) {
+            char*               bout = nullptr;
+            const std::uint32_t id =
+                static_cast<std::uint32_t>(std::strtoul(lignes[k].c_str(), &bout, 16));
+            if (bout && *bout == 0) neuf.insert(static_cast<RE::FormID>(id));
+        }
+        g_recolteInterdite.swap(neuf);
+        g_recolteDate = date;
+        g_recolteLue  = true;
+        logger::info("[vulkaar] recolte : {} base(s) de flore interdite(s) a ce personnage ({})",
+                     g_recolteInterdite.size(), lignes.front());
+    }
+
+    bool RecolteRefusee(RE::FormID a_base)
+    {
+        return !g_recolteInterdite.empty() && g_recolteInterdite.count(a_base) != 0;
+    }
+
+    void NotifyPasLeMetier()
+    {
+        static std::uint32_t s_last = 0;
+        const std::uint32_t  now = RE::GetDurationOfApplicationRunTime();
+        if (now - s_last > 3000) {
+            s_last = now;
+            FUI::Sfx::FailNote("Ce n est pas ton metier.");
+        }
+    }
+
     // Capacity: harvesting (flora / food-bearing trees) — TESBoundObject::
     // Activate override slot 0x37; the produce item is checked BEFORE the
     // engine harvests, so nothing is consumed on a blocked attempt.
@@ -378,10 +505,18 @@ namespace
                           RE::TESObjectREFR* a_activatorRef, std::uint8_t a_arg3,
                           RE::TESBoundObject* a_object, std::int32_t a_targetCount)
         {
-            if (a_activatorRef && a_activatorRef->IsPlayerRef() &&
-                a_this->produceItem && !FUI::Grid::CanFitNewItem(a_this->produceItem)) {
-                NotifyInventoryFull();
-                return false;   // blocked: the plant stays harvestable
+            if (a_activatorRef && a_activatorRef->IsPlayerRef()) {
+                // [vulkaar] LE METIER D ABORD : ce test passe avant celui de la
+                // place, parce qu une plante qu on n a pas le droit de toucher
+                // n a pas a se plaindre d un sac plein.
+                if (RecolteRefusee(a_this->GetFormID())) {
+                    NotifyPasLeMetier();
+                    return false;   // rien n est consomme : la plante reste
+                }
+                if (a_this->produceItem && !FUI::Grid::CanFitNewItem(a_this->produceItem)) {
+                    NotifyInventoryFull();
+                    return false;   // blocked: the plant stays harvestable
+                }
             }
             return func(a_this, a_targetRef, a_activatorRef, a_arg3, a_object, a_targetCount);
         }
@@ -692,6 +827,14 @@ namespace
                 // the inventory key and watch the OTHER screen do the same thing.
                 // The state only reads at open time, so a mid-session press
                 // never disturbs a screen already on show.
+                /* [vulkaar] F9 OUVRAIT L'ECRAN SCALEFORM D'ESSAI. Retire le
+                   29/08/2026 : la question qu'il posait est tranchee — le
+                   moteur accepte nos swf, le pont fonctionne dans les deux
+                   sens — et le proprietaire a choisi de garder l'ecran ImGui
+                   pour l'etabli, « et juste mettre le rendu 3d du jeu
+                   dessus ». Le code de EssaiSwf reste au depot : c'est la
+                   fondation Scaleform, eprouvee, pour un ecran qui n'aura pas
+                   besoin de 3D. */
                 if (const int vk = FUI::UIRoot::VanillaKey();
                     vk != 0 && btn->GetIDCode() == static_cast<std::uint32_t>(vk)) {
                     const bool on = !g_vanillaKey.load();
@@ -2393,6 +2536,10 @@ namespace
             FUI::SortiesVulkaar::Initialiser();  // vulkaar : journal jets/destructions
             FUI::Echange::Initialiser();         // vulkaar : pont de la fenetre d echange
             FUI::Etabli::Initialiser();        // vulkaar : pont de l ecran d etabli
+            RecolteInitialiser();              // vulkaar : la liste de recolte est de CETTE session
+            // FUI::EssaiSwf::Initialiser();  // vulkaar : ecran Scaleform d'essai —
+            //   inscrit plus rien depuis le 29/08 (voir le retrait de F9 ci-dessus).
+            //   Le rallumer suffit a retrouver un menu Scaleform qui marche.
             // ★B3-a: close the loop the ledger opened. Registered once, here,
             // where the forms are already resolved.
             // ★A confirmation commits ITS OWN cell and no other: the slot key

@@ -27,6 +27,7 @@
 // le monde entre les deux. C'est la disposition du fork, avec notre contenu.
 
 #include <RE/Skyrim.h>
+#include <string>
 
 namespace FUI::Etabli
 {
@@ -48,4 +49,33 @@ namespace FUI::Etabli
 
     /** Échap : referme l'établi seul. Rend true si quelque chose a été fermé. */
     bool Fermer();
+
+    // ── LA SORTIE SCALEFORM (29/08/2026) ──────────────────────────────────
+    //
+    // Le même état, servi à NOTRE film — `content/interface/etabli/` du dépôt,
+    // chargé par un RE::IMenu à nous. L'écran ImGui ci-dessus reste en place :
+    // rien n'est dupliqué, le film reçoit une VUE des mêmes variables et ses
+    // actions les modifient comme les clics ImGui le font.
+    //
+    // Pourquoi Scaleform plutôt qu'ImGui : décision du propriétaire du
+    // 29/08/2026, prise après que l'essai eut prouvé en jeu que le moteur
+    // accepte un swf que nous fabriquons.
+
+    /** Le plateau, dans la grammaire que le film attend. Les ingrédients du
+     *  SEUL geste choisi y figurent : envoyer ceux des 5 586 gestes de la
+     *  forge ferait 1,9 Mio, et le joueur n'en regarde qu'un. */
+    [[nodiscard]] std::string PlateauPourFilm();
+
+    /** Ce que le film demande : rayon, filtre, choix, qualite, fabriquer,
+     *  fermer. Rend true si l'écran doit être repeint. */
+    bool ActionDuFilm(const char* a_quoi, const char* a_valeur);
+
+    /** LE RENDU VIVANT DU MOTEUR — a appeler depuis GridInventoryMenu::
+     *  PostDisplay, APRES la sequence de capture d'ItemPreview et AVANT la
+     *  soumission d'ImGui. Le modele se pose ainsi sur le monde, et les
+     *  fenetres de l'ecran se posent sur lui.
+     *
+     *  Appele AVANT la capture, l'etape de restauration du fond d'ecran
+     *  l'effacerait dans la trame meme ou il est peint. */
+    void RendreModeleVivant();
 }

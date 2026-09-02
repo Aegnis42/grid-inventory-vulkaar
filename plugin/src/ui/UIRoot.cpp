@@ -13,6 +13,7 @@
 #include "ui/LootBarter.h"
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
+#include "ui/Clavier.h"   // [vulkaar] le clavier déclaré dans le launcher
 #include "ui/Echange.h"
 #include "ui/Etabli.h"
 #include "ui/Lang.h"
@@ -258,6 +259,140 @@ namespace FUI::UIRoot
         std::atomic<unsigned> g_wmKeyRaw{ 0 };
         bool g_kbFallback = false;   // latched: synthesise characters from polling
 
+        // ---- [vulkaar] LE CLAVIER DÉCLARÉ, ROUTE 1 : LA FENÊTRE ---------------
+        //
+        // Décision du propriétaire (02/09/2026) : la disposition déclarée dans
+        // le launcher FAIT FOI dans nos champs texte (ui/Clavier.h). Or WM_CHAR
+        // est déjà la lettre traduite par Windows — sur la disposition du
+        // PROCESSUS du jeu, pas celle du joueur, et SkyrimPlatform la fait
+        // tourner à son insu. La position physique, elle, est dans WM_KEYDOWN
+        // (bits 16-23 de lParam) : c'est LÀ qu'on traduit, avec notre table, et
+        // c'est nous qui poussons le caractère à ImGui.
+        //
+        // Le WM_CHAR que Windows fabrique ensuite pour la MÊME touche porte le
+        // même code de balayage dans son lParam : on l'AVALE, sinon la lettre
+        // s'écrirait deux fois — la nôtre, puis celle de Windows, et pas la
+        // même. On le reconnaît par son sc, pas en comptant : un WM_KEYDOWN peut
+        // être suivi de plusieurs WM_CHAR (morte Windows puis lettre : « ^x »)
+        // ou d'aucun (position morte ou vide sous SA disposition). La promesse
+        // d'avaler tombe au WM_KEYDOWN suivant.
+        //
+        // WM_SYSCHAR n'a rien à avaler : le backend Win32 d'ImGui ne le lit pas
+        // (WM_CHAR seulement), il n'a jamais écrit une lettre dans nos champs.
+        //
+        // Le WM_KEYDOWN lui-même continue vers ImGui comme avant : Retour
+        // arrière, flèches, Début/Fin, Ctrl+A/C/V vivent des événements de
+        // touche, pas des caractères. Une exception, plus bas
+        // (ClavierDeclareMorteDevant) : Retour arrière sur un accent en attente
+        // est avalé — il n'a rien d'autre à effacer que cette attente.
+        int g_scTraduit = -1;   // sc dont le WM_CHAR jumeau est à avaler ; -1 = aucun
+
+        // WM_KEYDOWN / WM_SYSKEYDOWN : si la touche est à nous, pousse sa lettre.
+        void ClavierDeclareSurTouche(LPARAM l)
+        {
+            if (!vk::clavier::Declaree()) return;   // « autre » : Windows décide
+            ImGuiIO& io = ImGui::GetIO();
+            if (!io.WantTextInput) return;   // pas de champ : R, F... restent des raccourcis
+            // Touche étendue (bit 24) : pavé numérique, Entrée du pavé, flèches,
+            // l'Alt droit lui-même. Rien de cela n'est dans la table, et le sc
+            // seul serait ambigu — le « / » du pavé porte le sc de la touche
+            // « ! » de l'AZERTY.
+            if ((l >> 24) & 1) return;
+            const int  sc   = static_cast<int>((l >> 16) & 0xFF);
+            const bool maj  = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool alt  = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            // AltGr arrive comme Ctrl+Alt quand la disposition du processus en a
+            // un. Sinon l'Alt droit n'est qu'un Alt pour Windows — mais le joueur
+            // a déclaré un clavier qui en a un : son Alt droit vaut AltGr.
+            const bool altgr = ((GetKeyState(VK_RMENU) & 0x8000) != 0) || (ctrl && alt);
+            if ((ctrl || alt) && !altgr) return;   // Ctrl seul, Alt seul : un raccourci, pas une lettre
+            const bool verrMaj = (GetKeyState(VK_CAPITAL) & 1) != 0;
+
+            vk::clavier::Frappe f;
+            if (!vk::clavier::Traduire(static_cast<std::uint8_t>(sc), maj, altgr, verrMaj, f)) return;
+            for (int i = 0; i < f.n; ++i) {
+                io.AddInputCharacterUTF16(static_cast<ImWchar16>(f.texte[i]));
+            }
+            g_scTraduit = sc;
+            // ★Compté comme un caractère arrivé par la fenêtre, même quand f.n
+            // vaut zéro : la route a bien servi ce champ. C'est ce que mesure
+            // g_wmCharSeen — le verrou du repli (PollTypedCharacters) le lit, et
+            // sans cela trois touches muettes pour Windows (une morte, une
+            // position vide de SA disposition) suffiraient à déclarer la route
+            // morte et à doubler chaque lettre suivante.
+            g_wmCharSeen.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // WM_CHAR : est-ce le jumeau d'une touche que nous venons de traduire ?
+        bool ClavierDeclareAvale(LPARAM l)
+        {
+            return g_scTraduit >= 0 && static_cast<int>((l >> 16) & 0xFF) == g_scTraduit;
+        }
+
+        // ---- [vulkaar] UNE MORTE EN ATTENTE DEVANT UNE TOUCHE HORS TABLE -----
+        //
+        // « ^ » posé, puis Entrée : Windows sort l'accent PUIS exécute la touche
+        // (Entrée envoie « ^ ») ; « ^ » puis Retour arrière : l'accent serait
+        // sorti puis effacé — net, rien. La page (clavier.js, surTouche) fait
+        // pareil ; ici c'est le WM_KEYDOWN qui nous le dit, AVANT qu'ImGui le
+        // voie :
+        //   · Entrée, Tab, Échap : l'accent est poussé d'abord, la touche suit
+        //     son cours ensuite. L'ordre compte — ImGui sert les caractères et
+        //     les touches dans l'ordre reçu (une touche qui suit un caractère
+        //     attend la trame d'après), donc un accent poussé APRÈS Entrée
+        //     tomberait dans un champ déjà envoyé ;
+        //   · Retour arrière : l'attente est effacée et la touche AVALÉE — ni
+        //     ImGui (rien ne doit s'effacer), ni son WM_KEYUP jumeau (ImGui ne
+        //     doit pas voir relâcher ce qu'il n'a pas vu enfoncer).
+        // Dans les deux cas les WM_CHAR jumeaux sont promis à l'avaloir
+        // (g_scTraduit) : si la disposition du PROCESSUS a la même morte à la
+        // même position, Windows sort lui aussi son accent avec cette touche,
+        // et il s'écrirait une seconde fois — ou, pour Retour arrière,
+        // resterait là sans rien pour l'effacer.
+        // Flèches, Suppr, modificateurs : l'attente leur survit, comme sous
+        // Windows. Ctrl ou Alt hors AltGr : un raccourci, la page s'arrête là
+        // aussi.
+        bool g_retourAvale = false;   // le WM_KEYUP de Retour arrière est à avaler aussi
+
+        // WM_KEYDOWN / WM_SYSKEYDOWN : rend true quand la touche est à AVALER.
+        bool ClavierDeclareMorteDevant(WPARAM w, LPARAM l)
+        {
+            const int vk = static_cast<int>(w);
+            // Un nouvel enfoncement de Retour arrière : la promesse d'avaler le
+            // WM_KEYUP du précédent ne lui survit pas — sinon un relâchement
+            // avalé à tort laisserait ImGui croire la touche tenue.
+            if (vk == VK_BACK) g_retourAvale = false;
+            if (!vk::clavier::Declaree()) return false;
+            ImGuiIO& io = ImGui::GetIO();
+            if (!io.WantTextInput) return false;
+            // Mêmes lectures que ClavierDeclareSurTouche : AltGr = Alt droit, ou
+            // le Ctrl+Alt que Windows fabrique autour de lui.
+            const bool ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool alt   = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            const bool altgr = ((GetKeyState(VK_RMENU) & 0x8000) != 0) || (ctrl && alt);
+            if ((ctrl || alt) && !altgr) return false;
+            const int sc = static_cast<int>((l >> 16) & 0xFF);
+
+            vk::clavier::Frappe f;
+            if (vk::clavier::TerminerMorte(vk, f)) {
+                for (int i = 0; i < f.n; ++i) {
+                    io.AddInputCharacterUTF16(static_cast<ImWchar16>(f.texte[i]));
+                }
+                g_scTraduit = sc;
+                // Un caractère servi par la fenêtre : compté comme dans
+                // ClavierDeclareSurTouche, pour la même raison (le verrou du repli).
+                g_wmCharSeen.fetch_add(1, std::memory_order_relaxed);
+                return false;   // la touche suit son cours
+            }
+            if (vk::clavier::AnnulerMorte(vk)) {
+                g_scTraduit = sc;
+                g_retourAvale = true;
+                return true;
+            }
+            return false;
+        }
+
         LRESULT CALLBACK WndProcThunk(HWND h, UINT m, WPARAM w, LPARAM l)
         {
             g_thunkMsgs.fetch_add(1, std::memory_order_relaxed);
@@ -271,6 +406,10 @@ namespace FUI::UIRoot
                 // and "did we let it through" are different questions, and the
                 // fallback latch below needs the first one.
                 g_wmKeyRaw.fetch_add(1, std::memory_order_relaxed);
+                // [vulkaar] une touche nouvelle : la promesse d'avaler le jumeau
+                // de la précédente ne lui survit pas — quel que soit le garde
+                // ci-dessous, sinon un WM_CHAR d'après console serait avalé à tort.
+                if (m == WM_KEYDOWN || m == WM_SYSKEYDOWN) g_scTraduit = -1;
                 // ★★KEYS REACH US BY TWO ROADS, and only one of them was
                 // watched. GridMenu::ProcessScaleformEvent drops key events
                 // while the console is up — but this thunk is a SEPARATE,
@@ -286,12 +425,26 @@ namespace FUI::UIRoot
                     ui && ui->IsMenuOpen("GridInventoryMenu"sv) &&
                     !ui->IsMenuOpen(RE::Console::MENU_NAME) &&
                     ImGui::GetCurrentContext()) {
+                    // [vulkaar] le jumeau Windows d'une lettre déjà écrite par le
+                    // clavier déclaré : ni à ImGui, ni compté — voir plus haut.
+                    if (m == WM_CHAR && ClavierDeclareAvale(l)) break;
+                    // [vulkaar] une touche hors table sur un accent en attente :
+                    // Entrée/Tab/Échap poussent l'accent et passent ; Retour
+                    // arrière est avalé, et son WM_KEYUP jumeau avec lui.
+                    if ((m == WM_KEYDOWN || m == WM_SYSKEYDOWN) && ClavierDeclareMorteDevant(w, l)) break;
+                    if ((m == WM_KEYUP || m == WM_SYSKEYUP) && w == VK_BACK && g_retourAvale) {
+                        g_retourAvale = false;
+                        break;
+                    }
                     if (m == WM_CHAR) {
                         g_wmCharSeen.fetch_add(1, std::memory_order_relaxed);
                     } else {
                         g_wmKeySeen.fetch_add(1, std::memory_order_relaxed);
                     }
                     ImGui_ImplWin32_WndProcHandler(h, m, w, l);
+                    // [vulkaar] APRÈS la touche, le caractère : l'ordre dans lequel
+                    // Windows les aurait livrés (WM_KEYDOWN, puis WM_CHAR).
+                    if (m == WM_KEYDOWN || m == WM_SYSKEYDOWN) ClavierDeclareSurTouche(l);
                 }
                 break;
             default:
@@ -337,6 +490,10 @@ namespace FUI::UIRoot
             case VK_SPACE: case VK_OEM_7: case VK_OEM_COMMA: case VK_OEM_MINUS:
             case VK_OEM_PERIOD: case VK_OEM_2: case VK_OEM_1: case VK_OEM_PLUS:
             case VK_OEM_4: case VK_OEM_5: case VK_OEM_6: case VK_OEM_3:
+            // [vulkaar] la touche <> à côté de Maj gauche (VK_OEM_102) et le
+            // « ! » de l'AZERTY (VK_OEM_8) : deux positions de nos tables qui,
+            // hors de cette liste, resteraient muettes en repli.
+            case VK_OEM_102: case VK_OEM_8:
             case VK_MULTIPLY: case VK_ADD: case VK_SUBTRACT: case VK_DECIMAL:
             case VK_DIVIDE:
                 return true;
@@ -357,12 +514,22 @@ namespace FUI::UIRoot
             // accents lying around for the next field that opens.
             if (!a_io.WantTextInput) {
                 for (auto& d : s_down) d = false;
+                // [vulkaar] plus de champ : un accent posé par une touche morte
+                // du clavier déclaré ne doit pas tomber dans le prochain.
+                vk::clavier::OublierMorte();
                 return;
             }
 
             const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+            const bool verrMaj = (GetKeyState(VK_CAPITAL) & 1) != 0;
+            // [vulkaar] LE CLAVIER DÉCLARÉ, ROUTE 2 : LE REPLI. Même décision
+            // qu'à la fenêtre (ClavierDeclareSurTouche) : notre table d'abord,
+            // ToUnicodeEx seulement pour ce qu'elle ne connaît pas. L'Alt droit
+            // vaut AltGr dès qu'une disposition est déclarée.
+            const auto* declaree = vk::clavier::Declaree();
+            const bool  altgr    = declaree && (GetAsyncKeyState(VK_RMENU) & 0x8000) != 0;
 
             const unsigned chars = g_wmCharSeen.load(std::memory_order_relaxed);
             const bool     wmAlive = chars != s_lastChars;
@@ -375,15 +542,40 @@ namespace FUI::UIRoot
                 if (shift) { ks[VK_SHIFT] = 0x80; ks[VK_LSHIFT] = 0x80; }
                 if (ctrl)  { ks[VK_CONTROL] = 0x80; }
                 if (alt)   { ks[VK_MENU] = 0x80; }
-                if (GetKeyState(VK_CAPITAL) & 1) ks[VK_CAPITAL] = 0x01;
+                if (verrMaj) ks[VK_CAPITAL] = 0x01;
             }
 
             for (int vk = 0; vk < 256; ++vk) {
-                if (!TypedVk(vk)) continue;
+                // [vulkaar] les quatre touches hors table qui touchent l'accent en
+                // attente d'une morte (Entrée, Tab, Échap, Retour arrière) sont
+                // suivies aussi — pour l'attente seulement : ni pour le verrou
+                // ci-dessous, ni pour ToUnicodeEx.
+                const bool toucheLaMorte =
+                    vk == VK_RETURN || vk == VK_TAB || vk == VK_ESCAPE || vk == VK_BACK;
+                if (!TypedVk(vk) && !toucheLaMorte) continue;
                 const bool now = (GetAsyncKeyState(vk) & 0x8000) != 0;
                 if (now == s_down[vk]) continue;
                 s_down[vk] = now;
                 if (!now) continue;
+
+                if (toucheLaMorte) {
+                    // Seulement en repli : tant que la fenêtre vit, c'est elle qui
+                    // a fait (ClavierDeclareMorteDevant), et deux fois serait deux
+                    // accents. Ici on ne peut pas avaler l'effacement d'ImGui — la
+                    // touche lui arrive par la route Scaleform, pas par nous — : on
+                    // pousse l'accent ou on efface l'attente, rien de plus.
+                    if (g_kbFallback && !((ctrl || alt) && !altgr)) {
+                        vk::clavier::Frappe f;
+                        if (vk::clavier::TerminerMorte(vk, f)) {
+                            for (int i = 0; i < f.n; ++i) {
+                                a_io.AddInputCharacterUTF16(static_cast<ImWchar16>(f.texte[i]));
+                            }
+                        } else {
+                            vk::clavier::AnnulerMorte(vk);
+                        }
+                    }
+                    continue;
+                }
 
                 if (!g_kbFallback) {
                     // ★THE LATCH, and it is a CONTRADICTION rather than a
@@ -406,8 +598,22 @@ namespace FUI::UIRoot
                     continue;
                 }
 
-                if (ctrl || alt) continue;   // a shortcut, not a character
-                const UINT sc = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC);
+                if ((ctrl || alt) && !altgr) continue;   // a shortcut, not a character
+                // [vulkaar] _EX : le préfixe étendu revient dans l'octet haut.
+                // MapVirtualKey nu rend le même 0x35 pour le « / » du pavé et
+                // pour la touche « ! » de l'AZERTY — traduit par notre table, le
+                // pavé écrirait « ! ». ToUnicodeEx reçoit l'octet bas, comme avant.
+                const UINT scEx = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC_EX);
+                const UINT sc   = scEx & 0xFF;
+                if (declaree && (scEx & 0xFF00) == 0) {
+                    vk::clavier::Frappe f;
+                    if (vk::clavier::Traduire(static_cast<std::uint8_t>(sc), shift, altgr, verrMaj, f)) {
+                        for (int i = 0; i < f.n; ++i) {
+                            a_io.AddInputCharacterUTF16(static_cast<ImWchar16>(f.texte[i]));
+                        }
+                        continue;
+                    }
+                }
                 WCHAR     buf[8] = {};
                 const int n = ToUnicodeEx(static_cast<UINT>(vk), sc, ks, buf,
                                           static_cast<int>(std::size(buf)), 0,
@@ -4029,6 +4235,7 @@ namespace FUI::UIRoot
         Grid::ClearSearch();
         g_showSettings = false;
         g_textInputOn = false;
+        vk::clavier::OublierMorte();   // [vulkaar] l'accent posé meurt avec le menu
         if (ImGui::GetCurrentContext()) {
             ImGui::ClearActiveID();   // drop text-field focus: a stale ActiveId
                                       // keeps WantTextInput true past the close

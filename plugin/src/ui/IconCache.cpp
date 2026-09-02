@@ -1982,6 +1982,12 @@ namespace FUI
                 return;
             }
         }
+        /* [vulkaar] LA FILE EST-ELLE SUSPENDUE ? Un ecran a modele vivant tient
+           la scene 3D ; la file la lui volerait. Une capture DEJA en vol va au
+           bout — l'interrompre laisserait une entree a modele nul, ce que le
+           demontage ne pardonne pas. */
+        if (m_fileSuspendue && !m_pendingBusy) return;
+
         // GI68: the retry pass owns the generous window only while ITS entries
         // are in flight. Once the queue drains, ordinary captures must go back
         // to the short window or one straggler would hold up a whole menu.
@@ -2504,6 +2510,14 @@ namespace FUI
             ui->numPausesGame -= 1;
         }
         m_impulsionTenue = a_voulue;
+    }
+
+    void IconCache::SuspendreLaFile(bool a_suspendue)
+    {
+        if (a_suspendue == m_fileSuspendue) return;
+        m_fileSuspendue = a_suspendue;
+        SKSE::log::info("[ICONS] file des tuiles {}",
+            a_suspendue ? "SUSPENDUE (un ecran tient la scene 3D)" : "reprise");
     }
 
     void IconCache::RelacherImpulsionPause()

@@ -75,6 +75,11 @@ set(SOURCES
     src/ui/Echange.cpp
     src/ui/Etabli.h
     src/ui/Etabli.cpp
+    src/ui/Clavier.h
+    src/ui/Clavier.cpp
+    src/ui/ClavierTables.gen.h
+    src/ui/EssaiSwf.h
+    src/ui/EssaiSwf.cpp
     src/game/BagFilter.h
     src/game/BagFilter.cpp
     src/game/Costume.h

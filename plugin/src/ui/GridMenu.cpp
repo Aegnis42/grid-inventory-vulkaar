@@ -4,6 +4,7 @@
 #include "game/Ledger.h"
 #include "game/WornLedger.h"
 #include "ui/Grid.h"
+#include "ui/Etabli.h"
 #include "ui/IconCache.h"
 #include "ui/ItemPreview.h"
 #include "ui/Sfx.h"
@@ -175,6 +176,12 @@ namespace FUI
         // frame. AFTER PostRender so a capture that just landed is available
         // to derive from on this very frame.
         IconCache::GetSingleton()->TickPixelDerive();
+        /* [vulkaar 29/08] LE RENDU VIVANT DE L'ETABLI. Ici, et pas ailleurs :
+           APRES la sequence de capture — dont la derniere etape RESTAURE le
+           fond d'ecran et effacerait le modele — et AVANT la soumission
+           d'ImGui, pour que le modele se pose sur le monde et les fenetres
+           sur le modele. */
+        Etabli::RendreModeleVivant();
         UIRoot::Render();
         ForceCursor();
     }
@@ -326,11 +333,20 @@ namespace FUI
         // ne fait que se téléporter au retour. Le menu vit donc comme les
         // menus vanilla dépausés par SkyrimSouls (le contexte kInventory
         // ci-dessous isole déjà clics et touches de la couche gameplay, note
-        // A3 de main.cpp). Ce que la pause achetait — la capture d'icônes 3D
-        // (Inventory3DManager::Render ne rend rien quand le jeu tourne) — est
-        // verrouillé à la source : Capturable() (IconCache.cpp) refuse de
-        // mettre en file sans vraie pause, et les objets absents du pak
-        // retombent sur l'icône 2D (Fallback), jamais sur une capture noire.
+        // A3 de main.cpp).
+        //
+        // ★CE COMMENTAIRE AFFIRMAIT DEUX CHOSES FAUSSES, corrigees le 29/08
+        // apres qu'elles eurent fait perdre une soiree : il disait que
+        // « Inventory3DManager::Render ne rend rien quand le jeu tourne » et
+        // que « Capturable() refuse de mettre en file sans vraie pause ».
+        // MESURE : Capturable() ne contient pas UN SEUL test de pause, et les
+        // 2 228 icones du pak ont ete capturees depuis CE menu, qui ne met pas
+        // le jeu en pause. Le moteur rend donc tres bien sans elle — et le
+        // menu de forge du jeu, qui montre un modele vivant, ne porte pas
+        // davantage kPausesGame (CraftingMenu.h).
+        //
+        // Ce qui reste vrai : les objets absents du pak retombent sur l'icone
+        // 2D (Fallback), jamais sur une capture noire.
         menu->menuFlags.set(Flags::kDisablePauseMenu);
 
         // kInventory, NOT kMenuMode/kItemMenu: this is the vanilla

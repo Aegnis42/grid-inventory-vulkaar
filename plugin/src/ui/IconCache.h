@@ -122,6 +122,25 @@ namespace FUI
         // tenue sans pompe pour la relâcher.
         void RelacherImpulsionPause();
 
+        /* [vulkaar 29/08] SUSPENDRE LA FILE DES TUILES.
+
+           Un ecran qui montre un MODELE VIVANT tient la scene 3D du moteur.
+           La file d'icones, elle, y charge et decharge des objets sans arret
+           pour ses captures — elle volerait le modele sous nos yeux.
+
+           L'ecran d'etabli employait pour cela SetInspect, qui met bien la
+           file en pause mais fait DAVANTAGE : il pose l'echelle de nœud de
+           l'inspection (kInspectModelScale) et la remet a zero en sortant.
+           Mesure du 29/08, rapportee par le proprietaire : « quand je bouge le
+           model 3d il se rescale en grand et redevient petit ». Le modele
+           oscillait entre l'echelle de la capture et la notre.
+
+           Ceci ne fait qu'une chose : arreter la file. Aucune echelle, aucune
+           orientation, aucune capture. Une capture DEJA en vol va au bout —
+           l'interrompre laisserait une entree a modele nul dans la scene, ce
+           que le demontage ne pardonne pas. */
+        void SuspendreLaFile(bool a_suspendue);
+
         // Editor pin: keep this item's model loaded between captures so a
         // rotation edit re-captures every frame (live editing). While pinned,
         // captures replace a single in-memory slot and skip the disk write —
@@ -266,6 +285,7 @@ namespace FUI
         };
         PolitiquePause m_politiquePause{ PolitiquePause::kInconnue };
         bool           m_impulsionTenue{ false };
+        bool           m_fileSuspendue{ false };    // un ecran a modele vivant tient la scene
         void TenirImpulsionPause(bool a_voulue);
 
         // Phase 3: PostRender's front half — timeouts / soft-skip / capture &

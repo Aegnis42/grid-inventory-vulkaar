@@ -2,6 +2,7 @@
 
 #include "ui/Grid.h"
 #include "ui/IconCache.h"
+#include "ui/ItemPreview.h"
 #include "ui/Theme.h"
 #include "ui/UIRoot.h"
 
@@ -59,6 +60,12 @@ namespace FUI::Etabli
         {
             std::string id;
             std::string nom;
+            /** Combien de gestes CE joueur peut faire dans ce rayon, a CETTE
+             *  station. Le serveur n'envoie plus que les rayons NON VIDES
+             *  depuis le 29/08/2026 — « en onglet de craft seulement ce qui
+             *  contienne des craft » — et le compte descend avec, pour que
+             *  l'ecran l'affiche sans avoir a parcourir la liste. */
+            int         combien = 0;
         };
 
         // ---- état reçu (le serveur fait foi) ----
@@ -80,11 +87,30 @@ namespace FUI::Etabli
         // ---- l'aperçu (mode INSPECT de l'IconCache : sa propre texture) ----
         RE::FormID g_apercuArme = 0;        // ce que Tick a demandé
         bool       g_apercuActif = false;
+        /* OU L'APERCU SE DESSINE, retenu par Dessiner() pour que Tick() y
+           gare le modele. Tick tourne HORS de la trame ImGui : il n'a pas
+           acces aux variables locales de Dessiner, et io.DisplaySize n'y vaut
+           que ce que la trame precedente y a laisse. */
+        ImVec2     g_apBoitePos(0.0f, 0.0f);
+        ImVec2     g_apBoiteTaille(0.0f, 0.0f);
         // L'orientation d'ouverture, celle des icônes de la maison : le modèle
         // couché sur le dos, comme dans les cases de l'inventaire.
         constexpr float kRx0 = -90.0f, kRy0 = 0.0f, kRz0 = 0.0f;
+        /* Combien de fois l'echelle du moteur : la boite d'apercu de
+           l'etabli fait pres de 500 px, quand une tuile d'inventaire en
+           fait 64. A ajuster a l'oeil — c'est le seul reglage du rendu
+           vivant qui ne se deduise pas. */
+        constexpr float kEchelleVivante = 2.2f;
         float g_apRx = kRx0, g_apRy = kRy0, g_apRz = kRz0;
-        float g_apZoom = 1.0f;
+        /* LE DEZOOM MAXIMAL PAR DEFAUT — demande du proprietaire, 29/08/2026 :
+           « retire le dezoom de l'item et mets-les en dezoom max par defaut ».
+           L'objet entre en entier dans la boite, quitte a paraitre petit ;
+           la molette sert alors a s'en RAPPROCHER, jamais a s'en eloigner
+           davantage. Une seule constante commande le defaut ET les trois
+           remises a zero (changement d'objet, touche R, fermeture). */
+        constexpr float kZoomMin = 0.5f;   // le dezoom MAXIMAL
+        constexpr float kZoomMax = 3.0f;
+        float g_apZoom = kZoomMin;
         bool  g_apTire = false;             // le bouton gauche est tenu
 
         // ---- plomberie ----
@@ -286,6 +312,39 @@ namespace FUI::Etabli
             std::FILE* f = std::fopen(kCheminEtat, "r");
             if (!f) return;
 
+            /* LE NUMERO DE SEQUENCE SE LIT EN PREMIER, ET ON SORT AUSSITOT.
+               Ce Tick est appele A CHAQUE TRAME (UIRoot.cpp, l'anneau qui
+               porte aussi Costume::Tick et Grid::CapacityTick). Le fichier,
+               lui, est reecrit ENTIER a chaque poussee du serveur, et la
+               premiere ligne porte « seq <n> » (etabliService.ts).
+
+               Jusqu'au 29/08/2026 tout le fichier etait analyse AVANT de
+               regarder ce numero — un plateau d'etabli du menuisier ne fait
+               que 125 gestes, et le defaut ne s'est jamais vu. Celui de la
+               forge en portera 5 586 : mesure a 1,9 Mio et pres de 20 000
+               lignes, l'analyse coute plus qu'une trame entiere, soixante
+               fois par seconde, pour un fichier qui n'a pas bouge.
+
+               Lire une ligne et comparer, c'est tout ce qu'il faut. La course
+               avec la reecriture du serveur n'empire pas : quand le numero a
+               CHANGE, on relit le fichier depuis le debut, exactement comme
+               avant. */
+            {
+                char premiere[256];
+                if (std::fgets(premiere, sizeof(premiere), f)) {
+                    char* p0[4];
+                    const int n0 = Champs(premiere, p0, 4);
+                    if (n0 >= 2 && std::strcmp(p0[0], "seq") == 0) {
+                        const unsigned long long vu = std::strtoull(p0[1], nullptr, 10);
+                        if (vu != 0 && vu == g_seqEtat) {
+                            std::fclose(f);
+                            return;   // rien n'a bouge : pas un octet de plus
+                        }
+                    }
+                }
+                std::rewind(f);
+            }
+
             unsigned long long seq = 0;
             bool ouvert = false;
             std::string titre, message;
@@ -310,7 +369,11 @@ namespace FUI::Etabli
                     const int rang = std::atoi(c[1]);
                     if (rang >= 1 && rang <= kNbQualites) qualites[rang - 1] = c[2];
                 } else if (std::strcmp(c[0], "cat") == 0 && n >= 3) {
-                    rayons.push_back(Rayon{ c[1], c[2] });
+                    /* Le 4e champ (le compte) n'existe que depuis le
+                       29/08/2026 : on l'accepte absent plutot que de rejeter
+                       la ligne — un plateau d'avant reste jouable, il montre
+                       juste le nom sans le nombre. */
+                    rayons.push_back(Rayon{ c[1], c[2], n >= 4 ? std::atoi(c[3]) : 0 });
                 } else if (std::strcmp(c[0], "geste") == 0 && n >= 11) {
                     Geste g;
                     g.id = c[1];
@@ -379,7 +442,7 @@ namespace FUI::Etabli
                 g_recherche[0] = '\0';
                 g_gesteChoisi = g_gestes.empty() ? std::string() : g_gestes.front().id;
                 g_qualiteChoisie = 1;
-                g_apRx = kRx0; g_apRy = kRy0; g_apRz = kRz0; g_apZoom = 1.0f;
+                g_apRx = kRx0; g_apRy = kRy0; g_apRz = kRz0; g_apZoom = kZoomMin;
                 UIRoot::Open();
             }
             if (!g_ouvert && avant) g_gesteChoisi.clear();
@@ -543,17 +606,23 @@ namespace FUI::Etabli
                 bouge = true;
             }
             if (ImGui::IsWindowHovered() && io.MouseWheel != 0.0f) {
-                g_apZoom = std::clamp(g_apZoom * (1.0f + io.MouseWheel * 0.12f), 0.5f, 3.0f);
+                g_apZoom = std::clamp(g_apZoom * (1.0f + io.MouseWheel * 0.12f), kZoomMin, kZoomMax);
             }
             if (ImGui::IsKeyPressed(ImGuiKey_R, false) && !io.WantTextInput) {
-                g_apRx = kRx0; g_apRy = kRy0; g_apRz = kRz0; g_apZoom = 1.0f;
+                g_apRx = kRx0; g_apRy = kRy0; g_apRz = kRz0; g_apZoom = kZoomMin;
                 bouge = true;
             }
-            /* La capture ne se refait QUE sur un changement d'orientation. Le
-               zoom, lui, met simplement à l'échelle le sprite déjà là — le
-               re-photographier à chaque trame ferait tomber le jeu à 30 images
-               par seconde pour une image identique. */
-            if (bouge) icones->SetInspectRot(g_apRx, g_apRy, g_apRz);
+            /* LE GLISSER NE REARME PLUS AUCUNE CAPTURE (29/08/2026).
+               Il appelait SetInspectRot, qui remet la file d'icones au travail
+               — et IconCache pose alors SON echelle de nœud
+               (kInspectModelScale), puis la remet a zero en sortant. Rapporte
+               par le proprietaire : « quand je bouge le model 3d il se rescale
+               en grand et redevient petit ». Le modele oscillait entre
+               l'echelle de la capture et la notre.
+
+               L'orientation du modele VIVANT descend par MontrerVivant, a
+               chaque trame, depuis Tick. Il n'y a plus rien a photographier. */
+            (void)bouge;
 
             /* LA CAPTURE PEUT ÊTRE REFUSÉE, et c est voulu : sous 2 Go de
                mémoire libre le greffon suspend ses prises, parce que le
@@ -561,10 +630,22 @@ namespace FUI::Etabli
                Constaté en jeu le 28/08/2026 — l écran ne montrait alors RIEN
                du tout. On se rabat sur l icône de la tuile, qui est déjà en
                cache et ne coûte pas une prise de plus. */
-            const IconCache::Icon* ic = icones->InspectIcon();
-            if (ic == nullptr || ic->srv == nullptr) {
-                if (auto* forme = Forme(g_apercuArme)) ic = icones->Get(forme);
+            /* LE MODELE VIVANT PASSE DEVANT. Quand le moteur le peint, on
+               ne dessine RIEN par-dessus : la photo le masquerait. La fenetre
+               reste (NoBackground) pour capter le glisser et la molette.
+               La photo demeure en repli — memoire basse, modele sans NIF,
+               chargement pas encore arrive : mieux vaut une image figee que
+               le vide. */
+            if (auto* pv = ItemPreview::GetSingleton(); pv && pv->VivantPret()) {
+                ImGui::End();
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor();
+                return;
             }
+            /* LE REPLI EST L'ICONE DE LA TUILE, deja en cache et gratuite.
+               Plus d'InspectIcon : l'etabli ne commande plus de capture. */
+            const IconCache::Icon* ic = nullptr;
+            if (auto* forme = Forme(g_apercuArme)) ic = icones->Get(forme);
             if (ic && ic->srv && ic->w > 0 && ic->h > 0) {
                 /* À SON RAPPORT D'ASPECT. Le forcer en carré étirait la capture
                    et rendait une bouillie — constaté en jeu le 28/08/2026. */
@@ -577,9 +658,14 @@ namespace FUI::Etabli
                     ImVec2(c.x - sz.x * 0.5f, c.y - sz.y * 0.5f),
                     ImVec2(c.x + sz.x * 0.5f, c.y + sz.y * 0.5f));
             } else {
-                // Ni prise ni icône : on le DIT. Un cadre vide passerait
-                // pour une panne alors que le greffon attend simplement.
-                const char* mot = "l'aperçu attend que la mémoire se libère";
+                /* Ni modèle vivant ni icône : on le DIT, et on dit VRAI.
+                   Ce message parlait de mémoire — c'était le motif de 2026-08-28,
+                   quand l'aperçu passait encore par les captures. Depuis le
+                   29/08 il ne montre plus qu'un modèle vivant, et l'échec a une
+                   autre cause : le chargeur du moteur cale sur certaines de nos
+                   formes inventées. Un message faux vaut moins qu'un cadre vide :
+                   il envoie chercher au mauvais endroit. */
+                const char* mot = "ce modèle ne se charge pas";
                 const ImVec2 t = ImGui::CalcTextSize(mot);
                 ImGui::GetWindowDrawList()->AddText(
                     ImVec2(a_pos.x + (a_taille.x - t.x) * 0.5f, a_pos.y + a_taille.y * 0.5f),
@@ -669,6 +755,168 @@ namespace FUI::Etabli
 
     // ── l'interface publique ──────────────────────────────────────────────
 
+    // ══════════════════════════════════════════════════════════════════════
+    //  LA SORTIE SCALEFORM — le meme etat, servi a notre film
+    // ══════════════════════════════════════════════════════════════════════
+    //
+    // L'ecran ImGui de ce fichier reste en place ; on lui ajoute une SECONDE
+    // sortie. Tout l'etat est deja ici — rayons, gestes, ingredients, comptes
+    // par qualite, filtre, choix — et rien n'est duplique : le film recoit une
+    // VUE de ces memes variables, et ses actions les modifient comme les
+    // clics ImGui le font.
+    //
+    // LA GRAMMAIRE, une ligne par entree, champs separes par une tabulation :
+    //
+    //   S  titre  rayonChoisi  qualiteChoisie  gesteChoisi  filtre
+    //   Q  rang   nom                                  (les 8 qualites)
+    //   R  id     nom          combien                 (rayons NON VIDES)
+    //   G  id     nom          rayon  niveau  faisable  qualiteMax
+    //   I  nom    requis       possede                 (du geste choisi seul)
+    //   T  total  montres                              (ce qui a ete tronque)
+    //   M  message
+    //
+    // POURQUOI LES INGREDIENTS DU SEUL GESTE CHOISI : envoyer ceux des 5 586
+    // gestes de la forge ferait un plateau de 1,9 Mio. Le joueur n'en regarde
+    // qu'un a la fois — c'est le C++ qui sait lequel, et lui seul descend.
+
+    /** Combien de lignes le film recoit au plus. Le menuisier tient largement
+     *  dessous (48 dans son plus gros rayon) ; la forge en a 3 179 dans
+     *  « armures », et le compte total part avec pour que l'ecran DISE ce
+     *  qu'il ne montre pas. La pagination viendra quand elle sera due. */
+    constexpr int kLignesMax = 200;
+
+    std::string PlateauPourFilm()
+    {
+        std::string out;
+        out.reserve(16384);
+        const auto champ = [&](const std::string& v) {
+            /* Une tabulation ou un saut de ligne dans un nom couperait la
+               grammaire en deux. Les noms viennent du jeu et des mods : on ne
+               fait aucune supposition sur leur proprete. */
+            for (const char c : v) out += (c == '\t' || c == '\n' || c == '\r') ? ' ' : c;
+        };
+
+        out += "S" + std::string(1, '\t');
+        champ(g_titre);
+        out += '\t';
+        champ(g_rayonChoisi);
+        out += '\t' + std::to_string(g_qualiteChoisie) + '\t';
+        champ(g_gesteChoisi);
+        out += '\t';
+        champ(g_recherche);
+        out += '\n';
+
+        for (int q = 0; q < kNbQualites; ++q) {
+            out += "Q\t" + std::to_string(q + 1) + '\t';
+            champ(g_qualites[q]);
+            out += '\n';
+        }
+
+        for (const auto& r : g_rayons) {
+            out += "R\t";
+            champ(r.id);
+            out += '\t';
+            champ(r.nom);
+            out += '\t' + std::to_string(r.combien) + '\n';
+        }
+
+        const std::string filtre = EnMinuscules(g_recherche);
+        const Geste* choisi = nullptr;
+        int total = 0;
+        int montres = 0;
+        for (const auto& g : g_gestes) {
+            if (!g_rayonChoisi.empty() && g.rayon != g_rayonChoisi) continue;
+            /* La recherche porte sur CE QU ON FABRIQUE, comme la liste ImGui :
+               taper « charbon » doit trouver la meule qui en donne. */
+            const std::string affiche = NomFabrique(g, g_qualiteChoisie);
+            if (!filtre.empty() && EnMinuscules(affiche).find(filtre) == std::string::npos) continue;
+            total += 1;
+            if (g.id == g_gesteChoisi) choisi = &g;
+            if (montres >= kLignesMax) continue;
+            montres += 1;
+            out += "G\t";
+            champ(g.id);
+            out += '\t';
+            champ(affiche);
+            out += '\t';
+            champ(g.rayon);
+            out += '\t' + std::to_string(g.niveau) + '\t'
+                + std::to_string(LotsFaisables(g, g_qualiteChoisie) > 0 ? 1 : 0) + '\t'
+                + std::to_string(g.qualiteMax) + '\n';
+        }
+
+        if (choisi != nullptr) {
+            for (const auto& ing : choisi->ingredients) {
+                out += "I\t";
+                champ(NomDe(ing.form, ing.edid));
+                out += '\t' + std::to_string(ing.requis) + '\t'
+                    + std::to_string(ing.possede[g_qualiteChoisie - 1]) + '\n';
+            }
+        }
+
+        out += "T\t" + std::to_string(total) + '\t' + std::to_string(montres) + '\n';
+        if (!g_message.empty()) {
+            out += "M\t";
+            champ(g_message);
+            out += '\n';
+        }
+        return out;
+    }
+
+    /** Ce que le film demande. Rend true si l'ecran doit etre repeint. */
+    bool ActionDuFilm(const char* a_quoi, const char* a_valeur)
+    {
+        if (a_quoi == nullptr) return false;
+        const std::string quoi = a_quoi;
+        const std::string valeur = a_valeur == nullptr ? "" : a_valeur;
+
+        if (quoi == "rayon") {
+            g_rayonChoisi = valeur;
+            g_gesteChoisi.clear();
+            return true;
+        }
+        if (quoi == "filtre") {
+            std::snprintf(g_recherche, sizeof(g_recherche), "%s", valeur.c_str());
+            return true;
+        }
+        if (quoi == "choix") {
+            g_gesteChoisi = valeur;
+            /* Une qualite hors de portee du nouveau geste se replie sur ce
+               qu'il sait faire, plutot que de rester eteinte. */
+            for (const auto& g : g_gestes) {
+                if (g.id == g_gesteChoisi && g_qualiteChoisie > g.qualiteMax) {
+                    g_qualiteChoisie = g.qualiteMax;
+                }
+            }
+            return true;
+        }
+        if (quoi == "qualite") {
+            const int q = std::atoi(valeur.c_str());
+            if (q >= 1 && q <= kNbQualites) g_qualiteChoisie = q;
+            return true;
+        }
+        if (quoi == "fabriquer") {
+            /* MEME CHEMIN QUE LE BOUTON IMGUI : l'arbitrage est au serveur, on
+               ne fait que demander. Le geste part par le fichier TSV et la
+               reponse revient en plateau. */
+            for (const auto& g : g_gestes) {
+                if (g.id != g_gesteChoisi) continue;
+                if (LotsFaisables(g, g_qualiteChoisie) <= 0) return false;
+                char reste[128];
+                std::snprintf(reste, sizeof(reste), "%s\t%d", g.id.c_str(), g_qualiteChoisie);
+                EcrireGeste("crafter", reste);
+                return true;
+            }
+            return false;
+        }
+        if (quoi == "fermer") {
+            Fermer();
+            return true;
+        }
+        return false;
+    }
+
+
     void Initialiser()
     {
         if (std::FILE* f = std::fopen(kCheminGestes, "w")) {
@@ -684,6 +932,87 @@ namespace FUI::Etabli
         if (std::FILE* f = std::fopen(kCheminEtat, "w")) {
             std::fclose(f);
         }
+    }
+
+    /* ── LE RENDU VIVANT DU MOTEUR (29/08/2026) ────────────────────────────
+       Demande du proprietaire : « je veut vraiment le meme que celui du jeu
+       qui tourne via le moteur du jeu ».
+
+       On ne montre plus une PHOTO mais le modele lui-meme, charge par le
+       moteur et peint par lui a chaque trame — exactement l'apercu de
+       l'inventaire vanilla, meme scene et meme eclairage (le menu de grille
+       ouvre la scene en INTERFACE_LIGHT_SCHEME::kInventory).
+
+       POURQUOI ON NE PASSE PAS PAR LA FILE DE CAPTURE : mesure du 29/08 a
+       20:19, sous pression memoire IconCache::PreRender sort AVANT d'armer la
+       prise — donc avant de charger le modele — et l'ecran est reste vide
+       douze minutes. Un seul modele tenu vivant coute infiniment moins qu'une
+       passe d'icones ; il n'a pas a en payer le garde-fou. */
+    void PiloterLeModeleVivant()
+    {
+        auto* apercu = ItemPreview::GetSingleton();
+        if (apercu == nullptr) return;
+
+        auto* icones = IconCache::GetSingleton();
+
+        if (!g_apercuActif || g_apBoiteTaille.x <= 0.0f) {
+            apercu->CacherVivant();
+            return;
+        }
+        auto* forme = Forme(g_apercuArme);
+        if (forme == nullptr) {
+            apercu->CacherVivant();
+            return;
+        }
+
+        /* PAS DE PAUSE, et la question est tranchee par la mesure.
+
+           J'avais tenu la pause ici le 29/08, sur la foi d'un commentaire
+           de GridMenu.cpp affirmant que « Inventory3DManager::Render ne
+           rend rien quand le jeu tourne » et que « Capturable() refuse de
+           mettre en file sans vraie pause ». LES DEUX SONT FAUX :
+           Capturable() ne contient pas un seul test de pause, et les 2 228
+           icones du pak ont ete capturees depuis ce menu, qui ne met
+           precisement pas le jeu en pause.
+
+           Le menu de forge du jeu ne le met pas non plus : ses drapeaux
+           (CraftingMenu.h) ne portent pas kPausesGame. Figer le monde
+           n'achete donc rien, et contredirait la decision du 25/08. */
+        const ImVec2 centre(g_apBoitePos.x + g_apBoiteTaille.x * 0.5f,
+                            g_apBoitePos.y + g_apBoiteTaille.y * 0.5f);
+        /* Le zoom de la molette pilote l'echelle du NOEUD, pas un etirement de
+           sprite : c'est un vrai rapprochement, pas une image agrandie. */
+        apercu->MontrerVivant(forme, centre, g_apRx, g_apRy, g_apRz, kEchelleVivante * g_apZoom);
+
+        /* LE TEMOIN DU CHARGEMENT. Sans lui on redevine : le 29/08 le journal
+           n'a dit « load stuck in flight » qu'a la FERMETURE, quand il etait
+           trop tard pour savoir depuis quand. Une ligne par objet, et une par
+           seconde tant qu'il n'est pas arrive — de quoi mesurer le delai
+           reellement, plutot que de le supposer. */
+        static RE::FormID dernier = 0;
+        static int attente = 0;
+        const bool pret = apercu->VivantPret();
+        if (g_apercuArme != dernier) {
+            dernier = g_apercuArme;
+            attente = 0;
+            logger::info("[ETABLI] modele demande : « {} » ({:08X})",
+                         forme->GetName(), g_apercuArme);
+        }
+        if (!pret) {
+            if (++attente % 60 == 1) {
+                logger::info("[ETABLI] ... pas encore la apres {} trame(s) — chargement en vol : {}",
+                             attente, apercu->ChargementEnVol() ? "oui" : "NON");
+            }
+        } else if (attente > 0) {
+            logger::info("[ETABLI] modele arrive apres {} trame(s)", attente);
+            attente = 0;
+        }
+    }
+
+    void RendreModeleVivant()
+    {
+        if (!g_ouvert || !g_apercuActif) return;
+        if (auto* apercu = ItemPreview::GetSingleton()) apercu->RendreVivant();
     }
 
     void Tick()
@@ -702,23 +1031,38 @@ namespace FUI::Etabli
 
         const Geste* g = g_ouvert ? GesteChoisi() : nullptr;
         const RE::FormID voulu = (g != nullptr) ? g->produit : 0;
-        if (voulu == g_apercuArme) return;
+        if (voulu == g_apercuArme) {
+            /* Meme objet, mais l'angle et le zoom ont pu bouger au glisser :
+               le pilote repose l'orientation a chaque trame. */
+            PiloterLeModeleVivant();
+            return;
+        }
 
         g_apercuArme = voulu;
         if (voulu == 0) {
             if (g_apercuActif) {
-                icones->ClearInspect();
+                /* On rend la scene a la file : plus personne ne tient de
+                   modele vivant. */
+                icones->SuspendreLaFile(false);
                 g_apercuActif = false;
             }
+            /* SANS CET APPEL le modele reste gare, et VIVANT, sur un ecran
+               ferme : le moteur continue de le peindre a chaque trame. */
+            PiloterLeModeleVivant();
             return;
         }
         if (auto* forme = Forme(voulu)) {
             // Changer d'objet remet la pose d'ouverture : garder l'angle du
             // précédent montrerait le suivant de dos, sans raison.
-            g_apRx = kRx0; g_apRy = kRy0; g_apRz = kRz0; g_apZoom = 1.0f;
-            icones->SetInspect(forme, g_apRx, g_apRy, g_apRz);
+            g_apRx = kRx0; g_apRy = kRy0; g_apRz = kRz0; g_apZoom = kZoomMin;
+            /* La file des tuiles s'arrete : elle chargerait et dechargerait
+               des objets dans la scene 3D que notre modele vivant occupe.
+               SuspendreLaFile ne fait QUE cela — SetInspect, lui, posait
+               aussi son echelle de nœud, d'ou le modele qui grossissait. */
+            icones->SuspendreLaFile(true);
             g_apercuActif = true;
         }
+        PiloterLeModeleVivant();
     }
 
     bool Ouvert()
@@ -802,6 +1146,8 @@ namespace FUI::Etabli
         const ImVec2 tailleAp((std::min)(libre * 0.62f, io.DisplaySize.y * 0.46f),
                               io.DisplaySize.y * 0.46f);
         const ImVec2 posAp(largeur + (libre - tailleAp.x) * 0.5f, io.DisplaySize.y * 0.06f);
+        g_apBoitePos = posAp;
+        g_apBoiteTaille = tailleAp;
         Apercu(posAp, tailleAp);
 
         /* LA RECETTE, sous l'aperçu. */

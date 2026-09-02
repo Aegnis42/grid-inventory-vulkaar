@@ -1033,6 +1033,104 @@ namespace FUI
         m_overrideOffsetY   = a_offsetY;
     }
 
+    /* ── L'AUTO-REPARATION DU CHARGEMENT ───────────────────────────────────
+       Extraite de Render() le 29/08 pour que le RENDU VIVANT en profite aussi.
+
+       Elle etait enfermee derriere le `if (!req) return;` de Render(), si bien
+       que le chemin vivant — qui desarme la prise, n'en voulant pas — sortait
+       AVANT elle. Resultat mesure au journal : « End: load stuck in flight »,
+       un chargement lance qui n'atterrissait jamais et que plus rien ne
+       relancait. Le modele ne s'affichait pas, et on croyait a une lenteur.
+
+       Le commentaire d'origine, garde parce qu'il porte la lecon : deux causes
+       a un chargement perdu — le demontage differe du menu vanilla, et un Load
+       emis la trame ou ResetScene rebatissait la scene (« observed 49 times in
+       one user session, always right after a reset »). Le test est « la scene
+       est VIDE et le moteur ne charge pas », jamais un decompte de trames :
+       loadTask arme veut dire que la demande a pris et que le moteur travaille
+       — sur un disque lent cela dure, et reemettre ne ferait que jeter le
+       travail en cours. */
+    void ItemPreview::AutoReparerChargement(RE::Inventory3DManager* a_inv, int a_frame)
+    {
+        auto& rt = a_inv->GetRuntimeData();
+
+        /* ── UNE TACHE QUI NE FINIT JAMAIS ────────────────────────────────
+           Mesure du 29/08, 23:07 : sur « Poutre (qualite grossiere) », le
+           journal a rendu 1 561 trames — 26 secondes — de
+
+               models=0 (dont 0 sans modele)  …  chargement en vol : oui
+
+           La scene est VIDE et pourtant loadTask reste arme. L'auto-reparation
+           ci-dessous exige `!loadTask` : elle attendait donc poliment une
+           tache qui n'aboutira pas, indefiniment.
+
+           Le raisonnement d'origine — « loadTask arme veut dire que le moteur
+           travaille, reemettre jetterait son travail » — reste juste POUR UN
+           TEMPS BORNE. Passe ce delai, il n'y a plus de travail a jeter.
+
+           Deux secondes, puis on refait la scene et on redemande. Deux echecs,
+           et on renonce a CET objet en le disant : mieux vaut un ecran qui
+           avoue que le modele ne vient pas qu'un ecran vide pour toujours. */
+        constexpr int kTramesAvantDeblocage = 120;   // ~2 s a 60 i/s
+
+        /* LA BONNE QUESTION EST « NOTRE MODELE EST-IL LA ? », jamais « la liste
+           est-elle vide ». Ecrite sur la liste vide, cette garde ne voyait pas
+           le cas mesure le 29/08 : deux entrees perimees, entierement chargees,
+           et la notre qui n'arrive jamais. Les trois filets — reparation,
+           deblocage, renoncement — restaient tous inertes. */
+        const bool notreModele = FindCurrentModel() != nullptr;
+        if (m_current && !notreModele) {
+            if (++m_bloqueDepuis == kTramesAvantDeblocage) {
+                int sansModele = 0;
+                for (auto& lm : rt.loadedModels) {
+                    if (!lm.spModel) ++sansModele;
+                }
+                SKSE::log::warn("[PREVIEW] '{}' manque depuis {} trames "
+                                "({} entree(s), dont {} non atterrie(s)) — on refait la scene",
+                                m_current->GetName(), m_bloqueDepuis,
+                                rt.loadedModels.size(), sansModele);
+                /* End3D dereference CHAQUE spModel : une entree non atterrie
+                   le ferait planter. On ne refait donc la scene que lorsque
+                   tout ce qui s'y trouve a bien atterri — ce qui est
+                   precisement le cas mesure. */
+                if (sansModele == 0) {
+                    Inv3D::End3D(a_inv);
+                    Inv3D::Begin3D(a_inv, RE::INTERFACE_LIGHT_SCHEME::kInventory);
+                    LoadForCapture(a_inv, m_current);
+                } else {
+                    SKSE::log::warn("[PREVIEW] scene non refaite : {} entree(s) en vol",
+                                    sansModele);
+                }
+            } else if (m_bloqueDepuis == kTramesAvantDeblocage * 3) {
+                SKSE::log::error("[PREVIEW] '{}' ne se charge PAS — on renonce, "
+                                 "l'ecran se rabat sur l'icone", m_current->GetName());
+                m_current = nullptr;
+                m_bloqueDepuis = 0;
+            }
+        } else {
+            m_bloqueDepuis = 0;
+        }
+
+        if (m_current && rt.loadedModels.empty() && !rt.loadTask) {
+            LoadForCapture(a_inv, m_current);
+            if (++m_healRun <= 3) {   // les premiers seulement ; le reste est du bruit
+                SKSE::log::info("[PREVIEW] self-heal reload '{}'", m_current->GetName());
+            }
+        } else {
+            m_healRun = 0;
+        }
+        if (a_frame % 120 == 0) {
+            const float r = (!rt.loadedModels.empty() && rt.loadedModels.back().spModel)
+                ? rt.loadedModels.back().spModel->worldBound.radius : -1.0f;
+            int sansModele = 0;
+            for (auto& lm : rt.loadedModels) {
+                if (!lm.spModel) ++sansModele;
+            }
+            SKSE::log::info("[PREVIEW] state: models={} (dont {} sans modele) backRadius={:.1f} cur='{}'",
+                rt.loadedModels.size(), sansModele, r, m_current ? m_current->GetName() : "-");
+        }
+    }
+
     void ItemPreview::Render()
     {
         static int s_frame = 0;
@@ -1063,23 +1161,7 @@ namespace FUI
         //
         // A repair sets loadTask, so this fires at most once per frame and stops
         // by itself the moment the model lands.
-        {
-            auto& rt = inv->GetRuntimeData();
-            if (m_current && rt.loadedModels.empty() && !rt.loadTask) {
-                LoadForCapture(inv, m_current);
-                if (++m_healRun <= 3) {   // log the first few; the rest is noise
-                    SKSE::log::info("[PREVIEW] self-heal reload '{}'", m_current->GetName());
-                }
-            } else {
-                m_healRun = 0;
-            }
-            if (s_frame % 120 == 0) {
-                const float r = (!rt.loadedModels.empty() && rt.loadedModels.back().spModel)
-                    ? rt.loadedModels.back().spModel->worldBound.radius : -1.0f;
-                SKSE::log::info("[PREVIEW] state: models={} backRadius={:.1f} cur='{}'",
-                    rt.loadedModels.size(), r, m_current ? m_current->GetName() : "-");
-            }
-        }
+        AutoReparerChargement(inv, s_frame);
 
         // Capture backbuffer in place without translation (upstream issue #48):
         // recentre the capture rect on the model's projected screen position.
@@ -1378,4 +1460,122 @@ namespace FUI
 
         ++m_captureStamp;
     }
+
+    // ══ LE RENDU VIVANT ═══════════════════════════════════════════════════
+    //
+    // Render() ci-dessus fait cinq etapes : sauver le fond d'ecran, laisser le
+    // moteur peindre le modele, copier le resultat, restaurer le fond. Le
+    // modele vivant est donc efface dans la trame meme ou il est peint.
+    // Ci-dessous, l'etape 3 toute seule — rien n'est sauve, rien n'est
+    // restaure, le modele reste a l'ecran.
+
+    void ItemPreview::MontrerVivant(RE::TESBoundObject* a_item, ImVec2 a_centre,
+                                    float a_rx, float a_ry, float a_rz, float a_echelle)
+    {
+        if (!m_running || a_item == nullptr) return;
+
+        /* LE PARKING SE POSE AVANT LE CHARGEMENT, et ce n'est pas un detail :
+           Request() s'en sert pour la POSITION DE NAISSANCE du modele, « so
+           the model never spends a single frame at the engine's default
+           on-screen spot ». Le poser apres ferait clignoter l'objet au milieu
+           de l'ecran a chaque changement de geste. */
+        m_parkPos = a_centre;
+        m_hasPark = true;
+
+        IconDef def{};
+        def.rx = a_rx;
+        def.ry = a_ry;
+        def.rz = a_rz;
+
+        /* ON PASSE PAR REQUEST(), ET SURTOUT PAS PAR Inv3D::Load DIRECTEMENT.
+           Premiere version du 29/08 : elle appelait le chargeur a nu, et le
+           journal a rendu « End: load stuck in flight » — un chargement lance
+           qui n'arrivait jamais. La cause est ecrite dans Request() meme :
+
+             « The 7-slot loadedModels array fills up with late-landing async
+               loads (Unload before landing is a no-op); when near capacity a
+               fresh Load SILENTLY FAILS — reset the scene first. »
+
+           Request() porte cette reinitialisation, le chemin rapide meme-NIF,
+           la position de naissance, la restauration de l'echelle du noeud et
+           le dechargement du precedent. Recopier tout cela ici l'aurait fait
+           diverger a la premiere correction. On l'appelle donc, et on annule
+           la seule chose dont on ne veut pas : la photo. */
+        const ImVec2 taille(a_centre.x * 0.0f + 512.0f, 512.0f);
+        const ImVec2 coin(a_centre.x - taille.x * 0.5f, a_centre.y - taille.y * 0.5f);
+        Request(a_item, coin, taille, -1.0f, 0.0f, 0.0f, &def);
+
+        /* PAS DE CAPTURE. Request l'a armee en sortant ; on la desarme aussitot.
+           Le rendu vivant n'a que faire d'une copie de 2048x2048 par trame —
+           c'est meme tout l'interet de ne plus photographier. */
+        m_requested = false;
+
+        /* L'echelle passe par le NOEUD, que UpdateParking repose a chaque
+           trame. Le itemScale du moteur ne suffit pas : il est recalcule, et
+           les deux ensemble ont deja donne des icones geantes. */
+        m_inspectScale = a_echelle;
+    }
+
+    void ItemPreview::RendreVivant()
+    {
+        if (!m_running) return;
+        auto* inv = RE::Inventory3DManager::GetSingleton();
+        if (inv == nullptr) return;
+
+        /* SANS CET APPEL, un chargement perdu le reste a jamais : le chemin
+           vivant ne passe pas par Render(), qui portait l'auto-reparation. */
+        static int s_trame = 0;
+        AutoReparerChargement(inv, ++s_trame);
+        /* ── IL FAUT PEINDRE POUR QUE LE MOTEUR CHARGE ────────────────────
+           Ce garde disait « rien de charge : ne rien peindre », et il a fait
+           un INTERBLOCAGE : je refusais de peindre tant que le modele n'etait
+           pas la, et le chargement asynchrone du moteur a besoin qu'on peigne
+           pour avancer. Comme l'ecran desarme aussi la capture,
+           Inventory3DManager::Render() n'etait appele AUCUNE fois de toute la
+           seance — d'ou « chargement en vol : oui » pendant 1 561 trames sur
+           une scene vide (mesure du 29/08, 23:07).
+
+           La preuve etait sous les yeux : le chemin de CAPTURE, lui, appelle
+           inv->Render() SANS CONDITION (etape 3 de Render()), et c'est
+           pourquoi il a toujours charge.
+
+           Ce que le garde voulait vraiment eviter — peindre le modele du
+           VOISIN — n'arrive que si la liste n'est PAS vide et que l'entree
+           n'est pas la notre. Liste vide : il n'y a personne a peindre, et
+           l'appel ne coute rien qu'une occasion donnee au moteur d'avancer. */
+        /* ON PEINT TOUJOURS. La premiere version de ce garde ne s'abstenait
+           que sur une liste vide — et la mesure du 29/08 a 23:47 a montre le
+           cas qu'elle laissait passer :
+
+               models=2 (dont 0 sans modele)  cur='Planche (qualite grossiere)'
+
+           deux modeles ENTIEREMENT charges, dont aucun n'est le notre, une
+           tache en vol pour le notre, et le garde qui refuse de peindre parce
+           que la liste n'est pas vide. Le meme interblocage, sous une autre
+           forme : le moteur attend qu'on peigne, on attend qu'il charge.
+
+           Peindre le modele d'un voisin est un defaut PASSAGER ; ne jamais
+           peindre est un blocage DEFINITIF. Et le voisin n'est pas gare a
+           notre place — UpdateParking ne tourne que pour le notre — donc il
+           reste ou il etait, sans usurper le cadre. */
+        auto* modele = FindCurrentModel();
+        if (modele != nullptr) UpdateParking();
+        inv->Render();
+    }
+
+    void ItemPreview::CacherVivant()
+    {
+        if (!m_running) return;
+        RestoreNodeScale();
+        m_inspectScale = 0.0f;
+        UnloadCurrent();
+        m_current = nullptr;
+        m_parkTicks = 0;
+    }
+
+    bool ItemPreview::VivantPret() const
+    {
+        return m_running && m_current != nullptr && FindCurrentModel() != nullptr;
+    }
+
 }
