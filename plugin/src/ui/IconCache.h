@@ -395,9 +395,17 @@ namespace FUI
         Style                                   m_style = Style::kRealistic;
         std::deque<Pending>                    m_queue;
         std::unordered_set<std::uint64_t>      m_queued;    // membership for m_queue
-        // permanently skipped this session: items whose capture keeps failing
-        // (e.g. mod items with no inventory model) — without this the visible
-        // grid re-queues them every frame and the caching spinner never ends
+        // Renoncement DE SESSION : sans lui la grille visible re-empile le
+        // meme objet a chaque trame et la roue de cache ne s'arrete jamais.
+        // ★[vulkaar 02/09] IL N'EST PLUS PERSISTE. Cet ensemble etait ecrit
+        // dans GridInventory_iconfail.txt, « never retried across sessions »,
+        // et il recevait le moindre DELAI. Trois objets y sont tombes le 02/09
+        // (Quarterstaff, Carved Iron Armor, Traveller Robes Red) pour un
+        // defaut de scene qui n'avait rien a voir avec eux — voir le pave de
+        // ItemPreview::CacherVivant. Un delai ne condamne plus : il est compte
+        // (m_slowTries) et retente. Ce qui est vraiment impossible — aucun
+        // chemin de modele, maillage absent — est refuse par Capturable() et
+        // MeshMissing() AVANT qu'une fenetre soit depensee, sans rien ecrire.
         std::unordered_set<std::uint64_t>      m_failed;
         bool                                   m_failLoaded = false;
         // GI68: ran out of window while the engine was STILL LOADING. Not a
@@ -407,12 +415,36 @@ namespace FUI
         std::unordered_map<std::uint64_t, RE::TESBoundObject*> m_deferredObj;
         bool                                   m_slowLoaded = false;
         bool                                   m_retryPass = false;   // generous window
+        // [vulkaar 02/09] LE GARDE-FOU CONTRE L'ACHARNEMENT, en trois compteurs.
+        //   m_slowTries : combien de SESSIONS ont deja depense une fenetre sur
+        //                 cette cle sans rien rapporter. Persiste a cote de la
+        //                 cle dans iconslow.txt. Au-dela de kSessionsDiffere
+        //                 l'objet se met AU REPOS — « reessayer » le reveille.
+        //   m_essais    : fenetres depensees CETTE session ; passe
+        //                 kEssaisParSession, m_failed ferme la porte jusqu'a la
+        //                 prochaine ouverture du jeu.
+        //   m_compteCetteSession : pour que deux echecs de la meme seance ne
+        //                 comptent pas pour deux sessions.
+        std::unordered_map<std::uint64_t, int> m_slowTries;
+        std::unordered_map<std::uint64_t, int> m_essais;
+        std::unordered_set<std::uint64_t>      m_compteCetteSession;
+        // Motif du dernier refus juge (le mot que rend CaptureRejectReason) :
+        // c'est lui qui doit trancher la politique de pause, et non un stamp
+        // qui avance a chaque trame. Litteral statique, jamais libere.
+        const char*                            m_dernierMotif = nullptr;
+        // Echelons d'anti-rognage rejoues pour la capture en cours : chacun
+        // rend sa fenetre a l'objet, mais la serie reste finie.
+        int                                    m_echelons = 0;
 
-        void EnsureFailLoaded();               // lazy read of the persisted list
-        void PersistFail(std::uint64_t a_key); // append one permanently-failed key
+        void EnsureFailLoaded();               // relecture unique de l'ancienne liste (retiree)
         void EnsureSlowLoaded();
-        void PersistSlow(std::uint64_t a_key);
         void RewriteSlow();                    // after a retry resolves entries
+        // [vulkaar] le verdict d'un delai : differe, compte, jamais definitif
+        void NoterDifferee(std::uint64_t a_key, RE::TESBoundObject* a_obj);
+        [[nodiscard]] bool AuRepos(std::uint64_t a_key);
+        // [vulkaar] rend sa fenetre a la capture en cours quand l'echelle
+        // d'anti-rognage la fait rejouer ; serie bornee (voir la definition)
+        void RendreLaFenetre();
         Pending                                m_pending;
         RE::TESBoundObject*                    m_pin = nullptr;   // editor selection
         // Re-capture gate. "req" is what the in-flight request was armed with,

@@ -1460,6 +1460,9 @@ namespace FUI
         std::filesystem::remove(kSlowPath, ec);      // GI68: and the deferred ones
         m_deferred.clear();
         m_deferredObj.clear();
+        m_slowTries.clear();            // [vulkaar] la remise a zero efface aussi les compteurs
+        m_essais.clear();
+        m_compteCetteSession.clear();
         m_slowLoaded = false;
         // GI60: the retired "stylized" derivative. The style is gone, so the
         // file is dead weight in the player's folder — sweep it here.
@@ -1527,7 +1530,20 @@ namespace FUI
     // written under the old rules are no longer evidence of anything. v3: the
     // empty-world-model and missing-mesh cases are now caught before a capture
     // is ever armed, so anything the old gate recorded deserves a clean look.
-    static constexpr const char* kFailVer = "; ver 3";
+    // ★★★[vulkaar 02/09] LA LISTE DES ECHECS PERMANENTS EST RETIREE. v4 n'est
+    // plus une nouvelle regle d'ecriture : PLUS RIEN NE L'ECRIT. Elle recevait
+    // le moindre depassement de fenetre — « GiveUpPending » n'avait pas d'autre
+    // branche que celle-la — et le fichier du proprietaire portait le 02/09
+    // cinq cles, dont trois posees par un defaut de scene qui n'avait rien a
+    // voir avec les objets (ItemPreview::CacherVivant demontait la scene a
+    // chaque trame ; park plafonnait a 1, aucune capture ne pouvait aboutir).
+    // Le marqueur reste ici pour une seule raison : relire une fois l'ancien
+    // fichier, le supprimer, et rendre leur chance aux cles qu'il condamnait.
+    // Ce qui est vraiment impossible (aucun chemin de modele, maillage absent)
+    // est refuse par Capturable()/MeshMissing() AVANT qu'une fenetre soit
+    // depensee, et n'est deliberement pas persiste : la sonde est instantanee,
+    // et l'objet guerit tout seul le jour ou le maillage est installe.
+    static constexpr const char* kFailVer = "; ver 4";
 
     void IconCache::EnsureFailLoaded()
     {
@@ -1536,57 +1552,40 @@ namespace FUI
         std::ifstream in(kFailPath);
         if (!in) return;
         std::string line;
-        int  n = 0;
-        bool versioned = false;
+        int         n = 0;
         while (std::getline(in, line)) {
-            if (line.starts_with(kFailVer)) {
-                versioned = true;
-                continue;
-            }
             if (line.empty() || line[0] == ';') continue;
-            const auto key = std::strtoull(line.c_str(), nullptr, 16);
-            if (key) {
-                m_failed.insert(key);
-                ++n;
-            }
+            if (std::strtoull(line.c_str(), nullptr, 16)) ++n;
         }
         in.close();
-        if (!versioned) {
-            std::error_code ec;
-            std::filesystem::remove(kFailPath, ec);
-            SKSE::log::info(
-                "[ICONS] fail list discarded ({} pre-GI68 keys) - they get another chance", n);
-            m_failed.clear();
-            return;
-        }
+        // AUCUNE cle n'est reprise : la politique qui les a ecrites n'existe
+        // plus, donc elles ne prouvent plus rien. Le fichier part avec elle.
+        std::error_code ec;
+        std::filesystem::remove(kFailPath, ec);
         if (n) {
-            SKSE::log::info("[ICONS] {} permanently-failed capture keys loaded", n);
+            SKSE::log::info("[ICONS] ancienne liste d'echecs PERMANENTS retiree "
+                            "({} cle(s) liberees) — plus rien ne condamne un objet a vie", n);
         }
     }
 
-    void IconCache::PersistFail(std::uint64_t a_key)
+    // ---- GI68 / [vulkaar 02/09] : la liste des DIFFERES --------------------
+    // C'est desormais la SEULE liste persistee, et elle porte un compteur :
+    //     CLE  N
+    // N = combien de SESSIONS ont deja depense une fenetre sur cette cle sans
+    // rien rapporter. Passe kSessionsDiffere, l'objet est mis au repos — on ne
+    // s'acharne pas — mais rien n'est perdu : le bouton « reessayer » remet les
+    // compteurs a zero, et une capture reussie efface la cle.
+    static constexpr const char* kSlowVer         = "; ver 2";
+    static constexpr int         kSessionsDiffere = 3;   // puis repos jusqu'au bouton
+    static constexpr int         kEssaisParSession = 2;  // fenetres par cle et par seance
+
+    static void EcrireEnteteSlow(std::ofstream& a_out)
     {
-        // ios::ate, not bare ios::app: MSVC's append stream only seeks to the
-        // end AT WRITE TIME, so tellp() on a freshly opened app-mode file
-        // reports 0 no matter how much is already in it. Without ate, the
-        // "file is empty -> write the header" test was true on every single
-        // append and a 16-key list came out 48 lines long.
-        std::ofstream out(kFailPath, std::ios::app | std::ios::ate);
-        if (!out) return;
-        if (out.tellp() == 0) {
-            out << kFailVer << "\n";
-            out << "; Capture keys that permanently failed - never retried across sessions\n";
-            out << "; 캡처가 계속 실패한 키 목록 - 재접속 후에도 재시도하지 않습니다 (캐시 초기화 시 함께 삭제)\n";
-        }
-        char buf[24];
-        std::snprintf(buf, sizeof(buf), "%016llX\n",
-            static_cast<unsigned long long>(a_key));
-        out << buf;
+        a_out << kSlowVer << "\n";
+        a_out << "; Captures that ran out of time - retried next session, and on request\n";
+        a_out << "; Format: KEY  N  (N = sessions spent on it without success)\n";
+        a_out << "; 로딩 중에 시간이 부족했던 아이콘 - 설정에서 '다시 시도'를 누르면 재처리합니다\n";
     }
-
-    // ---- GI68: the deferred list ------------------------------------------
-    // Same file format as the fail list, different meaning: these WILL be
-    // retried, just not during a pass that other items are waiting on.
 
     void IconCache::EnsureSlowLoaded()
     {
@@ -1597,28 +1596,35 @@ namespace FUI
         std::string line;
         while (std::getline(in, line)) {
             if (line.empty() || line[0] == ';') continue;
-            if (const auto key = std::strtoull(line.c_str(), nullptr, 16); key) {
-                m_deferred.insert(key);
-            }
+            char* fin = nullptr;
+            const auto key = std::strtoull(line.c_str(), &fin, 16);
+            if (!key) continue;
+            m_deferred.insert(key);
+            // DEUX ABSENCES A NE PAS CONFONDRE — les confondre annulait le
+            // bouton « reessayer » des le redemarrage suivant :
+            //  - l'ANCIEN FORMAT ne porte que la cle. La seance qui l'a ecrite
+            //    avait bien depense sa fenetre : elle compte pour 1.
+            //  - un compteur ECRIT A ZERO est le reveil pose par le bouton
+            //    (RetryDeferred -> RewriteSlow). Ce zero est VOULU ; le relire
+            //    comme 1 volait au joueur une seance sur trois et rendait
+            //    fausse la promesse « le bouton remet les compteurs a zero ».
+            // On tranche donc sur la PRESENCE d'un chiffre, jamais sur sa valeur.
+            const char* chiffre = fin;
+            while (chiffre != nullptr && (*chiffre == ' ' || *chiffre == '\t')) ++chiffre;
+            const bool compteurEcrit =
+                chiffre != nullptr && *chiffre >= '0' && *chiffre <= '9';
+            const int n = compteurEcrit ? std::atoi(chiffre) : 1;
+            m_slowTries[key] = (n >= 0) ? n : 1;
         }
         if (!m_deferred.empty()) {
-            SKSE::log::info("[ICONS] {} deferred (slow) capture keys loaded",
-                m_deferred.size());
+            size_t auRepos = 0;
+            for (const auto& [k, n] : m_slowTries) {
+                if (n >= kSessionsDiffere) ++auRepos;
+            }
+            SKSE::log::info("[ICONS] {} cle(s) differee(s) relue(s) — {} au repos "
+                            "(le bouton « reessayer » les reveille)",
+                m_deferred.size(), auRepos);
         }
-    }
-
-    void IconCache::PersistSlow(std::uint64_t a_key)
-    {
-        std::ofstream out(kSlowPath, std::ios::app | std::ios::ate);   // see PersistFail
-        if (!out) return;
-        if (out.tellp() == 0) {
-            out << "; Captures that ran out of time while still loading - retried on request\n";
-            out << "; 로딩 중에 시간이 부족했던 아이콘 - 설정에서 '다시 시도'를 누르면 재처리합니다\n";
-        }
-        char buf[24];
-        std::snprintf(buf, sizeof(buf), "%016llX\n",
-            static_cast<unsigned long long>(a_key));
-        out << buf;
     }
 
     void IconCache::RewriteSlow()
@@ -1630,14 +1636,66 @@ namespace FUI
         }
         std::ofstream out(kSlowPath, std::ios::trunc);
         if (!out) return;
-        out << "; Captures that ran out of time while still loading - retried on request\n";
-        out << "; 로딩 중에 시간이 부족했던 아이콘 - 설정에서 '다시 시도'를 누르면 재처리합니다\n";
-        char buf[24];
+        EcrireEnteteSlow(out);
+        char buf[40];
         for (const auto k : m_deferred) {
-            std::snprintf(buf, sizeof(buf), "%016llX\n",
-                static_cast<unsigned long long>(k));
+            const auto it = m_slowTries.find(k);
+            std::snprintf(buf, sizeof(buf), "%016llX  %d\n",
+                static_cast<unsigned long long>(k), it != m_slowTries.end() ? it->second : 1);
             out << buf;
         }
+    }
+
+    // ★[vulkaar 02/09] LE VERDICT D'UN DELAI, ET IL N'EN EXISTE PLUS D'AUTRE.
+    // Toute fenetre depassee passe par ici : la cle entre (ou reste) dans la
+    // liste des differes, son compteur de SESSIONS monte d'un cran — une seule
+    // fois par seance, meme si l'objet echoue deux fois — et le fichier est
+    // reecrit aussitot (une passe de reprise reecrit a sa fin, pas a chaque
+    // entree). Rien n'est definitif : c'est tout l'objet du changement.
+    void IconCache::NoterDifferee(std::uint64_t a_key, RE::TESBoundObject* a_obj)
+    {
+        if (a_key == 0) return;   // une prise d'inspect n'a pas de cle de cache
+        EnsureSlowLoaded();
+        m_deferred.insert(a_key);
+        if (a_obj) m_deferredObj[a_key] = a_obj;
+        if (m_compteCetteSession.insert(a_key).second) {
+            const int n = ++m_slowTries[a_key];
+            if (n == kSessionsDiffere) {
+                SKSE::log::info("[ICONS] {:016X} mis AU REPOS apres {} sessions sans capture — "
+                                "plus de fenetre depensee dessus, « reessayer » le reveille",
+                    a_key, n);
+            }
+        }
+        if (!m_retryPass) RewriteSlow();   // la passe de reprise reecrit a sa fin
+    }
+
+    // ★[vulkaar 02/09] UN RE-ECHANTILLONNAGE VOLONTAIRE EST UN NOUVEL ESSAI.
+    // L'echelle d'anti-rognage (boite plus grande, puis modele a 70 %) relance
+    // une prise de vue par un simple `return` — mais m_frames n'etait remis a
+    // zero qu'a l'ARMEMENT. Un objet dont les pixels avaient bel et bien ete
+    // recoltes se faisait donc rejuger avec le reliquat d'une fenetre deja
+    // consommee, et le verdict etait PERMANENT. L'arithmetique de la trace du
+    // 02/09 le prouve : radius 58.6 a la premiere ligne, 41.0 a la seconde, et
+    // 58.6 x 0.7 = 41.0 — les deux « skipped (timeout) » de Quarterstaff ne
+    // sont pas deux objets muets, c'est un objet qui a rendu ses pixels deux
+    // fois. La serie reste FINIE, sans quoi un objet pathologique tiendrait la
+    // file : au-dela de kEchelonsMax, la fenetre ne se rouvre plus.
+    static constexpr int kEchelonsMax = 6;
+
+    void IconCache::RendreLaFenetre()
+    {
+        if (++m_echelons > kEchelonsMax) return;
+        m_frames = 0;
+    }
+
+    // Cette cle a-t-elle epuise ses sessions ? Une passe de reprise ignore le
+    // repos : c'est precisement ce que le bouton achete.
+    bool IconCache::AuRepos(std::uint64_t a_key)
+    {
+        if (m_retryPass) return false;
+        EnsureSlowLoaded();
+        const auto it = m_slowTries.find(a_key);
+        return it != m_slowTries.end() && it->second >= kSessionsDiffere;
     }
 
     size_t IconCache::DeferredCount()
@@ -1658,30 +1716,40 @@ namespace FUI
         if (m_deferred.empty()) return 0;
         // ★The form pointers are only known for keys deferred THIS session; a
         // list read from disk carries keys but no objects, so there is nothing
-        // to re-queue for those. They are DROPPED rather than left on the list:
-        // the button reports how many items it still owes a retry, and a key it
-        // can never act on would keep that number up forever and do nothing
-        // when pressed. Dropped is also the right outcome -- with the key gone
-        // the item takes a fresh full window the next time it is queued
-        // normally, which is the retry it was owed.
+        // to re-queue for those.
+        //
+        // ★★[vulkaar 02/09] ELLES NE SONT PLUS JETEES. L'ancienne version les
+        // effacait, en promettant que « l'objet prendra une fenetre pleine la
+        // prochaine fois qu'il sera mis en file » — promesse invalide tant que
+        // la meme cle dormait dans la liste des echecs PERMANENTS, ou
+        // QueueCapture sortait avant d'atteindre la file. Les deux cles
+        // doublement listees du 02/09 (243979AEB921F316, 46B96151B921F316)
+        // etaient exactement ce cas. On garde donc la cle et on remet son
+        // compteur a zero : le repos est leve, et la prochaine tuile qui la
+        // demande lui rend une fenetre entiere. C'est la reprise qu'on lui
+        // devait, et elle marche meme sans pointeur de forme.
         const size_t before = m_deferred.size();
         size_t       n      = 0;
         m_retryPass = true;
-        for (auto it = m_deferred.begin(); it != m_deferred.end();) {
-            const auto k   = *it;
+        // Le bouton est une REMISE A ZERO : le renoncement de session tombe,
+        // les essais de la seance aussi, sinon les gardes de QueueCapture
+        // annuleraient la remise en file une trame plus tard.
+        m_failed.clear();
+        m_essais.clear();
+        m_compteCetteSession.clear();
+        for (const auto k : m_deferred) {
+            m_slowTries[k] = 0;   // le repos est leve
             const auto obj = m_deferredObj.find(k);
-            if (obj == m_deferredObj.end() || !obj->second) {
-                it = m_deferred.erase(it);
-                continue;
-            }
-            ++it;
+            if (obj == m_deferredObj.end() || !obj->second) continue;
             if (m_icons.contains(k) || m_queued.contains(k)) continue;
             m_queue.push_back(Pending{ obj->second, obj->second->GetFormID(), k, false, 0.0f });
             m_queued.insert(k);
             ++n;
         }
-        SKSE::log::info("[ICONS] retry pass: {} of {} deferred re-queued ({} dropped, no form)",
-            n, before, before - m_deferred.size());
+        RewriteSlow();
+        SKSE::log::info("[ICONS] passe de reprise : {} des {} differees remises en file "
+                        "({} sans forme — reveillees pour la prochaine tuile qui les demande)",
+            n, before, before - n);
         return n;
     }
 
@@ -1689,6 +1757,8 @@ namespace FUI
     {
         m_deferred.clear();
         m_deferredObj.clear();
+        m_slowTries.clear();            // [vulkaar] les compteurs partent avec les cles
+        m_compteCetteSession.clear();
         m_slowLoaded = true;
         RewriteSlow();
     }
@@ -1842,7 +1912,7 @@ namespace FUI
 
         if (m_icons.contains(key) || m_queued.contains(key)) return;
         EnsureFailLoaded();
-        if (m_failed.contains(key)) return;   // gave up on this one — stay out
+        if (m_failed.contains(key)) return;   // renonce POUR CETTE SESSION — voir m_failed
         if (m_pendingBusy && m_pending.key == key) return;
 
         // Session-persistent icons: load from disk before spending any
@@ -1853,6 +1923,16 @@ namespace FUI
             legacy != key && (m_icons.contains(legacy) || LoadFromDisk(legacy))) {
             return;
         }
+
+        // [vulkaar 02/09] AU REPOS : kSessionsDiffere sessions ont deja depense
+        // une fenetre dessus sans rien rapporter. On cesse d'y revenir a chaque
+        // ouverture de grille — mais rien n'est condamne : « reessayer » remet
+        // le compteur a zero, et une capture reussie efface la cle.
+        // ★APRES les lectures disque, et pas avant : un objet au repos dont le
+        // sprite existe deja dans le pak (import de preset, capture d'une autre
+        // machine) doit quand meme recevoir son icone. Le repos n'interdit que
+        // la DEPENSE d'une fenetre de moteur.
+        if (AuRepos(key)) return;
 
         // ★GI51: FRONT of the queue. QueueCapture means "something on screen
         // right now has no sprite" — Prefetch means "we may need this later".
@@ -1883,6 +1963,9 @@ namespace FUI
             legacy != key && g_pakIndex.contains(legacy)) {
             return;
         }
+        // [vulkaar] voir QueueCapture : le repos vaut ici aussi, et pour la
+        // meme raison il s'apprecie APRES les lectures disque
+        if (AuRepos(key)) return;
         m_queue.push_back({ a_obj, a_obj->GetFormID(), key, a_evictAfter });
         m_queued.insert(key);
     }
@@ -2061,6 +2144,8 @@ namespace FUI
                     m_pendingBusy = true;
                     m_frames = 0;
                     m_captureShrink = 1.0f;   // fresh ladder per item
+                    m_echelons = 0;           // [vulkaar] echelle d'anti-rognage neuve
+                    ++m_essais[p.key];        // [vulkaar] fenetres depensees cette seance
                     break;
                 }
             }
@@ -2192,28 +2277,51 @@ namespace FUI
         // politique, il ne condamne pas l'objet. Signature exacte : le stamp a
         // avancé (ItemPreview::Render A tourné, le modèle était là) et pourtant
         // rien n'a été accepté — c'est le rendu Inventory3D qui reste vide
-        // quand le jeu court, pas un modèle absent ni un disque lent. On passe
-        // en kRequise, et CET objet part en DIFFÉRÉ : il repassera sous
-        // impulsion au lieu de pourrir dans la liste d'échec persistée.
+        // quand le jeu court, pas un modèle absent ni un disque lent.
+        //
+        // ★★[vulkaar 02/09] LA PREUVE DOIT PORTER SUR LE CONTENU, PAS SUR LE
+        // RIG. Le seul test « le stamp a avancé » est structurellement TOUJOURS
+        // vrai : m_stampBefore est réécrit à chaque trame juste avant Request,
+        // et Render vient de l'incrémenter. N'importe quel timeout basculait
+        // donc la session en kRequise — le 02/09 c'est « park » qui refusait,
+        // et le jeu s'est mis à geler quelques trames par icône neuve pour un
+        // motif qui n'avait rien à voir avec la pause. On refuse maintenant la
+        // bascule quand le dernier refus était un ÉTAT DE SCÈNE (park, rot) :
+        // ceux-là se corrigent tout seuls à la trame suivante.
+        const bool motifDeScene = m_dernierMotif != nullptr &&
+            (std::strcmp(m_dernierMotif, "park") == 0 ||
+             std::strcmp(m_dernierMotif, "rot") == 0);
         if (m_politiquePause == PolitiquePause::kInconnue && !m_impulsionTenue &&
-            std::strstr(a_why, "timeout") != nullptr &&
+            !motifDeScene && std::strstr(a_why, "timeout") != nullptr &&
             ItemPreview::GetSingleton()->GetCaptureStamp() != m_stampBefore) {
             m_politiquePause = PolitiquePause::kRequise;
             SKSE::log::warn(
                 "[ICONS] capture sans pause VIDE : impulsions de pause activees "
                 "pour la session ; '{}' repassera en differe",
                 m_pending.obj->GetName());
-            if (m_deferred.insert(m_pending.key).second) {
-                m_deferredObj[m_pending.key] = m_pending.obj;
-                PersistSlow(m_pending.key);
-            }
+            NoterDifferee(m_pending.key, m_pending.obj);
             return;
         }
-        // GI68: one verdict, no attempt counting. Reaching here means either the
-        // engine never even started a load (more time cannot help) or the retry
-        // pass already gave it ten seconds. Either way it is done.
-        if (m_failed.insert(m_pending.key).second) {
-            PersistFail(m_pending.key);
+        // ★★★[vulkaar 02/09] PLUS AUCUN DÉLAI N'EST DÉFINITIF.
+        //
+        // Ici tombait l'insertion dans la liste des échecs PERMANENTS, avec
+        // pour toute justification « soit le moteur n'a jamais commencé un
+        // chargement, soit la passe de reprise lui a donné dix secondes » —
+        // deux affirmations qu'on ne vérifiait pas : la seule chose mesurée est
+        // que le compteur de trames a dépassé 20. Le 02/09 à 13:37:57,
+        // Quarterstaff, Carved Iron Armor et Traveller Robes Red y sont entrés
+        // « for ever » alors que la trace disait elle-même model=true
+        // radius=58.6 rot=true : leur modèle était là, seule la porte « park »
+        // restait fermée, et elle était tenue fermée par un tiers.
+        //
+        // Un délai retourne donc dans la liste des DIFFÉRÉS, avec son compteur
+        // de sessions. Le garde-fou contre l'acharnement n'est plus une
+        // condamnation mais deux bornes : kEssaisParSession fenêtres par
+        // séance, puis repos jusqu'à la prochaine ; kSessionsDiffere sessions
+        // en tout, puis repos jusqu'au bouton « réessayer ».
+        NoterDifferee(m_pending.key, m_pending.obj);
+        if (m_pending.key != 0 && m_essais[m_pending.key] >= kEssaisParSession) {
+            m_failed.insert(m_pending.key);   // repos jusqu'a la prochaine session
         }
     }
 
@@ -2326,28 +2434,26 @@ namespace FUI
             const bool loading = pv->LoadPending();
             // DIAGNOSTIC: which gate starved? (stamp = captures ran at all,
             // model/rot = scene state, content probe logs separately below)
+            // ★[vulkaar 02/09] LE MOT EST CELUI DE LA PORTE, plus « no model ».
+            // L'ancien libelle se choisissait sur LoadPending() seul et se
+            // contredisait dans sa propre parenthese : « no model (model=true
+            // radius=58.6 …) ». C'est ce mot menteur qui a envoye l'enquete sur
+            // le chargement pendant que la vraie porte fermee, park, ne
+            // figurait qu'en chiffre nu.
+            m_dernierMotif = CaptureRejectReason();
             auto* dmdl = pv->FindCurrentModel();
             SKSE::log::warn(
-                "[ICONS] precache gates '{}': {} (model={} radius={:.1f} rot={} "
-                "park={} stamp={}->{} mesh='{}')",
-                m_pending.obj->GetName(), loading ? "deferred" : "no model",
+                "[ICONS] precache gates '{}': refus={} (model={} radius={:.1f} rot={} "
+                "park={} stamp={}->{} loading={} mesh='{}')",
+                m_pending.obj->GetName(), m_dernierMotif ? m_dernierMotif : "portes ouvertes",
                 dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
                 pv->RotationApplied(), pv->ParkTicks(),
-                m_stampBefore, pv->GetCaptureStamp(), ModelPathOf(m_pending.obj));
-            if (loading && !m_retryPass) {
-                if (m_deferred.insert(m_pending.key).second) {
-                    m_deferredObj[m_pending.key] = m_pending.obj;
-                    PersistSlow(m_pending.key);
-                }
-                GiveUpPending("precache deferred");
-                return GateResult::kAbandoned;
-            }
-            m_deferred.erase(m_pending.key);
-            m_deferredObj.erase(m_pending.key);
-            if (m_failed.insert(m_pending.key).second) {   // no second chance,
-                PersistFail(m_pending.key);                // relogs included
-            }
-            GiveUpPending("precache timeout");
+                m_stampBefore, pv->GetCaptureStamp(), loading, ModelPathOf(m_pending.obj));
+            // [vulkaar 02/09] UN SEUL VERDICT, ET IL EST REVERSIBLE :
+            // GiveUpPending differe, compte et borne. Le partage « loading ->
+            // differe / sinon -> PERMANENT » n'existe plus, il ne reste ici que
+            // le mot du journal.
+            GiveUpPending(loading ? "precache timeout (loading)" : "precache timeout");
             return GateResult::kAbandoned;
         }
 
@@ -2381,41 +2487,42 @@ namespace FUI
             // user's log showed 65 items spending 20s each and every one of
             // them landing in the PERSISTED fail list.
             //
-            // One window, then a verdict, and the verdict comes from asking the
-            // ENGINE rather than counting frames:
-            //   loading  -> DEFERRED. It works, it is just slower than this pass
-            //               can afford. Waiting here would stall every other
-            //               item, so it gets its time in the retry pass.
-            //   not even -> FAILED. No task, no entry: more time changes
-            //               nothing (HDT/physics meshes, phantom weapons).
+            // One window, then a verdict.
+            //
+            // ★★★[vulkaar 02/09] LE VERDICT N'EST PLUS UN PARTAGE. Il l'etait :
+            //   loading  -> DIFFERE (retente),
+            //   sinon    -> ECHEC PERMANENT, plus jamais retente.
+            // Et le critere ne disait pas ce que le commentaire promettait :
+            // LoadPending() repond « une tache est en vol A CET INSTANT », ce
+            // qui vaut false aussi bien pour un chargement JAMAIS parti que
+            // pour un chargement TERMINE — ou pour un chargement qu'un tiers
+            // vient de demonter, ce qui est exactement ce qui s'est produit le
+            // 02/09 (ItemPreview::CacherVivant, appele a chaque trame par
+            // l'etabli ferme). Trois objets dont le modele etait la
+            // (model=true radius=58.6 rot=true) ont ete condamnes a vie sur ce
+            // seul booleen.
+            // Desormais tout depassement de fenetre est un DIFFERE compte :
+            // GiveUpPending s'en charge, et « loading » ne sert plus qu'a
+            // nommer la ligne du journal.
             const bool loading = pv->LoadPending();
             auto* dmdl = pv->FindCurrentModel();
             // ★park/stamp are the two gates that used to be invisible here.
             // stamp A->B equal means NO capture ran at all (the pixel path
-            // returned early); park < 2 means the rig had not settled. Without
-            // them a timeout line said only "not ready" and every cause looked
-            // identical.
+            // returned early); park < 2 means the rig had not settled.
+            // ★[vulkaar] Et le MOT du refus, plutot que « no model » : la ligne
+            // du 02/09 disait « no model (model=true radius=58.6 …) », elle se
+            // contredisait dans sa propre parenthese. CaptureRejectReason()
+            // aurait ecrit « park » des la premiere ligne.
+            m_dernierMotif = CaptureRejectReason();
             SKSE::log::info(
-                "[ICONS] '{}' {} (model={} radius={:.1f} rot={} park={} "
+                "[ICONS] '{}' refus={} (model={} radius={:.1f} rot={} park={} "
                 "stamp={}->{} loading={})",
-                m_pending.obj->GetName(), loading ? "deferred" : "no model",
+                m_pending.obj->GetName(), m_dernierMotif ? m_dernierMotif : "portes ouvertes",
                 dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
                 pv->RotationApplied(), pv->ParkTicks(),
                 m_stampBefore, pv->GetCaptureStamp(), loading);
 
-            if (loading && !m_retryPass) {
-                if (m_deferred.insert(m_pending.key).second) {
-                    m_deferredObj[m_pending.key] = m_pending.obj;
-                    PersistSlow(m_pending.key);
-                }
-                pv->UnloadCurrent();
-                m_pendingBusy = false;
-                return GateResult::kAbandoned;
-            }
-            // retry pass ran out too, or the load never took at all
-            m_deferred.erase(m_pending.key);
-            m_deferredObj.erase(m_pending.key);
-            GiveUpPending("timeout");
+            GiveUpPending(loading ? "timeout (loading)" : "timeout");
             return GateResult::kAbandoned;
         }
 
@@ -2841,6 +2948,7 @@ namespace FUI
                     pv->BoostCapture(grow);
                     SKSE::log::info("[ICONS] '{}' clipped at {}x{} — retry with {:.0f}px box",
                         m_pending.obj->GetName(), w, h, grow);
+                    RendreLaFenetre();   // [vulkaar] un echelon = un nouvel essai
                     return;
                 }
                 // Box is at the screen ceiling and the model still overflows.
@@ -2853,6 +2961,7 @@ namespace FUI
                     SKSE::log::info("[ICONS] '{}' still clipped at box ceiling {:.0f}px — "
                         "retry at {:.0f}% model scale",
                         m_pending.obj->GetName(), cap, m_captureShrink * 100.0f);
+                    RendreLaFenetre();   // [vulkaar] un echelon = un nouvel essai
                     return;
                 }
             }
@@ -3165,6 +3274,12 @@ namespace FUI
             // pass at all, which is the common outcome.
             if (!m_deferred.empty() && m_deferred.erase(m_pending.key)) {
                 m_deferredObj.erase(m_pending.key);
+                // [vulkaar] la cle est guerie : son compteur de sessions n'a
+                // plus rien a compter, et il ne doit surtout pas la remettre au
+                // repos si elle repasse un jour par la file (nouvel angle, def
+                // modifiee, cle voisine).
+                m_slowTries.erase(m_pending.key);
+                m_compteCetteSession.erase(m_pending.key);
                 if (!m_retryPass) RewriteSlow();   // the pass rewrites once at its end
             }
             // mass precache: keep only the pak copy — the icon was created
@@ -3254,9 +3369,14 @@ namespace FUI
         // window's "try again") walks it and calls GetFormID() on what it
         // finds, BEFORE the queue's LookupByID revalidation can save it. The
         // `!obj->second` null test never caught this; a destroyed form is not
-        // a null pointer. Nothing is lost by dropping the list: an icon still
-        // missing gets re-queued the next time its tile asks for one.
-        m_deferred.clear();
+        // a null pointer.
+        //
+        // ★[vulkaar 02/09] SEULS LES POINTEURS PARTENT, PLUS LES CLES. Le
+        // danger, ce sont les formes remintees par un chargement — une cle est
+        // un entier, elle ne peut rien deferencer. Et depuis que la liste porte
+        // le compteur de sessions, la vider a chaque chargement de sauvegarde
+        // effacerait la memoire meme du garde-fou : l'objet repartirait a zero
+        // session apres session, ce qui est l'acharnement qu'on veut eviter.
         m_deferredObj.clear();
         // m_lastGood is keyed BY the pointer rather than holding one, so it
         // cannot crash -- it can lie. Let a new form land on a freed address

@@ -90,7 +90,17 @@ namespace FUI
         void RendreVivant();
 
         /** Decharge le modele — sans quoi il reste gare, et vivant, sur un
-         *  ecran ferme. */
+         *  ecran ferme.
+         *
+         *  ★[vulkaar 02/09] NE DEMONTE QUE CE QUE LE CHEMIN VIVANT POSSEDE.
+         *  Sans garde, cet appel demontait la scene de la FILE D'ICONES :
+         *  Etabli::Tick() tourne a CHAQUE trame de menu (UIRoot::Tick), et
+         *  l'etabli ferme il appelait CacherVivant() sans rien avoir montre.
+         *  Consequence mesuree le 02/09 a 13:37 — « [PREVIEW] load
+         *  'Quarterstaff' » toutes les 16 ms, et park bloque a 1 pour
+         *  toujours (m_parkTicks remis a zero deux fois par trame, incremente
+         *  une seule). Aucune icone neuve ne pouvait plus etre capturee.
+         *  Idempotent depuis : sans MontrerVivant prealable, c'est un no-op. */
         void CacherVivant();
 
         /** Charge et pose posee ? L'ecran s'en sert pour dire « ca charge »
@@ -230,6 +240,14 @@ namespace FUI
         bool                m_running     = false;
         bool                m_requested   = false;
         RE::TESBoundObject* m_current     = nullptr;
+        /* [vulkaar 02/09] LE CHEMIN VIVANT TIENT-IL LA SCENE ?
+           Pose par MontrerVivant, leve par CacherVivant et par tout ce qui
+           lache m_current (UnloadCurrent, ResetScene, End). C'est la seule
+           chose qui separe « l'ecran d'etabli a charge un modele » de « la
+           file d'icones a arme une capture » : les deux passent par le MEME
+           Request() et le meme m_current, et sans ce drapeau le premier
+           demontait le second a chaque trame. */
+        bool                m_vivant      = false;
         std::uint32_t       m_session     = 0;   // bumped by Begin(); guards deferred teardown
 
         ImVec2 m_capturePos       = ImVec2(0.0f, 0.0f);

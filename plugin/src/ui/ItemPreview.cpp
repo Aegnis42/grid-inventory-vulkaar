@@ -584,6 +584,7 @@ namespace FUI
         m_running   = false;
         m_requested = false;
         m_current   = nullptr;
+        m_vivant    = false;   // [vulkaar] le drapeau suit m_current (voir UnloadCurrent)
         Shutdown();
         // Engine teardown may have to wait for an in-flight model load (menu
         // closed mid-capture) — End3D right now would be the null-spModel CTD.
@@ -740,6 +741,10 @@ namespace FUI
             Inv3D::Unload(mgr);
         }
         m_current = nullptr;
+        // [vulkaar 02/09] m_current tombe : le chemin vivant ne tient plus
+        // rien. Le drapeau suit partout ou le pointeur tombe, sans quoi un
+        // CacherVivant tardif demonterait la scene d'un AUTRE demandeur.
+        m_vivant = false;
     }
 
     bool ItemPreview::ResetScene()
@@ -771,6 +776,7 @@ namespace FUI
         Inv3D::End3D(mgr);
         Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
         m_current = nullptr;
+        m_vivant  = false;   // [vulkaar] le drapeau suit m_current (voir UnloadCurrent)
         SKSE::log::info("[PREVIEW] scene reset (loadedModels was full)");
         return true;
     }
@@ -942,6 +948,13 @@ namespace FUI
                 _stricmp(mdlNew->GetModel(), mdlCur->GetModel()) == 0 &&
                 FindCurrentModel() != nullptr) {
                 m_current = a_item;
+                // [vulkaar 02/09] LA CAPTURE PREND LA SCENE : elle n'est pas
+                // le chemin vivant. Sans cette ligne, un modele pose par
+                // l'ecran d'etabli laissait le drapeau leve alors que la file
+                // d'icones possede desormais m_current — et le CacherVivant
+                // suivant demontait la scene de la capture. C'est exactement
+                // le trou que le drapeau est cense fermer.
+                m_vivant = false;
                 m_def = a_def ? *a_def : IconDef{};
             }
         }
@@ -992,6 +1005,7 @@ namespace FUI
                 SKSE::log::info("[PREVIEW] load '{}'", a_item->GetName());
             }
             m_current = a_item;
+            m_vivant = false;   // voir la note du chemin rapide, plus haut
             m_def = a_def ? *a_def : IconDef{};
         } else if (a_def && (a_def->rx != m_def.rx || a_def->ry != m_def.ry ||
                              a_def->rz != m_def.rz || a_def->scale != m_def.scale)) {
@@ -1514,6 +1528,12 @@ namespace FUI
            trame. Le itemScale du moteur ne suffit pas : il est recalcule, et
            les deux ensemble ont deja donne des icones geantes. */
         m_inspectScale = a_echelle;
+
+        /* ★C'EST ICI, ET NULLE PART AILLEURS, QUE LE CHEMIN VIVANT PREND LA
+           SCENE. Tant que ce drapeau n'est pas pose, CacherVivant() est un
+           no-op — voir le pave qui l'accompagne : sans lui l'ecran d'etabli
+           ferme dechargeait la capture d'icone a chaque trame. */
+        m_vivant = true;
     }
 
     void ItemPreview::RendreVivant()
@@ -1563,13 +1583,37 @@ namespace FUI
         inv->Render();
     }
 
+    /* ★★★LE CHEMIN VIVANT NE DEMONTE QUE CE QU'IL A MONTE (02/09/2026).
+       Cette fonction n'avait pour toute garde que m_running — vrai pendant
+       TOUTE l'ouverture de la grille. Or Etabli::Tick() tourne a chaque trame
+       de menu (UIRoot.cpp, avant ItemPreview::Tick), et l'etabli FERME il
+       tombe sur PiloterLeModeleVivant() qui, faute d'apercu arme, appelait
+       CacherVivant(). Chaque trame demontait donc la scene de la file
+       d'icones. Ce que le journal du 02/09 a 13:37:57 a mesure :
+
+         [PREVIEW] load 'Quarterstaff'    x60, une par trame, ~16 ms d'ecart
+         [ICONS] 'Quarterstaff' no model (model=true radius=58.6 rot=true
+                 park=1 stamp=20->21 loading=false)
+         [ICONS] 'Quarterstaff' skipped (timeout)
+
+       Le modele etait la (model=true, radius valide, rotation posee) : la
+       seule porte fermee etait « park ». Et elle ne pouvait PAS s'ouvrir —
+       m_parkTicks etait remis a zero DEUX fois par trame (ici, puis dans
+       Request puisque m_current venait d'etre efface) et ne pouvait etre
+       incremente qu'UNE (Tick trouve m_current nul et sort sans compter ;
+       seul Render compte). ParkSettled() en exige 2 : plafond structurel a 1,
+       pour toujours. Trois objets y ont laisse leur icone, et la politique
+       d'echec de l'epoque les a condamnes a vie.
+
+       Depuis : rien ne se demonte sans un MontrerVivant prealable. */
     void ItemPreview::CacherVivant()
     {
-        if (!m_running) return;
+        if (!m_running || !m_vivant) return;
         RestoreNodeScale();
         m_inspectScale = 0.0f;
-        UnloadCurrent();
+        UnloadCurrent();   // pose deja m_vivant = false et m_current = nullptr
         m_current = nullptr;
+        m_vivant = false;
         m_parkTicks = 0;
     }
 
