@@ -132,6 +132,8 @@ namespace
     void LockpickReopenTick();      // defined below (lockpick auto-open fallback)
     void RecolteTick();             // [vulkaar] defini plus bas (recolte par metier)
     void RecolteInitialiser();      // [vulkaar] page blanche a chaque session
+    void PortesTick();              // [vulkaar] defini plus bas (noms des portes de maison)
+    void PortesInitialiser();       // [vulkaar] page blanche a chaque session
     void MenuCloseEchoTick();        // defined below (⑫ — the close nobody heard)
 
     // ---- PlayerCharacter::Update vtable hook (index 0xAD) ----
@@ -209,6 +211,7 @@ namespace
             FUI::Wheeler::Tick();
             LockpickReopenTick();      // lockpick auto-open fallback
             RecolteTick();              // [vulkaar] la liste des recoltes interdites
+            PortesTick();               // [vulkaar] les noms des portes de maison
             MenuCloseEchoTick();        // ⑫ — the close, when it is true
         }
         static inline REL::Relocation<decltype(thunk)> func;
@@ -558,6 +561,185 @@ namespace
             FUI::Sfx::FailNote("Ce n est pas ton metier.");
         }
     }
+
+    // [vulkaar] LE NOM AFFICHE AU RETICULE D UNE PORTE DE MAISON.
+    //
+    // Le nom d une porte a teleport ne vient NI de la reference NI de sa forme
+    // de base : c est le FULL de la CELLULE DE DESTINATION. Mesure faite dans
+    // Skyrim.esm : la porte 0x1DB63 a pour base « Door », sa cellule de
+    // destination 0x1DB4E a pour FULL « Warmaiden's » — et c est « Warmaiden's »
+    // que le jeu montre. Consequence : le SetDisplayName que le serveur poussait
+    // n ecrit qu un ExtraTextDisplayData sur la reference, que
+    // TESObjectDOOR::GetActivateText (slot 0x4C) ne lit pas. Le nom arrivait
+    // bien jusqu au client, sans jamais pouvoir s afficher.
+    //
+    // Renommer la cellule reglerait l affichage et serait un desastre :
+    // TESObjectCELL::ChangeFlags::kFullName existe, donc le changement partirait
+    // dans la SAUVEGARDE du joueur, et une cellule n a qu UN nom (carte, ecran
+    // de chargement, voyage rapide, toutes les portes qui y menent).
+    //
+    // On passe donc par un crochet de vtable, alimente par un fichier que le
+    // client TypeScript pose — exactement le pont de la recolte ci-dessus, et
+    // pour la meme raison : le pont CEF tronque les formId en int32.
+    namespace
+    {
+        constexpr const char* kCheminPortes = "Data/SKSE/Plugins/GridInventory_portes.txt";
+
+        // formId de la REFERENCE (une entree par FACE) -> nom a afficher.
+        std::unordered_map<RE::FormID, std::string> g_nomsPortes;
+        std::filesystem::file_time_type             g_portesDate{};
+        bool                                        g_portesLues = false;
+    }
+
+    // ETAT D EXECUTION : la liste appartient au personnage de la session en
+    // cours. Rescapee d une session precedente, elle nommerait les maisons de
+    // QUELQU UN D AUTRE. Page blanche au chargement des donnees ; le serveur
+    // repose la liste a l entree.
+    //
+    // A ACCROCHER A kDataLoaded ET NULLE PART AILLEURS : kPreLoadGame et
+    // kPostLoadGame arrivent APRES la connexion et effaceraient la liste
+    // fraiche du bon personnage.
+    void PortesInitialiser()
+    {
+        std::error_code ec;
+        std::filesystem::remove(kCheminPortes, ec);
+        g_nomsPortes.clear();
+        g_portesDate = {};
+        g_portesLues = false;
+        logger::info("[vulkaar] portes : page blanche, en attente de la liste du serveur");
+    }
+
+    // Relu quand le fichier bouge — le serveur le repose a chaque mutation qui
+    // change un nom ou un rattachement.
+    //
+    // SEQUENCE ET SENTINELLE, comme la recolte : une ecriture est TRONQUABLE,
+    // on peut lire pendant que le client ecrit. Pour une table de NOMS une
+    // lecture partielle ne dit pas « anciennes valeurs » mais des portes qui
+    // reprennent en silence leur nom vanilla. On exige les deux bornes, et on
+    // NE MEMORISE PAS la date d une lecture rejetee : sinon la troncature se
+    // figerait pour toujours.
+    void PortesTick()
+    {
+        std::error_code ec;
+        const auto      date = std::filesystem::last_write_time(kCheminPortes, ec);
+        if (ec) {
+            // Pas de fichier : aucune porte nommee. C est le cas hors vulkaar,
+            // et c est le bon defaut — le jeu garde ses propres noms.
+            if (g_portesLues) {
+                g_nomsPortes.clear();
+                g_portesLues = false;
+            }
+            return;
+        }
+        if (g_portesLues && date == g_portesDate) return;
+
+        std::ifstream            f(kCheminPortes);
+        std::vector<std::string> lignes;
+        std::string              ligne;
+        while (std::getline(f, ligne)) {
+            // On ne rogne QUE les fins de ligne : ce qui suit la tabulation est
+            // du texte affiche, et un nom n a pas a etre retaille par le pont.
+            while (!ligne.empty() && (ligne.back() == '\r' || ligne.back() == '\n'))
+                ligne.pop_back();
+            if (!ligne.empty()) lignes.push_back(ligne);
+        }
+        // Les deux bornes, sans quoi la lecture est jetee TELLE QUELLE : on
+        // garde la table precedente et on reessaiera au prochain tic.
+        if (lignes.size() < 2 || lignes.front().rfind("seq", 0) != 0 ||
+            lignes.back() != "fin") {
+            return;
+        }
+
+        std::unordered_map<RE::FormID, std::string> neuf;
+        for (std::size_t k = 1; k + 1 < lignes.size(); ++k) {
+            const auto tab = lignes[k].find('\t');
+            if (tab == std::string::npos) continue;
+            const std::string  hexa = lignes[k].substr(0, tab);
+            char*              bout = nullptr;
+            const std::uint32_t id =
+                static_cast<std::uint32_t>(std::strtoul(hexa.c_str(), &bout, 16));
+            if (!bout || *bout != 0) continue;
+            // Texte pris en UTF-8 TEL QUEL : les chaines du jeu le sont aussi
+            // (« La Guerrière » porte C3 A8 dans skyrim_french.strings).
+            neuf.emplace(static_cast<RE::FormID>(id), lignes[k].substr(tab + 1));
+        }
+        g_nomsPortes.swap(neuf);
+        g_portesDate = date;
+        g_portesLues = true;
+        logger::info("[vulkaar] portes : {} nom(s) pose(s) pour ce personnage ({})",
+                     g_nomsPortes.size(), lignes.front());
+    }
+
+    // Le crochet — TESObjectDOOR::GetActivateText, slot 0x4C de la vtable de la
+    // CLASSE (une seule pour toutes les portes du jeu). Meme geste que
+    // HarvestHook ci-dessous : un echange de pointeur de vtable, aucun
+    // trampoline, aucune adresse a trouver, defait au dechargement de la DLL.
+    //
+    // Corollaire du « une seule vtable » : la table est une liste d AUTORISES
+    // explicites par formId de REFERENCE. Une porte absente en ressort INTACTE
+    // (return vanilla), jamais avec un texte vide.
+    struct PorteTexteHook
+    {
+        static bool thunk(RE::TESObjectDOOR* a_this, RE::TESObjectREFR* a_activator,
+                          RE::BSString& a_dst)
+        {
+            // LE JEU D ABORD, TOUJOURS : son texte est notre repli, et c est lui
+            // que la mesure ci-dessous doit rapporter tel quel.
+            const bool vanilla = func(a_this, a_activator, a_dst);
+
+            // QUELLE REFERENCE EST VISEE ? CommonLibSSE nomme le parametre
+            // « a_activator » (TESBoundObject.h:60), mais TESObjectDOOR a besoin
+            // du XTEL de la PORTE pour composer son texte : le nom du parametre
+            // ment peut-etre. On ne parie sur aucune des deux lectures — le test
+            // de base tranche a l execution, et le reticule sert de recours
+            // (GetActivateText peut aussi etre appele hors reticule).
+            RE::TESObjectREFR* porte = nullptr;
+            const char*        dOu = "aucune";
+            if (a_activator && a_activator->GetBaseObject() == a_this) {
+                porte = a_activator;
+                dOu   = "parametre";
+            } else if (auto* pick = RE::CrosshairPickData::GetSingleton()) {
+                const auto cible = pick->GetActiveTarget().get();
+                if (cible && cible->GetBaseObject() == a_this) {
+                    porte = cible.get();
+                    dOu   = "reticule";
+                }
+            }
+
+            // LA MESURE, les 20 premiers appels et pas un de plus. C est ce
+            // journal qui dira si le verbe (« Ouvrir ») fait partie de ce texte
+            // ou si l interface le compose ailleurs : la capture du proprietaire
+            // montre DEUX lignes, donc le pari est « le nom seul » — mais on ne
+            // devine pas un texte qu on remplace. Il dit aussi si le parametre
+            // etait la porte ou l activateur.
+            static int s_dits = 0;
+            if (s_dits < 20) {
+                ++s_dits;
+                logger::info(
+                    "[vulkaar] porte : appel {}/20 — ref 0x{:08X} (par {}), base 0x{:08X}, "
+                    "rendu={}, texte vanilla = \"{}\"",
+                    s_dits, porte ? porte->GetFormID() : 0u, dOu,
+                    a_this ? a_this->GetFormID() : 0u, vanilla ? 1 : 0, a_dst.c_str());
+            }
+
+            if (!porte || g_nomsPortes.empty()) return vanilla;
+            const auto it = g_nomsPortes.find(porte->GetFormID());
+            if (it == g_nomsPortes.end()) return vanilla;
+
+            // Remplacer TOUT le texte efface ce que le jeu y ajoutait (suffixe
+            // de verrou vanilla, mention de clef requise) : c est au serveur
+            // d envoyer le nom deja decore de ce qu il veut montrer.
+            a_dst = it->second.c_str();
+            return true;
+        }
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_TESObjectDOOR[0] };
+            func = vtbl.write_vfunc(0x4C, thunk);
+        }
+    };
 
     // Capacity: harvesting (flora / food-bearing trees) — TESBoundObject::
     // Activate override slot 0x37; the produce item is checked BEFORE the
@@ -2623,6 +2805,7 @@ namespace
             FUI::Etabli::Initialiser();        // vulkaar : pont de l ecran d etabli
             FUI::Maison::Initialiser();        // vulkaar : pont du panneau de la maison
             RecolteInitialiser();              // vulkaar : la liste de recolte est de CETTE session
+            PortesInitialiser();               // vulkaar : les noms de portes sont de CETTE session
             // FUI::EssaiSwf::Initialiser();  // vulkaar : ecran Scaleform d'essai —
             //   inscrit plus rien depuis le 29/08 (voir le retrait de F9 ci-dessus).
             //   Le rallumer suffit a retrouver un menu Scaleform qui marche.
@@ -2764,6 +2947,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     PickUpHook::Install();                                        // capacity: world pickup
     HarvestHook<RE::TESFlora>::Install(RE::VTABLE_TESFlora[0]);   // capacity: plants
     HarvestHook<RE::TESObjectTREE>::Install(RE::VTABLE_TESObjectTREE[0]);   // capacity: trees
+    PorteTexteHook::Install();   // [vulkaar] le nom affiche au reticule d une porte de maison
     SackActivateHook::Install();   // G2: coin sack -> gold, silent to loot HUDs
     // capacity gate at the Activate slot for every direct-pickup form type —
     // pre-TrueHUD, so a blocked pickup can't log a phantom "received"
