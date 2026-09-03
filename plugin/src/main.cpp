@@ -38,15 +38,22 @@
 #include <unordered_map>
 #include <vector>
 
-// [vulkaar] Les controles gameplay suspendus tant que la grille (et donc la
-// maison, l'etabli) est ouverte : combat, activation, saut, accroupi, POV.
-// Ni kMenu ni kConsole, jamais : Echap et la console doivent repondre.
+// [vulkaar] TOUT CE QUE LE JEU ECOUTE, SAUF DE QUOI SORTIR.
+//
+// Une liste NOMMEE de drapeaux oublie toujours quelque chose : la premiere
+// version citait combat, activation, saut, accroupi et POV — et le
+// proprietaire a rapporte que C declenchait encore la marche auto (kMovement)
+// et que E passait quand meme. La regle qu'il a posee est plus simple que
+// n'importe quelle liste : « quand je suis dans un de nos menus, bloque les
+// touches recues par le jeu ». On coupe donc TOUT, et on ne garde que les deux
+// drapeaux qui permettent d'en sortir : kMenu (Echap, la touche d'inventaire)
+// et kConsole. Les ecrans du greffon, eux, ne passent pas par ce masque : ils
+// lisent ImGui, qui recoit le clavier par une autre route.
 constexpr RE::ControlMap::UEFlag kControlesSuspendusParLaGrille = static_cast<RE::ControlMap::UEFlag>(
-    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kFighting) |
-    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kActivate) |
-    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kJumping) |
-    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kSneaking) |
-    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kPOVSwitch));
+    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kAll) &
+    ~(static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kMenu) |
+      static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kConsole) |
+      static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kInvalid)));
 
 // ============================================================================
 //  GridInventory - Mabinogi/Diablo-style tetris inventory (ImGui)
@@ -159,14 +166,28 @@ namespace
             // pour la meme raison.
             {
                 auto* ui = RE::UI::GetSingleton();
+                auto* cm = RE::ControlMap::GetSingleton();
                 const bool notreMenu = ui && ui->IsMenuOpen("GridInventoryMenu"sv);
-                if (notreMenu != g_controlesCoupes) {
-                    if (auto* cm = RE::ControlMap::GetSingleton()) {
-                        cm->ToggleControls(kControlesSuspendusParLaGrille, !notreMenu, true);
-                        g_controlesCoupes = notreMenu;
-                        SKSE::log::info("[INV] controles du jeu {} (notre menu {})",
-                                        notreMenu ? "suspendus" : "rendus",
-                                        notreMenu ? "ouvert" : "ferme");
+                if (cm) {
+                    if (notreMenu) {
+                        // ★REAFFIRME, jamais bascule sur transition : le client
+                        // skymp ecrit dans le MEME masque global
+                        // (Game.enablePlayerControls, appele par le sas, les
+                        // emotes, la camera). Il rouvrirait sous nos pieds ce
+                        // qu'on vient de fermer, et un seul appel a l'ouverture
+                        // ne s'en apercevrait jamais. Ici on repose le masque
+                        // des qu'un seul de ses drapeaux est revenu.
+                        if (cm->enabledControls.any(kControlesSuspendusParLaGrille)) {
+                            cm->ToggleControls(kControlesSuspendusParLaGrille, false, true);
+                            if (!g_controlesCoupes) {
+                                g_controlesCoupes = true;
+                                SKSE::log::info("[INV] controles du jeu suspendus (notre menu ouvert)");
+                            }
+                        }
+                    } else if (g_controlesCoupes) {
+                        cm->ToggleControls(kControlesSuspendusParLaGrille, true, true);
+                        g_controlesCoupes = false;
+                        SKSE::log::info("[INV] controles du jeu rendus (notre menu ferme)");
                     }
                 }
             }
