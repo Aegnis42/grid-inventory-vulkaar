@@ -8,6 +8,7 @@
 #include "game/SortiesVulkaar.h"
 #include "ui/Echange.h"
 #include "ui/Etabli.h"
+#include "ui/Maison.h"
 #include "ui/EssaiSwf.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
@@ -2536,6 +2537,7 @@ namespace
             FUI::SortiesVulkaar::Initialiser();  // vulkaar : journal jets/destructions
             FUI::Echange::Initialiser();         // vulkaar : pont de la fenetre d echange
             FUI::Etabli::Initialiser();        // vulkaar : pont de l ecran d etabli
+            FUI::Maison::Initialiser();        // vulkaar : pont du panneau de la maison
             RecolteInitialiser();              // vulkaar : la liste de recolte est de CETTE session
             // FUI::EssaiSwf::Initialiser();  // vulkaar : ecran Scaleform d'essai —
             //   inscrit plus rien depuis le 29/08 (voir le retrait de F9 ci-dessus).

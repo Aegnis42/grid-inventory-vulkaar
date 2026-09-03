@@ -75,6 +75,8 @@ set(SOURCES
     src/ui/Echange.cpp
     src/ui/Etabli.h
     src/ui/Etabli.cpp
+    src/ui/Maison.h
+    src/ui/Maison.cpp
     src/ui/Clavier.h
     src/ui/Clavier.cpp
     src/ui/ClavierTables.gen.h
