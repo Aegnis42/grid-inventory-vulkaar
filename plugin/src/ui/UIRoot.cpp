@@ -508,6 +508,11 @@ namespace FUI::UIRoot
             static bool     s_down[256] = {};
             static unsigned s_lastChars = 0;
             static int      s_contradictions = 0;
+            // [vulkaar] l'attente de confirmation d'une frappe (voir le verrou plus bas)
+            static int      s_trame = 0;
+            static int      s_attenteDepuis = -1;   // trame de la plus ancienne frappe non confirmee ; -1 = aucune
+            constexpr int   kDelaiConfirmation = 6; // trames laissees a la fenetre pour livrer son message
+            ++s_trame;
 
             // Only ever while a text field is waiting. Outside one there is
             // nothing to type into, and ToUnicodeEx is stateful (dead keys) --
@@ -535,6 +540,28 @@ namespace FUI::UIRoot
             const unsigned chars = g_wmCharSeen.load(std::memory_order_relaxed);
             const bool     wmAlive = chars != s_lastChars;
             s_lastChars = chars;
+            if (wmAlive) {
+                // La fenetre livre : toute frappe en attente est confirmee et la
+                // serie de contradictions retombe -- une contradiction isolee n'a
+                // jamais rien prouve (voir le verrou plus bas).
+                s_attenteDepuis = -1;
+                s_contradictions = 0;
+                if (g_kbFallback) {
+                    // [vulkaar] LE VERROU SE RELACHE. Un repli qui reste ferme alors
+                    // que la fenetre livre a nouveau ecrit CHAQUE lettre deux fois --
+                    // c'est ce que le proprietaire a vu le 03/09/2026. La lettre de
+                    // cette trame, la fenetre l'a deja ecrite : on ne releve que
+                    // l'etat des touches, sans rien synthetiser.
+                    g_kbFallback = false;
+                    SKSE::log::warn(
+                        "[UI] input: WM_CHAR is arriving again (chars {}) -- polled "
+                        "characters switched off, the window road is alive.", chars);
+                    for (int vk = 0; vk < 256; ++vk) {
+                        s_down[vk] = (GetAsyncKeyState(vk) & 0x8000) != 0;
+                    }
+                    return;
+                }
+            }
 
             BYTE ks[256] = {};
             if (g_kbFallback) {
@@ -579,23 +606,26 @@ namespace FUI::UIRoot
                 }
 
                 if (!g_kbFallback) {
-                    // ★THE LATCH, and it is a CONTRADICTION rather than a
-                    // timeout: a printable key went down while a text field was
-                    // focused, and no WM_CHAR arrived for it. One such frame
-                    // could be a race; three cannot. On a healthy setup this can
-                    // never fire, so the road stays inert -- one sweep a frame
-                    // while typing, and no events at all.
-                    if (!wmAlive && ++s_contradictions >= 3) {
-                        g_kbFallback = true;
-                        SKSE::log::warn(
-                            "[UI] input: printable keys are being pressed and no "
-                            "WM_CHAR is arriving (chars {} rawKeys {} msgs {}). "
-                            "Typing falls back to polled characters. NOTE: an IME "
-                            "language cannot be composed this way -- IME needs the "
-                            "window messages that are missing.",
-                            chars, g_wmKeyRaw.load(std::memory_order_relaxed),
-                            g_thunkMsgs.load(std::memory_order_relaxed));
-                    }
+                    // ★THE LATCH, REECRIT LE 03/09/2026. L'ancienne regle comptait
+                    // une contradiction des qu'une touche imprimable etait vue
+                    // enfoncee sans WM_CHAR DANS LA MEME TRAME -- et « une trame
+                    // peut etre une course, trois non ». Faux deux fois : le
+                    // sondage tourne souvent AVANT que la fenetre ait pompe son
+                    // message (la course est frequente, pas exceptionnelle), et
+                    // les trois contradictions n'avaient pas a etre consecutives
+                    // ni jamais oubliees. Mesure chez le proprietaire :
+                    // « chars 17 ... falls back to polled characters » -- dix-sept
+                    // lettres livrees par la fenetre, trois courses au fil de la
+                    // frappe, verrou ferme, et chaque lettre suivante ecrite deux
+                    // fois, par la fenetre ET par le repli.
+                    //
+                    // Desormais une frappe ouvre une ATTENTE : la fenetre a
+                    // kDelaiConfirmation trames pour livrer un caractere. Seule une
+                    // attente echue compte pour une contradiction, la serie retombe
+                    // des que la fenetre livre (plus haut), et trois attentes
+                    // echues d'affilee seulement ferment le verrou -- qui se
+                    // relache de lui-meme si la fenetre revient.
+                    if (s_attenteDepuis < 0) s_attenteDepuis = s_trame;
                     continue;
                 }
 
@@ -621,6 +651,25 @@ namespace FUI::UIRoot
                                           GetKeyboardLayout(0));
                 for (int i = 0; i < n && i < static_cast<int>(std::size(buf)); ++i) {
                     if (buf[i] >= 0x20) a_io.AddInputCharacterUTF16(buf[i]);
+                }
+            }
+
+            // [vulkaar] L'attente echue : la fenetre n'a rien livre depuis
+            // kDelaiConfirmation trames apres une frappe -- cette fois c'est une
+            // contradiction. Trois d'affilee (la serie retombe a chaque WM_CHAR)
+            // et la route de la fenetre est tenue pour morte : le repli ecrit.
+            if (!g_kbFallback && s_attenteDepuis >= 0 && s_trame - s_attenteDepuis > kDelaiConfirmation) {
+                s_attenteDepuis = -1;
+                if (++s_contradictions >= 3) {
+                    g_kbFallback = true;
+                    SKSE::log::warn(
+                        "[UI] input: printable keys are being pressed and no "
+                        "WM_CHAR is arriving (chars {} rawKeys {} msgs {}). "
+                        "Typing falls back to polled characters. NOTE: an IME "
+                        "language cannot be composed this way -- IME needs the "
+                        "window messages that are missing.",
+                        chars, g_wmKeyRaw.load(std::memory_order_relaxed),
+                        g_thunkMsgs.load(std::memory_order_relaxed));
                 }
             }
         }
