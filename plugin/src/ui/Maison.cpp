@@ -30,9 +30,15 @@ namespace FUI::Maison
             int         personnageId = 0;
             std::string matricule;
             std::string nom;       // vide = le spectateur n'a pas le droit de le lire
-            std::string role;      // proprietaire | locataire — la clé, jamais affichée
+            std::string role;      // proprietaire | locataire | invite — la clé, jamais affichée
             std::string libelle;   // ce que le serveur veut qu'on lise
             bool        enJeu = false;
+            /* Les clefs (étape 2) : « * » dans la 8e colonne = TOUTES les portes,
+               y compris celles qu'on rattachera demain (propriétaire, locataire).
+               Sinon l'invité n'a que les passages de sa liste, une ligne `clef`
+               par passage. Sans 8e colonne (client d'avant), le rôle décide. */
+            bool                     toutesClefs = true;
+            std::vector<std::string> clefs;   // clefs de passages (descripteurs)
         };
 
         struct Candidat
@@ -40,6 +46,16 @@ namespace FUI::Maison
             int         personnageId = 0;
             std::string matricule;
             std::string nom;
+        };
+
+        /** Un PASSAGE : la face visée et sa jumelle, rattachées ensemble. La
+         *  clef est le descripteur de la première face — c'est elle que les
+         *  gestes `clefs` et `detacher` nomment. Jamais un FormID ici. */
+        struct Porte
+        {
+            std::string cle;
+            std::string nom;
+            int         faces = 1;   // 1 (porte à sens unique) ou 2
         };
 
         // ---- état reçu (le serveur fait foi) ----
@@ -50,6 +66,7 @@ namespace FUI::Maison
         std::string           g_moi;                // mon matricule : ma ligne se reconnaît
         std::string           g_message;
         std::vector<Membre>   g_membres;
+        std::vector<Porte>    g_portes;             // dans l'ordre du registre
         std::string           g_rechercheEcho;      // la requête à laquelle répondent les résultats
         std::vector<Candidat> g_resultats;
         unsigned long long    g_seqEtat = 0;
@@ -64,6 +81,18 @@ namespace FUI::Maison
         bool g_rechercheSale = false;      // le texte a changé depuis le dernier envoi
         int  g_rechercheStable = 0;        // trames sans frappe
         int  g_messageRestant = 0;         // trames avant effacement du message
+        /* LA FENÊTRE DE CHOIX DES CLEFS : pour quel membre (0 = fermée), et
+           une case par passage de g_portes, dans le même ordre. Le refus local
+           (« Coche au moins une porte ») se lit dans la fenêtre, pas dans le
+           panneau : c'est elle que le joueur regarde. */
+        int               g_clefsPour = 0;
+        std::vector<char> g_clefsCoche;
+        std::string       g_clefsRefus;
+
+        /* Au-delà de ce nombre de lignes, une liste passe dans un enfant
+           défilant : le panneau est AlwaysAutoResize et grandirait sans fin. */
+        constexpr std::size_t kPortesVisibles = 8;
+        constexpr std::size_t kMembresVisibles = 12;
 
         // ---- plomberie ----
         unsigned long long g_seqGeste = 0;
@@ -188,6 +217,7 @@ namespace FUI::Maison
             bool finVue = false;
             std::string nom, moi, message, echo;
             std::vector<Membre> membres;
+            std::vector<Porte> portes;
             std::vector<Candidat> resultats;
 
             char ligne[2048];
@@ -221,7 +251,28 @@ namespace FUI::Maison
                     m.role = c[4];
                     m.libelle = c[5];
                     m.enJeu = std::atoi(c[6]) != 0;
+                    // 8e colonne : « * » = toutes ; sinon le NOMBRE de passages,
+                    // que les lignes `clef` détaillent — on ne lit que l'étoile.
+                    m.toutesClefs = n >= 8 ? (std::strcmp(c[7], "*") == 0) : (m.role != "invite");
                     membres.push_back(std::move(m));
+                } else if (std::strcmp(c[0], "clef") == 0 && n >= 3) {
+                    /* Les lignes `clef` suivent les lignes `membre` (contrat du
+                       pont) : le membre est déjà là. Une clef d'un inconnu est
+                       un fichier recousu — ignorée, comme la ligne après `fin`. */
+                    const int pid = std::atoi(c[1]);
+                    for (auto& m : membres) {
+                        if (m.personnageId == pid) {
+                            m.clefs.emplace_back(c[2]);
+                            break;
+                        }
+                    }
+                } else if (std::strcmp(c[0], "porte") == 0 && n >= 3) {
+                    Porte p;
+                    p.cle = c[1];
+                    p.nom = c[2];
+                    // Sans colonne `faces` (client d'avant le contrat), une face.
+                    p.faces = (n >= 4 && std::atoi(c[3]) == 2) ? 2 : 1;
+                    portes.push_back(std::move(p));
                 } else if (std::strcmp(c[0], "recherche") == 0) {
                     echo = c[1];
                 } else if (std::strcmp(c[0], "resultat") == 0 && n >= 4) {
@@ -248,6 +299,41 @@ namespace FUI::Maison
             g_rechercheEcho = std::move(echo);
             g_resultats = std::move(resultats);
 
+            /* LES CASES SUIVENT LES PASSAGES PAR LEUR CLEF, pas par leur rang :
+               une porte détachée pendant que la fenêtre de choix est ouverte
+               décalerait toutes les cases d'un cran, et « Valider » donnerait
+               la clef d'à côté. */
+            if (g_clefsPour != 0) {
+                std::vector<char> coche(portes.size(), 0);
+                for (std::size_t i = 0; i < portes.size(); ++i) {
+                    for (std::size_t j = 0; j < g_portes.size() && j < g_clefsCoche.size(); ++j) {
+                        if (g_portes[j].cle == portes[i].cle) {
+                            coche[i] = g_clefsCoche[j];
+                            break;
+                        }
+                    }
+                }
+                g_clefsCoche = std::move(coche);
+            }
+            g_portes = std::move(portes);
+
+            /* LA FENÊTRE DE CHOIX SE REFERME si son membre n'est plus là (retiré
+               par le staff pendant qu'on cochait), s'il est devenu propriétaire
+               (il a déjà toutes les clefs) ou si on n'a plus la gestion : sinon
+               « Valider » enverrait un geste que le serveur refuserait, et la
+               fenêtre resterait plantée sur un fantôme. */
+            if (g_clefsPour != 0) {
+                bool encore = false;
+                for (const auto& m : g_membres) {
+                    if (m.personnageId == g_clefsPour && m.role != "proprietaire") encore = true;
+                }
+                if (!encore || !g_gerer || !g_ouvert) {
+                    g_clefsPour = 0;
+                    g_clefsCoche.clear();
+                    g_clefsRefus.clear();
+                }
+            }
+
             if (!message.empty()) {
                 g_message = std::move(message);
                 g_messageRestant = kTramesMessage;
@@ -261,6 +347,9 @@ namespace FUI::Maison
                 g_rechercheSale = false;
                 g_rechercheStable = 0;
                 g_nomActif = false;
+                g_clefsPour = 0;
+                g_clefsCoche.clear();
+                g_clefsRefus.clear();
                 // g_message est GARDÉ : la poussée d'ouverture peut en porter un
                 // (« Maison créée. ») — il vient d'être posé quelques lignes plus haut.
                 g_dernierDessin = g_tic;
@@ -287,6 +376,37 @@ namespace FUI::Maison
             if (debut == std::string::npos) return std::string();
             const std::size_t fin = a_texte.find_last_not_of(blancs);
             return a_texte.substr(debut, fin - debut + 1);
+        }
+
+        // ── la fenêtre de choix des clefs : ouvrir, fermer ────────────────
+
+        void FermerChoix()
+        {
+            g_clefsPour = 0;
+            g_clefsCoche.clear();
+            g_clefsRefus.clear();
+        }
+
+        /** Les cases partent de ce que le membre a DÉJÀ : un locataire voit
+         *  tout coché (il a toutes les clefs), un invité voit sa liste. Sans
+         *  cela chaque retouche obligerait à tout recocher. */
+        void OuvrirChoix(const Membre& a_m)
+        {
+            g_clefsPour = a_m.personnageId;
+            g_clefsRefus.clear();
+            g_clefsCoche.assign(g_portes.size(), 0);
+            for (std::size_t i = 0; i < g_portes.size(); ++i) {
+                if (a_m.toutesClefs) {
+                    g_clefsCoche[i] = 1;
+                    continue;
+                }
+                for (const auto& cle : a_m.clefs) {
+                    if (cle == g_portes[i].cle) {
+                        g_clefsCoche[i] = 1;
+                        break;
+                    }
+                }
+            }
         }
 
         // ── les morceaux du panneau ───────────────────────────────────────
@@ -408,14 +528,10 @@ namespace FUI::Maison
             ImGui::PopStyleColor(3);
         }
 
-        /** Les membres : Nom | ID | Rôle | ✕. Le propriétaire en or et sans
-         *  croix (il ne se retire pas : on désigne d'abord un successeur —
-         *  règle du serveur, l'écran ne fait que ne pas la proposer). */
-        void TableMembres(float a_S)
+        /** Les couleurs et marges communes aux deux tables (portes, membres) :
+         *  filets or, en-tête nu, boutons sans fond dont le survol est un voile. */
+        void PousserStyleTable(float a_S)
         {
-            const float haut = 34.0f * a_S;
-            const float largeurId = ImGui::CalcTextSize("ZZZZZ").x + 16.0f * a_S;
-
             ImGui::PushStyleColor(ImGuiCol_TableBorderLight, OrSombre(0.35f));
             ImGui::PushStyleColor(ImGuiCol_TableBorderStrong, OrSombre(0.35f));
             ImGui::PushStyleColor(ImGuiCol_TableHeaderBg, Voile(0.0f));
@@ -427,14 +543,118 @@ namespace FUI::Maison
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, Voile(0.16f));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.0f * a_S, 0.0f));
+        }
 
-            const bool table = ImGui::BeginTable("##vk_maison_membres", 4,
+        void RetirerStyleTable()
+        {
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(9);
+        }
+
+        /** Les portes : une ligne par PASSAGE — le nom, « 2 faces » en gris
+         *  quand la jumelle est rattachée, et × (gestion) qui détache le
+         *  passage entier. Le staff seul rattache, depuis le tchat : l'écran
+         *  le rappelle quand la liste est vide. */
+        void TablePortes(float a_S)
+        {
+            const float haut = 30.0f * a_S;
+
+            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.45f));
+            ImGui::TextUnformatted("Portes");
+            ImGui::PopStyleColor();
+
+            if (g_portes.empty()) {
+                ImGui::TextDisabled("Aucune porte — vise une porte et tape /maison \"nom\" add");
+                return;
+            }
+
+            /* Au-delà de huit passages, la liste défile dans un enfant : le
+               panneau ne grandit plus. La hauteur = huit lignes exactement. */
+            const bool defile = g_portes.size() > kPortesVisibles;
+            if (defile) {
+                ImGui::BeginChild("##vk_maison_portes_def",
+                    ImVec2(0.0f, haut * static_cast<float>(kPortesVisibles)), ImGuiChildFlags_None);
+            }
+
+            PousserStyleTable(a_S);
+            const bool table = ImGui::BeginTable("##vk_maison_portes", 3,
+                ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
+                    ImGuiTableFlags_NoPadOuterX);
+            if (table) {
+                ImGui::TableSetupColumn("##nom", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("##faces", ImGuiTableColumnFlags_WidthFixed, 70.0f * a_S);
+                ImGui::TableSetupColumn("##x", ImGuiTableColumnFlags_WidthFixed, 30.0f * a_S);
+
+                int i = 0;
+                for (const auto& p : g_portes) {
+                    ImGui::PushID(i++);
+                    ImGui::TableNextRow(0, haut);
+
+                    ImGui::TableSetColumnIndex(0);
+                    const ImVec2 depart = ImGui::GetCursorScreenPos();
+                    ImGui::Selectable("##ligne", false,
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
+                        ImVec2(0.0f, haut));
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    const float milieu = depart.y + (haut - ImGui::GetTextLineHeight()) * 0.5f;
+                    const char* affiche = p.nom.empty() ? p.cle.c_str() : p.nom.c_str();
+                    dl->AddText(ImVec2(depart.x + 6.0f * a_S, milieu), Theme::Chrome(0.92f), affiche);
+
+                    // « 2 faces » : le passage entier ; une porte battante
+                    // sans jumelle reste muette, rien à dire d'elle.
+                    ImGui::TableSetColumnIndex(1);
+                    if (p.faces == 2) {
+                        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (haut - ImGui::GetTextLineHeight()) * 0.5f);
+                        ImGui::TextDisabled("2 faces");
+                    }
+
+                    ImGui::TableSetColumnIndex(2);
+                    if (g_gerer) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.70f));
+                        if (Sfx::Button("×##detacher", ImVec2(-FLT_MIN, haut), true)) {
+                            EcrireGeste("detacher", p.cle);
+                        }
+                        ImGui::PopStyleColor();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s", "détacher le passage — les invités en perdent la clef");
+                        }
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+            RetirerStyleTable();
+
+            if (defile) ImGui::EndChild();
+        }
+
+        /** Les membres : Nom | ID | Rôle | Clefs | ✕. Le propriétaire en or et
+         *  sans croix (il ne se retire pas : on désigne d'abord un successeur —
+         *  règle du serveur, l'écran ne fait que ne pas la proposer). */
+        void TableMembres(float a_S)
+        {
+            const float haut = 34.0f * a_S;
+            const float largeurId = ImGui::CalcTextSize("ZZZZZ").x + 16.0f * a_S;
+
+            /* Au-delà de douze membres, la table défile dans un enfant : l'en-tête
+               plus douze lignes, et le panneau s'arrête de grandir. */
+            const bool defile = g_membres.size() > kMembresVisibles;
+            if (defile) {
+                const float hautEntete = ImGui::GetTextLineHeightWithSpacing() + 4.0f * a_S;
+                ImGui::BeginChild("##vk_maison_membres_def",
+                    ImVec2(0.0f, hautEntete + haut * static_cast<float>(kMembresVisibles)), ImGuiChildFlags_None);
+            }
+
+            PousserStyleTable(a_S);
+
+            const bool table = ImGui::BeginTable("##vk_maison_membres", 5,
                 ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
                     ImGuiTableFlags_NoPadOuterX);
             if (table) {
                 ImGui::TableSetupColumn("Nom", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, largeurId);
-                ImGui::TableSetupColumn("Rôle", ImGuiTableColumnFlags_WidthFixed, 130.0f * a_S);
+                ImGui::TableSetupColumn("Rôle", ImGuiTableColumnFlags_WidthFixed, 120.0f * a_S);
+                ImGui::TableSetupColumn("Clefs", ImGuiTableColumnFlags_WidthFixed, 90.0f * a_S);
                 ImGui::TableSetupColumn("##x", ImGuiTableColumnFlags_WidthFixed, 30.0f * a_S);
 
                 ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.45f));
@@ -493,8 +713,34 @@ namespace FUI::Maison
                         ImGui::PopStyleColor();
                     }
 
-                    // ✕ — jamais sur le propriétaire, jamais en lecture seule.
+                    // Clefs — « toutes » (or pour le propriétaire, qui les a de
+                    // droit) ou « n/m » pour un invité ; cliquable en gestion,
+                    // sauf sur le propriétaire : rien à lui donner de plus.
                     ImGui::TableSetColumnIndex(3);
+                    {
+                        char clefs[32];
+                        if (m.toutesClefs || proprietaire) {
+                            std::snprintf(clefs, sizeof(clefs), "%s", "toutes");
+                        } else {
+                            std::snprintf(clefs, sizeof(clefs), "%zu/%zu", m.clefs.size(), g_portes.size());
+                        }
+                        if (g_gerer && !proprietaire) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.85f));
+                            if (Sfx::Button((std::string(clefs) + "##clefs").c_str(), ImVec2(-FLT_MIN, haut))) {
+                                OuvrirChoix(m);
+                            }
+                            ImGui::PopStyleColor();
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("choisir ses portes");
+                        } else {
+                            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (haut - ImGui::GetTextLineHeight()) * 0.5f);
+                            ImGui::PushStyleColor(ImGuiCol_Text, proprietaire ? Theme::GoldCol() : Theme::Chrome(0.70f));
+                            ImGui::TextUnformatted(clefs);
+                            ImGui::PopStyleColor();
+                        }
+                    }
+
+                    // ✕ — jamais sur le propriétaire, jamais en lecture seule.
+                    ImGui::TableSetColumnIndex(4);
                     if (g_gerer && !proprietaire) {
                         ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.70f));
                         // « × » (U+00D7) : la croix de la maquette, avec un glyphe
@@ -509,14 +755,157 @@ namespace FUI::Maison
                 }
                 ImGui::EndTable();
             }
-            ImGui::PopStyleVar(2);
-            ImGui::PopStyleColor(9);
+            RetirerStyleTable();
+            if (defile) ImGui::EndChild();
 
             if (g_membres.empty()) {
                 ImGui::Spacing();
                 ImGui::TextDisabled(g_gerer ? "Personne encore. Le premier ajouté devient propriétaire."
                                             : "Personne encore.");
             }
+        }
+
+        /** LA FENÊTRE DE CHOIX DES CLEFS — nue comme le panneau, par-dessus
+         *  lui. Une case par passage ; « Toutes » en fait un locataire (les
+         *  portes de demain comprises), « Valider » un invité de ces portes-là.
+         *  Aucune case cochée = refus LOCAL, sans déranger le serveur : c'est
+         *  la même phrase qu'il rendrait. Dessinée APRÈS ImGui::End() du
+         *  panneau : une fenêtre ImGui distincte, pas un enfant. */
+        void FenetreClefs(float a_S)
+        {
+            if (g_clefsPour == 0) return;
+            const Membre* membre = nullptr;
+            for (const auto& m : g_membres) {
+                if (m.personnageId == g_clefsPour) membre = &m;
+            }
+            if (membre == nullptr) {   // LireEtat referme déjà ; ceinture et bretelles
+                FermerChoix();
+                return;
+            }
+            if (g_clefsCoche.size() != g_portes.size()) g_clefsCoche.assign(g_portes.size(), 0);
+
+            const ImGuiIO& io = ImGui::GetIO();
+            const float pad = Theme::PadX() * a_S;
+            const float largeur = std::clamp(io.DisplaySize.x * 0.24f, 300.0f, 480.0f);
+
+            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
+                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(largeur, 0.0f), ImGuiCond_Always);
+            /* Toujours au-dessus du panneau : un clic sur le panneau derrière
+               le ramènerait devant et la fenêtre de choix disparaîtrait sous lui. */
+            ImGui::SetNextWindowFocus();
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(10, 9, 8, 236));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f * a_S, 6.0f * a_S));
+            ImGui::Begin("##vk_maison_clefs", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
+                    ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_AlwaysAutoResize);
+            /* UNE SEULE SORTIE à partir d'ici — le PopFont et le End sont en bas. */
+            ImGui::PushFont(nullptr, Theme::SnapPx(20.0f));
+
+            {
+                const ImVec2 p = ImGui::GetWindowPos();
+                const ImVec2 t = ImGui::GetWindowSize();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + t.x, p.y), OrSombre(0.35f), 1.0f);
+                dl->AddLine(ImVec2(p.x, p.y + t.y - 1.0f), ImVec2(p.x + t.x, p.y + t.y - 1.0f), OrSombre(0.35f), 1.0f);
+            }
+
+            const char* qui = membre->nom.empty() ? membre->matricule.c_str() : membre->nom.c_str();
+            ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
+            ImGui::Text("Clefs de %s", qui);
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+
+            bool fermer = false;
+            if (g_portes.empty()) {
+                ImGui::TextDisabled("Aucune porte à donner — le staff les rattache d'abord.");
+            } else {
+                const bool defile = g_portes.size() > kPortesVisibles;
+                if (defile) {
+                    ImGui::BeginChild("##vk_maison_clefs_def",
+                        ImVec2(0.0f, ImGui::GetFrameHeightWithSpacing() * static_cast<float>(kPortesVisibles)),
+                        ImGuiChildFlags_None);
+                }
+                // Une case habillée (patron Editor.cpp) : fond sombre, survol
+                // en voile, la coche en or — jamais le bleu d'ImGui.
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, Voile(0.04f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Voile(0.10f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Voile(0.14f));
+                ImGui::PushStyleColor(ImGuiCol_CheckMark, Theme::GoldCol());
+                for (std::size_t i = 0; i < g_portes.size(); ++i) {
+                    ImGui::PushID(static_cast<int>(i));
+                    bool coche = g_clefsCoche[i] != 0;
+                    const Porte& p = g_portes[i];
+                    std::string etiquette = p.nom.empty() ? p.cle : p.nom;
+                    if (p.faces == 2) etiquette += "  (2 faces)";
+                    if (ImGui::Checkbox(etiquette.c_str(), &coche)) {
+                        g_clefsCoche[i] = coche ? 1 : 0;
+                        g_clefsRefus.clear();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::PopStyleColor(4);
+                if (defile) ImGui::EndChild();
+            }
+
+            if (!g_clefsRefus.empty()) {
+                ImGui::Spacing();
+                ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
+                ImGui::TextWrapped("%s", g_clefsRefus.c_str());
+                ImGui::PopStyleColor();
+            }
+
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Button, Voile(0.04f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Voile(0.10f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, Voile(0.16f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+            const float ecart = 8.0f * a_S;
+            const float largeurBouton = (ImGui::GetContentRegionAvail().x - 2.0f * ecart) / 3.0f;
+            const ImVec2 taille(largeurBouton, ImGui::GetFrameHeight() + 4.0f * a_S);
+            const std::string pid = std::to_string(g_clefsPour);
+
+            // « Toutes » reste possible SANS porte : c'est le rôle de locataire
+            // qu'on donne, et il vaudra pour les portes rattachées demain.
+            if (Sfx::Button("Toutes##clefs", taille)) {
+                EcrireGeste("clefs", pid + "\ttoutes");
+                fermer = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", "toutes les portes, celles de demain comprises");
+            ImGui::SameLine(0.0f, ecart);
+            if (Sfx::Button("Valider##clefs", taille)) {
+                std::string liste;
+                for (std::size_t i = 0; i < g_portes.size(); ++i) {
+                    if (g_clefsCoche[i] == 0) continue;
+                    if (!liste.empty()) liste += ',';
+                    liste += g_portes[i].cle;   // ni tabulation ni virgule dans un descripteur
+                }
+                if (liste.empty()) {
+                    g_clefsRefus = "Coche au moins une porte, ou retire-le.";
+                } else {
+                    EcrireGeste("clefs", pid + "\t" + liste);
+                    fermer = true;
+                }
+            }
+            ImGui::SameLine(0.0f, ecart);
+            if (Sfx::Button("Annuler##clefs", taille, true)) fermer = true;
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.35f));
+            ImGui::TextUnformatted("Échap : annuler");
+            ImGui::PopStyleColor();
+
+            ImGui::PopFont();
+            ImGui::End();
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor();
+
+            if (fermer) FermerChoix();
         }
     }
 
@@ -564,6 +953,9 @@ namespace FUI::Maison
            et on le DIT, sinon le serveur nous croit toujours devant le panneau. */
         if (g_ouvert && g_tic - g_dernierDessin > kTramesSansDessin) {
             SKSE::log::info("[MAISON] panneau plus dessine depuis {} trames : fermeture", g_tic - g_dernierDessin);
+            // Le choix d'abord, sinon Fermer() ne fermerait que lui et le
+            // panneau attendrait deux secondes de plus.
+            FermerChoix();
             Fermer();
         }
     }
@@ -575,7 +967,17 @@ namespace FUI::Maison
 
     bool Fermer()
     {
-        if (!g_ouvert) return false;
+        if (!g_ouvert) {
+            FermerChoix();   // un choix sans panneau n'a pas de sens
+            return false;
+        }
+        /* ÉCHAP FERME LA FENÊTRE DE CHOIX D'ABORD, et rien d'autre : le
+           panneau reste, le serveur n'entend pas « fermer ». Le prochain
+           Échap fermera le panneau — la couche garde sa place dans la file. */
+        if (g_clefsPour != 0) {
+            FermerChoix();
+            return true;
+        }
         EcrireGeste("fermer", "");
         g_ouvert = false;
         g_nomActif = false;
@@ -627,6 +1029,10 @@ namespace FUI::Maison
         LigneNom(S);
         ImGui::Spacing();
 
+        // Les portes AVANT la recherche : ce sont elles qu'on donne aux gens.
+        TablePortes(S);
+        ImGui::Spacing();
+
         if (g_gerer) {
             Recherche(S);
             ImGui::Spacing();
@@ -656,5 +1062,9 @@ namespace FUI::Maison
         ImGui::End();
         ImGui::PopStyleVar(3);
         ImGui::PopStyleColor();
+
+        /* La fenêtre de choix des clefs, APRÈS le End() du panneau : une
+           fenêtre ImGui à part entière, qui se pose par-dessus. */
+        FenetreClefs(S);
     }
 }

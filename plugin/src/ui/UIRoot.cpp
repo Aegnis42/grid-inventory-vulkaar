@@ -4157,7 +4157,11 @@ namespace FUI::UIRoot
                 /* Meme raison que l etabli : la racine a ete ouverte pour le
                    panneau, elle s en va avec lui -- sauf si l'etabli la tient. */
                 if (!Maison::Fermer()) return false;
-                if (!Etabli::Ouvert()) UIRoot::Close();
+                /* Fermer() a pu ne refermer QUE la fenetre de choix des clefs
+                   (etape 2) : le panneau est encore la, la racine reste — sans
+                   cette garde, un Echap dans les clefs eteignait tout l'ecran
+                   et le chien de garde envoyait « fermer » au serveur. */
+                if (!Maison::Ouvert() && !Etabli::Ouvert()) UIRoot::Close();
                 return true;
             default: return false;
             }
