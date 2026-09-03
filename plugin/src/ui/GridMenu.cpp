@@ -1,3 +1,4 @@
+#include "ui/Maison.h"
 #include "ui/GridMenu.h"
 #include "game/Census.h"
 #include "game/DeltaWatch.h"
@@ -288,8 +289,17 @@ namespace FUI
                     }
                     return RE::UI_MESSAGE_RESULTS::kHandled;
                 }
+                // [vulkaar] NOS ECRANS N'ONT PAS DE SAUT DE MENU (03/09/2026).
+                // Le panneau de la maison ou l'etabli occupent tout l'ecran ;
+                // pendant qu'ils sont ouverts, J ouvrait le journal, M la carte,
+                // Tab le menu de raccourcis par-dessus -- « le jeu garde la
+                // detection des touches ». Tout le canal est avale ici ; Echap
+                // et la touche d'inventaire ont deja ferme l'ecran juste au-dessus.
+                if (Maison::Ouvert() || Etabli::Ouvert()) {
+                    return RE::UI_MESSAGE_RESULTS::kHandled;
+                }
                 // vanilla-style menu hopping (J = Journal, TAB = Tween etc.)
-                // stays available when not typing
+                // stays available when not typing -- in the bag only
             }
             break;
         }
