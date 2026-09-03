@@ -16,6 +16,12 @@
 // un FormID). Le staff rattache depuis le tchat ; ici on détache (×) et on
 // donne les clefs : « toutes » (locataire) ou une liste cochée (invité) dans
 // une fenêtre de choix nue, par-dessus le panneau.
+//
+// LE VERROU (étape 3) : le moteur n'en a pas côté serveur et le client efface
+// les verrous vanilla — il est donc À NOUS, un booléen par passage que le veto
+// serveur lit. Ici, un bouton par porte qui dit l'état actuel et demande
+// l'état VOULU (geste « verrou »), actif pour qui a la clef de CE passage (ou
+// la gestion). Le trousseau du SPECTATEUR arrive par la ligne « mesclefs ».
 // Deux fichiers TSV nus — le pont éprouvé de l'échange et de l'établi. Une
 // PAIRE À NOUS : deux écrans qui numéroteraient dans le même fichier
 // s'avaleraient mutuellement leurs gestes.

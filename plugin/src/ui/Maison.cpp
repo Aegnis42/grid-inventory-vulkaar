@@ -56,6 +56,13 @@ namespace FUI::Maison
             std::string cle;
             std::string nom;
             int         faces = 1;   // 1 (porte à sens unique) ou 2
+            /* LE VERROU EST À NOUS (étape 3) : le moteur n'en a pas dans la VM
+               serveur, et le client efface les verrous vanilla à chaque
+               matérialisation. Un booléen par passage, et le veto serveur qui
+               le lit. VERROUILLÉ PAR DÉFAUT — c'est le comportement d'hier
+               (seuls les porteurs de clef passent), et un passage neuf ne doit
+               pas s'ouvrir à tout le monde parce qu'une colonne manquait. */
+            bool        verrouille = true;
         };
 
         // ---- état reçu (le serveur fait foi) ----
@@ -67,6 +74,13 @@ namespace FUI::Maison
         std::string           g_message;
         std::vector<Membre>   g_membres;
         std::vector<Porte>    g_portes;             // dans l'ordre du registre
+        /* MES clefs à MOI, le spectateur (ligne `mesclefs`) : « toutes » —
+           propriétaire, locataire, staff — ou la liste des passages de mon
+           trousseau. Le bouton du verrou ne peut pas se décider sans elles
+           quand je n'ai pas la gestion : la table des membres ne dit que ce
+           que les AUTRES ont. */
+        bool                     g_mesClefsToutes = false;
+        std::vector<std::string> g_mesClefs;
         std::string           g_rechercheEcho;      // la requête à laquelle répondent les résultats
         std::vector<Candidat> g_resultats;
         unsigned long long    g_seqEtat = 0;
@@ -219,6 +233,11 @@ namespace FUI::Maison
             std::vector<Membre> membres;
             std::vector<Porte> portes;
             std::vector<Candidat> resultats;
+            /* Sans ligne `mesclefs` (client d'avant l'étape 3), AUCUNE clef :
+               le bouton se grise, et c'est le bon défaut — un bouton actif à
+               tort ferait partir un geste que le serveur refuserait. */
+            bool mesClefsToutes = false;
+            std::vector<std::string> mesClefs;
 
             char ligne[2048];
             char* c[12];
@@ -272,7 +291,30 @@ namespace FUI::Maison
                     p.nom = c[2];
                     // Sans colonne `faces` (client d'avant le contrat), une face.
                     p.faces = (n >= 4 && std::atoi(c[3]) == 2) ? 2 : 1;
+                    // 5e colonne : le verrou. Absente = verrouillé (voir Porte).
+                    // Seul un « 0 » EXACT deverrouille : une colonne absente,
+                    // vide ou illisible laisse le passage ferme. atoi rendait 0
+                    // sur n'importe quel texte — donc ouvrait la porte.
+                    p.verrouille = !(n >= 5 && std::strcmp(c[4], "0") == 0);
                     portes.push_back(std::move(p));
+                } else if (std::strcmp(c[0], "mesclefs") == 0) {
+                    if (std::strcmp(c[1], "toutes") == 0) {
+                        mesClefsToutes = true;
+                    } else {
+                        /* Une liste séparée par des virgules : un descripteur
+                           « idLocal:Plugin.esp » n'en contient jamais (contrat
+                           du pont), le découpage est donc sans ambiguïté. */
+                        const char* d = c[1];
+                        while (*d != '\0') {
+                            const char* virgule = std::strchr(d, ',');
+                            const std::size_t taille = virgule != nullptr
+                                ? static_cast<std::size_t>(virgule - d)
+                                : std::strlen(d);
+                            if (taille != 0) mesClefs.emplace_back(d, taille);
+                            if (virgule == nullptr) break;
+                            d = virgule + 1;
+                        }
+                    }
                 } else if (std::strcmp(c[0], "recherche") == 0) {
                     echo = c[1];
                 } else if (std::strcmp(c[0], "resultat") == 0 && n >= 4) {
@@ -316,6 +358,8 @@ namespace FUI::Maison
                 g_clefsCoche = std::move(coche);
             }
             g_portes = std::move(portes);
+            g_mesClefsToutes = mesClefsToutes;
+            g_mesClefs = std::move(mesClefs);
 
             /* LA FENÊTRE DE CHOIX SE REFERME si son membre n'est plus là (retiré
                par le staff pendant qu'on cochait), s'il est devenu propriétaire
@@ -567,13 +611,32 @@ namespace FUI::Maison
             ImGui::PopStyleColor(9);
         }
 
-        /** Les portes : une ligne par PASSAGE — le nom, « 2 faces » en gris
-         *  quand la jumelle est rattachée, et × (gestion) qui détache le
-         *  passage entier. Le staff seul rattache, depuis le tchat : l'écran
+        /** Ai-JE la clef de ce passage ? « toutes » tranche sans lire la liste
+         *  (propriétaire, locataire, staff) ; sinon mon trousseau la nomme.
+         *  Le serveur reste seul juge : ceci ne fait que griser un bouton. */
+        bool JaiLaClef(const std::string& a_cle)
+        {
+            if (g_mesClefsToutes) return true;
+            for (const auto& cle : g_mesClefs) {
+                if (cle == a_cle) return true;
+            }
+            return false;
+        }
+
+        /** Les portes : une ligne par PASSAGE — le nom, le verrou, « 2 faces »
+         *  en gris quand la jumelle est rattachée, et × (gestion) qui détache
+         *  le passage entier. Le staff seul rattache, depuis le tchat : l'écran
          *  le rappelle quand la liste est vide. */
         void TablePortes(float a_S)
         {
             const float haut = 30.0f * a_S;
+            /* LA COLONNE DU VERROU EST DE LARGEUR FIXE, mesurée sur le plus
+               long des deux libellés : le panneau est AlwaysAutoResize, et une
+               colonne qui se mesurerait sur le mot courant ferait sauter toute
+               la ligne — et le panneau entier — à chaque bascule. */
+            const float largeurBouton =
+                ImGui::CalcTextSize("Verrouillée").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+            const float largeurVerrou = largeurBouton + 12.0f * a_S;
 
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.45f));
             ImGui::TextUnformatted("Portes");
@@ -593,11 +656,12 @@ namespace FUI::Maison
             }
 
             PousserStyleTable(a_S);
-            const bool table = ImGui::BeginTable("##vk_maison_portes", 3,
+            const bool table = ImGui::BeginTable("##vk_maison_portes", 4,
                 ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
                     ImGuiTableFlags_NoPadOuterX);
             if (table) {
                 ImGui::TableSetupColumn("##nom", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("##verrou", ImGuiTableColumnFlags_WidthFixed, largeurVerrou);
                 ImGui::TableSetupColumn("##faces", ImGuiTableColumnFlags_WidthFixed, 70.0f * a_S);
                 ImGui::TableSetupColumn("##x", ImGuiTableColumnFlags_WidthFixed, 30.0f * a_S);
 
@@ -616,15 +680,47 @@ namespace FUI::Maison
                     const char* affiche = p.nom.empty() ? p.cle.c_str() : p.nom.c_str();
                     dl->AddText(ImVec2(depart.x + 6.0f * a_S, milieu), Theme::Chrome(0.92f), affiche);
 
+                    /* LE VERROU, juste après le nom. Le bouton dit l'état
+                       ACTUEL du passage et envoie l'état VOULU (0 = ouvrir,
+                       1 = verrouiller), jamais « bascule » : deux panneaux
+                       ouverts sur la même porte se croiseraient, et le second
+                       défairait le premier sans l'avoir vu. En or quand le
+                       passage est ouvert — c'est l'exception qui doit se voir.
+                       ACTIF pour qui a la clef de CE passage, ou la gestion ;
+                       grisé pour le simple visiteur, que le serveur refuserait
+                       de toute façon. */
+                    ImGui::TableSetColumnIndex(1);
+                    const bool peutVerrouiller = g_gerer || JaiLaClef(p.cle);
+                    ImGui::BeginDisabled(!peutVerrouiller);
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                        p.verrouille ? Theme::Chrome(0.70f) : Theme::GoldCol());
+                    /* L'identité du bouton ne bouge PAS avec le libellé (le
+                       « ## » de Sfx::Button) : un id qui change entre l'appui
+                       et le relâchement est un bouton qu'on ne peut pas cliquer. */
+                    const char* libelleVerrou = p.verrouille ? "Verrouillée##verrou" : "Ouverte##verrou";
+                    const bool bascule = Sfx::Button(libelleVerrou, ImVec2(largeurBouton, haut));
+                    ImGui::PopStyleColor();
+                    const bool survol = ImGui::IsItemHovered();
+                    ImGui::EndDisabled();
+                    if (bascule) {
+                        EcrireGeste("verrou",
+                            Assainir(p.cle.c_str()) + "\t" + (p.verrouille ? "0" : "1"));
+                    }
+                    if (survol) {
+                        ImGui::SetTooltip("%s", p.verrouille
+                            ? "ouvrir ce passage — tout le monde pourra entrer"
+                            : "verrouiller — seules les clefs passeront");
+                    }
+
                     // « 2 faces » : le passage entier ; une porte battante
                     // sans jumelle reste muette, rien à dire d'elle.
-                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TableSetColumnIndex(2);
                     if (p.faces == 2) {
                         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (haut - ImGui::GetTextLineHeight()) * 0.5f);
                         ImGui::TextDisabled("2 faces");
                     }
 
-                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TableSetColumnIndex(3);
                     if (g_gerer) {
                         ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.70f));
                         if (Sfx::Button("×##detacher", ImVec2(-FLT_MIN, haut), true)) {
