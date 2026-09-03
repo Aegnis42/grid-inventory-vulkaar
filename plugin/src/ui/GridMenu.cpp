@@ -448,14 +448,31 @@ namespace FUI
         // the keyboard an arrow only passes if the PHYSICAL arrow key is down
         // (GetAsyncKeyState); the synthetic ones are dropped. Track what we
         // passed so a real arrow's key-up never leaves ImGui a stuck key.
+        //
+        // ★[vulkaar] LA MEME TRADUCTION FRAPPE « ACTIVER » (03/09/2026).
+        //
+        // Le jeu ne pre-traduit pas que les fleches : en mode menu, la touche
+        // d'activation (E chez le proprietaire) arrive en ENTREE, et « Accepter »
+        // en ESPACE — c'est ainsi que les menus vanilla se valident au clavier.
+        // Resultat rapporte : pendant la frappe, E validait le nom du batiment
+        // et l'ajout d'une personne, sans que personne ait touche a Entree. La
+        // regle des fleches vaut telle quelle pour ces deux-la, et le tableau
+        // ci-dessous est le seul endroit ou l'ajouter — la suite du bloc, elle,
+        // ne connait que des indices.
+        //
+        // Ce qui n'y entre PAS, a dessein : Echap (qui doit fermer, meme
+        // traduit), Tab, Retour arriere et Suppr (aucune touche de jeu ne s'y
+        // traduit, et les avaler couperait l'edition du texte).
         {
-            static bool s_arrowLive[4] = {};
+            static bool s_arrowLive[6] = {};
             int ai = -1, vk = 0;
             switch (imguiKey) {
             case ImGuiKey_LeftArrow:  ai = 0; vk = VK_LEFT; break;
             case ImGuiKey_RightArrow: ai = 1; vk = VK_RIGHT; break;
             case ImGuiKey_UpArrow:    ai = 2; vk = VK_UP; break;
             case ImGuiKey_DownArrow:  ai = 3; vk = VK_DOWN; break;
+            case ImGuiKey_Enter:      ai = 4; vk = VK_RETURN; break;
+            case ImGuiKey_Space:      ai = 5; vk = VK_SPACE; break;
             default: break;
             }
             // ★★★THE RELEASE FOLLOWS THE PRESS, NOT THE FIELD'S STATE.
@@ -476,7 +493,7 @@ namespace FUI
                 if (a_down) {
                     if (UIRoot::IsTextInputActive() &&
                         (GetAsyncKeyState(vk) & 0x8000) == 0) {
-                        return;   // WASD-translated while typing: not a real arrow
+                        return;   // traduite par le jeu pendant la frappe : ni une vraie fleche, ni un vrai Entree
                     }
                     s_arrowLive[ai] = true;
                 } else {
