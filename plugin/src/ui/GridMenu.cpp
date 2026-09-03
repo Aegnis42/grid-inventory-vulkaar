@@ -296,6 +296,11 @@ namespace FUI
                 // detection des touches ». Tout le canal est avale ici ; Echap
                 // et la touche d'inventaire ont deja ferme l'ecran juste au-dessus.
                 if (Maison::Ouvert() || Etabli::Ouvert()) {
+                    // La console et la capture d'ecran ne sont pas des sauts de
+                    // menu : elles passent (les gardes IsConsoleOpen du thunk, du
+                    // relais et du rendu prennent le relais une fois la console
+                    // ouverte).
+                    if (data->fixedStr == ue->console || data->fixedStr == ue->screenshot) break;
                     return RE::UI_MESSAGE_RESULTS::kHandled;
                 }
                 // vanilla-style menu hopping (J = Journal, TAB = Tween etc.)

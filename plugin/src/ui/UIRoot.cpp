@@ -24,6 +24,7 @@
 #include "ui/WinManager.h"
 
 #include <imgui.h>
+#include <cstdint>
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 #include <imgui_internal.h>   // ClearActiveID (drop text-field focus on close)
@@ -509,8 +510,8 @@ namespace FUI::UIRoot
             static unsigned s_lastChars = 0;
             static int      s_contradictions = 0;
             // [vulkaar] l'attente de confirmation d'une frappe (voir le verrou plus bas)
-            static int      s_trame = 0;
-            static int      s_attenteDepuis = -1;   // trame de la plus ancienne frappe non confirmee ; -1 = aucune
+            static std::uint64_t s_trame = 0;
+            static std::int64_t  s_attenteDepuis = -1;   // trame de la plus ancienne frappe non confirmee ; -1 = aucune
             constexpr int   kDelaiConfirmation = 6; // trames laissees a la fenetre pour livrer son message
             ++s_trame;
 
@@ -518,11 +519,22 @@ namespace FUI::UIRoot
             // nothing to type into, and ToUnicodeEx is stateful (dead keys) --
             // calling it for every key at all times would leave half-composed
             // accents lying around for the next field that opens.
-            if (!a_io.WantTextInput) {
+            // [vulkaar] La console a sa propre saisie : les deux autres routes
+            // la laissent passer sans y toucher (thunk, relais) ; le sondage
+            // doit se taire aussi, sinon une commande tapee dans la console
+            // ferme le verrou puis s'ecrit dans notre champ.
+            auto* uiConsole = RE::UI::GetSingleton();
+            const bool consoleOuverte = uiConsole && uiConsole->IsMenuOpen(RE::Console::MENU_NAME);
+            if (!a_io.WantTextInput || consoleOuverte) {
                 for (auto& d : s_down) d = false;
                 // [vulkaar] plus de champ : un accent posé par une touche morte
                 // du clavier déclaré ne doit pas tomber dans le prochain.
                 vk::clavier::OublierMorte();
+                // Une attente ne se juge pas sans champ qui ecoute, et
+                // « d'affilee » veut dire que la serie ne survit pas a une perte
+                // de focus : sinon le blur fabriquerait une contradiction.
+                s_attenteDepuis  = -1;
+                s_contradictions = 0;
                 return;
             }
 
@@ -605,6 +617,12 @@ namespace FUI::UIRoot
                     continue;
                 }
 
+                // Un raccourci (Ctrl+lettre, Alt+lettre) n'est pas un caractere et
+                // ne juge pas la route : la fenetre applique la meme regle. Alt+lettre
+                // produit un WM_SYSCHAR que le thunk ne compte pas -- place ici, avant
+                // le verrou, il n'ouvre plus d'attente.
+                if ((ctrl || alt) && !altgr) continue;
+
                 if (!g_kbFallback) {
                     // ★THE LATCH, REECRIT LE 03/09/2026. L'ancienne regle comptait
                     // une contradiction des qu'une touche imprimable etait vue
@@ -629,7 +647,6 @@ namespace FUI::UIRoot
                     continue;
                 }
 
-                if ((ctrl || alt) && !altgr) continue;   // a shortcut, not a character
                 // [vulkaar] _EX : le préfixe étendu revient dans l'octet haut.
                 // MapVirtualKey nu rend le même 0x35 pour le « / » du pavé et
                 // pour la touche « ! » de l'AZERTY — traduit par notre table, le
@@ -658,7 +675,8 @@ namespace FUI::UIRoot
             // kDelaiConfirmation trames apres une frappe -- cette fois c'est une
             // contradiction. Trois d'affilee (la serie retombe a chaque WM_CHAR)
             // et la route de la fenetre est tenue pour morte : le repli ecrit.
-            if (!g_kbFallback && s_attenteDepuis >= 0 && s_trame - s_attenteDepuis > kDelaiConfirmation) {
+            if (!g_kbFallback && s_attenteDepuis >= 0 &&
+                static_cast<std::int64_t>(s_trame) - s_attenteDepuis > kDelaiConfirmation) {
                 s_attenteDepuis = -1;
                 if (++s_contradictions >= 3) {
                     g_kbFallback = true;
@@ -4133,13 +4151,13 @@ namespace FUI::UIRoot
                    lui evite au joueur un second Echap devant un inventaire
                    qu il n a pas demande. */
                 if (!Etabli::Fermer()) return false;
-                UIRoot::Close();
+                if (!Maison::Ouvert()) UIRoot::Close();   // la racine reste a l'autre ecran s'il est la
                 return true;
             case Layer::kMaison:
                 /* Meme raison que l etabli : la racine a ete ouverte pour le
-                   panneau, elle s en va avec lui. */
+                   panneau, elle s en va avec lui -- sauf si l'etabli la tient. */
                 if (!Maison::Fermer()) return false;
-                UIRoot::Close();
+                if (!Etabli::Ouvert()) UIRoot::Close();
                 return true;
             default: return false;
             }

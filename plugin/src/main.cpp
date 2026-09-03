@@ -38,6 +38,16 @@
 #include <unordered_map>
 #include <vector>
 
+// [vulkaar] Les controles gameplay suspendus tant que la grille (et donc la
+// maison, l'etabli) est ouverte : combat, activation, saut, accroupi, POV.
+// Ni kMenu ni kConsole, jamais : Echap et la console doivent repondre.
+constexpr RE::ControlMap::UEFlag kControlesSuspendusParLaGrille = static_cast<RE::ControlMap::UEFlag>(
+    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kFighting) |
+    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kActivate) |
+    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kJumping) |
+    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kSneaking) |
+    static_cast<std::uint32_t>(RE::ControlMap::UEFlag::kPOVSwitch));
+
 // ============================================================================
 //  GridInventory - Mabinogi/Diablo-style tetris inventory (ImGui)
 //
@@ -930,6 +940,12 @@ namespace
                         SKSE::GetTaskInterface()->AddUITask([]() {
                             if (FUI::UIRoot::IsTextInputActive()) {
                                 return;   // typing 'p' into a text field
+                            }
+                            // [vulkaar] nos ecrans (maison, etabli) n'ont pas de
+                            // saut de menu -- cette route brute passe AVANT le
+                            // canal des evenements utilisateur, elle a sa garde.
+                            if (FUI::Maison::Ouvert() || FUI::Etabli::Ouvert()) {
+                                return;
                             }
                             // plain inventory only: a loot/barter session has
                             // a partner to tear down, and vanilla refuses menu
@@ -2462,9 +2478,16 @@ namespace
                 // coûte. Les touches du menu (R = jeter un, clic droit =
                 // inspection) ne passent pas par ces handlers : elles
                 // continuent de marcher.
+                // [vulkaar] 03/09/2026 : pas seulement le combat. Le menu ne met
+                // pas le jeu en pause et son contexte kInventory ne lie pas E,
+                // Espace, Ctrl, F : ils retombaient en gameplay -- une porte
+                // s'ouvrait, le personnage sautait, pendant qu'on gerait le
+                // registre d'une maison. Meme voie haute, memes drapeaux rendus a
+                // la fermeture. JAMAIS kMenu ni kConsole : Echap et la console
+                // doivent toujours repondre.
                 if (auto* cm = RE::ControlMap::GetSingleton()) {
-                    cm->ToggleControls(RE::ControlMap::UEFlag::kFighting, false, true);
-                    SKSE::log::info("[INV] controles de combat suspendus (grille ouverte)");
+                    cm->ToggleControls(kControlesSuspendusParLaGrille, false, true);
+                    SKSE::log::info("[INV] controles de combat, activation, saut, accroupi et POV suspendus (grille ouverte)");
                 }
             },
             []() {   // menu hidden
@@ -2473,8 +2496,8 @@ namespace
                 FUI::IconCache::GetSingleton()->RelacherImpulsionPause();
                 // [vulkaar] ...et le combat revient, symétrique de l'ouverture.
                 if (auto* cm = RE::ControlMap::GetSingleton()) {
-                    cm->ToggleControls(RE::ControlMap::UEFlag::kFighting, true, true);
-                    SKSE::log::info("[INV] controles de combat rendus (grille fermee)");
+                    cm->ToggleControls(kControlesSuspendusParLaGrille, true, true);
+                    SKSE::log::info("[INV] controles rendus (grille fermee)");
                 }
             });
 
