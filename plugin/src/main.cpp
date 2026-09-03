@@ -67,6 +67,9 @@ namespace
     std::string_view g_echoMenu{};
     bool g_pendingPartnerOpen = false; // open our grid once Container/BarterMenu fully closed (loot/barter)
     bool g_movementOff = false;        // we disabled the movement handler (text input)
+    // [vulkaar] les controles du jeu sont-ils coupes de NOTRE fait ? (voir le
+    // crochet d'Update : reconciliation par trame, jamais bascule aux deux bords)
+    bool g_controlesCoupes = false;
     bool g_reopenAfterMsg = false;     // we stepped aside for a MessageBox (poison confirm)
 
     // ★★★HOP TO THE VANILLA INVENTORY AND BACK, WITHOUT LEAVING THE GAME.
@@ -137,6 +140,35 @@ namespace
             } else if (g_movementOff) {
                 SetMoveInput(true);
                 g_movementOff = false;
+            }
+            // [vulkaar] LES CONTROLES DU JEU, TANT QU'UN DE NOS MENUS EST OUVERT.
+            //
+            // Notre menu ne met pas le jeu en pause (voulu en multijoueur) et
+            // son contexte kInventory ne lie ni E, ni Espace, ni Ctrl, ni F :
+            // ces touches retombaient en gameplay — une porte s'ouvrait, le
+            // personnage sautait, pendant qu'on tapait dans le panneau d'une
+            // maison.
+            //
+            // ★RECONCILIE A CHAQUE TRAME, jamais bascule aux deux bords. La
+            // premiere ecriture coupait a l'ouverture du menu et rendait a sa
+            // fermeture ; le 03/09/2026 l'activation est restee coupee et le
+            // proprietaire ne pouvait plus ouvrir une porte du tout. Ici, quoi
+            // qu'il arrive — un ecran ferme par une autre voie, un rechargement
+            // a chaud, un plantage d'ecran — la trame suivante remet les choses
+            // en place. Meme forme que le blocage du deplacement ci-dessus, et
+            // pour la meme raison.
+            {
+                auto* ui = RE::UI::GetSingleton();
+                const bool notreMenu = ui && ui->IsMenuOpen("GridInventoryMenu"sv);
+                if (notreMenu != g_controlesCoupes) {
+                    if (auto* cm = RE::ControlMap::GetSingleton()) {
+                        cm->ToggleControls(kControlesSuspendusParLaGrille, !notreMenu, true);
+                        g_controlesCoupes = notreMenu;
+                        SKSE::log::info("[INV] controles du jeu {} (notre menu {})",
+                                        notreMenu ? "suspendus" : "rendus",
+                                        notreMenu ? "ouvert" : "ferme");
+                    }
+                }
             }
             // apply capture defs + park the preview model BEFORE this frame
             // renders. While the menu is open GridInventoryMenu::AdvanceMovie
@@ -2485,20 +2517,19 @@ namespace
                 // registre d'une maison. Meme voie haute, memes drapeaux rendus a
                 // la fermeture. JAMAIS kMenu ni kConsole : Echap et la console
                 // doivent toujours repondre.
-                if (auto* cm = RE::ControlMap::GetSingleton()) {
-                    cm->ToggleControls(kControlesSuspendusParLaGrille, false, true);
-                    SKSE::log::info("[INV] controles de combat, activation, saut, accroupi et POV suspendus (grille ouverte)");
-                }
+                // [vulkaar] LA SUSPENSION DES CONTROLES N'EST PLUS ICI : une
+                // bascule a deux bords (ouverture / fermeture) FUIT. Le
+                // 03/09/2026 elle a laisse l'activation coupee — plus moyen
+                // d'ouvrir une porte, meme menu ferme. Elle se reconcilie
+                // desormais A CHAQUE TRAME dans le crochet d'Update, comme le
+                // blocage du deplacement juste a cote.
             },
             []() {   // menu hidden
                 // [vulkaar] une capture pendante meurt avec le menu : jamais
                 // d'impulsion de pause tenue sans pompe pour la relâcher.
                 FUI::IconCache::GetSingleton()->RelacherImpulsionPause();
-                // [vulkaar] ...et le combat revient, symétrique de l'ouverture.
-                if (auto* cm = RE::ControlMap::GetSingleton()) {
-                    cm->ToggleControls(kControlesSuspendusParLaGrille, true, true);
-                    SKSE::log::info("[INV] controles rendus (grille fermee)");
-                }
+                // [vulkaar] (les controles se rendent d'eux-memes a la trame
+                // suivante — voir la reconciliation dans le crochet d'Update.)
             });
 
         if (auto* idm = RE::BSInputDeviceManager::GetSingleton()) {
@@ -2525,6 +2556,15 @@ namespace
         if (g_movementOff) {
             SetMoveInput(true);
             g_movementOff = false;
+        }
+        // [vulkaar] meme dette : des controles coupes ne survivent pas a un
+        // chargement. La reconciliation par trame les recouperait aussitot si
+        // notre menu etait encore ouvert.
+        if (g_controlesCoupes) {
+            if (auto* cm = RE::ControlMap::GetSingleton()) {
+                cm->ToggleControls(kControlesSuspendusParLaGrille, true, true);
+            }
+            g_controlesCoupes = false;
         }
         g_planBPendingOpen = false;
         g_reopenAfterMsg = false;
