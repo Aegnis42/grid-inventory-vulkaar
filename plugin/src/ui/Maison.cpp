@@ -434,20 +434,36 @@ namespace FUI::Maison
                 return;
             }
 
-            ImGui::SetNextItemWidth(-1.0f);
+            /* LE BOUTON, ET POURQUOI IL EXISTE (demande du 03/09/2026) : Entrée
+               suffisait, mais le clavier n'est pas une voie sûre — les touches
+               fuient encore vers le jeu, et une modification qu'on ne sait pas
+               valider d'un clic est une modification perdue. Il se réserve sa
+               place AVANT le champ, sinon le champ prendrait toute la largeur. */
+            const float large = ImGui::CalcTextSize("Sauvegarder").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+            const float haut = ImGui::GetFrameHeight();
+            ImGui::SetNextItemWidth(-(large + 8.0f * a_S));
             ImGui::PushStyleColor(ImGuiCol_FrameBg, Voile(0.04f));
             ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Voile(0.10f));
             ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Voile(0.10f));
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
-            if (ImGui::InputTextWithHint("##vk_maison_nom", "donne un nom au bâtiment", g_nomEdite,
-                    sizeof(g_nomEdite), ImGuiInputTextFlags_EnterReturnsTrue)) {
-                const std::string voulu = Assainir(g_nomEdite);
-                // Entrée sur un nom inchangé n'a rien à demander au serveur.
-                if (voulu != g_nom) EcrireGeste("renommer", voulu);
-            }
+            const bool parEntree = ImGui::InputTextWithHint("##vk_maison_nom", "donne un nom au bâtiment",
+                g_nomEdite, sizeof(g_nomEdite), ImGuiInputTextFlags_EnterReturnsTrue);
             ImGui::PopStyleColor(4);
             g_nomActif = ImGui::IsItemActive();
             FiletSousItem();
+
+            const std::string voulu = Assainir(g_nomEdite);
+            /* Rien à sauvegarder tant que le texte n'a pas bougé : le bouton se
+               grise plutôt que de disparaître, pour que sa place ne saute pas
+               sous le curseur à chaque frappe. */
+            const bool aChange = voulu != g_nom;
+            ImGui::SameLine(0.0f, 8.0f * a_S);
+            ImGui::BeginDisabled(!aChange);
+            const bool parBouton = Sfx::Button("Sauvegarder##vk_maison_nom_ok", ImVec2(large, haut));
+            ImGui::EndDisabled();
+
+            // Entrée sur un nom inchangé n'a rien à demander au serveur.
+            if ((parEntree || parBouton) && aChange) EcrireGeste("renommer", voulu);
         }
 
         /** La loupe, dessinée à la main : les polices cuites du greffon n'ont
