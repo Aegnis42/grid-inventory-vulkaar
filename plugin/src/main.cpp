@@ -589,10 +589,36 @@ namespace
     {
         constexpr const char* kCheminPortes = "Data/SKSE/Plugins/GridInventory_portes.txt";
 
-        // formId de la REFERENCE (une entree par FACE) -> nom a afficher.
-        std::unordered_map<RE::FormID, std::string> g_nomsPortes;
-        std::filesystem::file_time_type             g_portesDate{};
-        bool                                        g_portesLues = false;
+        // ── CE QUE LE PONT PORTE POUR UNE PORTE ─────────────────────────────
+        //
+        // LE NOM NE SUFFIT PLUS, ET VOICI POURQUOI. Le rafraichissement du
+        // reticule (toute la mecanique de dette plus bas) s ouvre sur un DELTA.
+        // Tant que ce delta se calculait sur le NOM SEUL, une bascule de verrou
+        // ne changeait pas une ligne du fichier : delta vide, dette jamais
+        // ouverte, et le texte restait fige sur « Deverrouiller » jusqu a ce que
+        // le joueur detourne le regard. Or le verbe (« Ouvrir » /
+        // « Deverrouiller ») et la ligne de difficulte viennent du MOTEUR, et le
+        // moteur ne les recompose que sur evenement — c est justement ce qu on
+        // vient chercher. Il faut donc que le verrou VOYAGE, pour que son
+        // changement soit visible dans le delta.
+        //
+        // Le 04/09 le nom a perdu sa decoration « (verrouille) » — le jeu dit
+        // deja le verbe et la difficulte — ce qui a rendu le nom seul MUET sur
+        // la serrure. Le verrou revient donc dans le pont comme DONNEE, pas
+        // comme decoration : il n est jamais affiche, il ne sert qu au delta.
+        //
+        // verrou : 1 verrouille, 0 non, -1 INCONNU (ligne a deux colonnes d un
+        // client plus ancien). L inconnu ne clignote pas — voir le delta.
+        struct PorteEtat
+        {
+            std::string nom;              // peut etre VIDE : « laisse le nom du jeu »
+            int         verrou = -1;      // -1 inconnu, 0 ouvert, 1 verrouille
+        };
+
+        // formId de la REFERENCE (une entree par FACE) -> ce que le pont porte.
+        std::unordered_map<RE::FormID, PorteEtat> g_nomsPortes;
+        std::filesystem::file_time_type           g_portesDate{};
+        bool                                      g_portesLues = false;
 
         // ── LA BORNE DES LECTURES REJETEES ──────────────────────────────────
         //
@@ -801,7 +827,17 @@ namespace
             const auto visee    = PorteVisee();
             const bool viseeDue = visee != 0 && g_porteDette.count(visee) != 0;
 
-            if (viseeDue || vientDeFermer) {
+            /* NOTRE PANNEAU OUVERT NE CONSOMME PAS LA DETTE. Le geste de verrou
+               part de l ecran Maison, qui NE SE FERME PAS apres le clic : le
+               serveur repond en quelques dizaines de ms, donc le pont est
+               reecrit panneau OUVERT, et ce crochet tourne menu ouvert. Tirer
+               la, c est demander au moteur de recomposer un texte que le joueur
+               ne voit pas — et vider la dette, de sorte qu a la fermeture il ne
+               reste plus rien a rattraper. La dette survit donc jusqu a la
+               fermeture, ou `vientDeFermer` tire a coup sur ; et le cas
+               ordinaire — le joueur vise la porte hors panneau — n est pas
+               touche. */
+            if ((viseeDue && !notreMenu) || vientDeFermer) {
                 ReclamerTexteReticule(visee, viseeDue ? "cible due" : "panneau referme");
                 g_porteDette.clear();
                 return;
@@ -938,7 +974,7 @@ namespace
             return;
         }
 
-        std::unordered_map<RE::FormID, std::string> neuf;
+        std::unordered_map<RE::FormID, PorteEtat> neuf;
         for (std::size_t k = 1; k + 1 < lignes.size(); ++k) {
             const auto tab = lignes[k].find('\t');
             if (tab == std::string::npos) continue;
@@ -947,23 +983,83 @@ namespace
             const std::uint32_t id =
                 static_cast<std::uint32_t>(std::strtoul(hexa.c_str(), &bout, 16));
             if (!bout || *bout != 0) continue;
+
+            // ── DEUX COLONNES OU TROIS : ON NE CHOISIT PAS, ON RECONNAIT ────
+            //
+            // Le client et le greffon se deploient par des chaines DIFFERENTES
+            // et peuvent etre decales. Un greffon neuf doit donc lire les deux
+            // formes du fichier :
+            //   « id<TAB>nom »        (client ancien) -> verrou INCONNU
+            //   « id<TAB>nom<TAB>0|1 » (client neuf)  -> verrou connu
+            // On reconnait la troisieme colonne a sa forme EXACTE — une
+            // tabulation apres celle de l id, suivie d un seul caractere '0' ou
+            // '1' et de rien d autre. Tout le reste est du NOM, pris tel quel :
+            // devant un fichier qu on ne comprend pas, on retombe sur le
+            // comportement d avant plutot que d amputer un nom.
+            //
+            // On cherche la DERNIERE tabulation, pas la deuxieme : un nom ne
+            // devrait jamais en contenir (le pont est tabule), mais si un jour
+            // il en contenait une, couper au dernier separateur garde le nom
+            // entier et le drapeau a sa place.
+            std::string reste  = lignes[k].substr(tab + 1);
+            int         verrou = -1;
+            const auto  tab2   = reste.rfind('\t');
+            if (tab2 != std::string::npos && reste.size() == tab2 + 2 &&
+                (reste[tab2 + 1] == '0' || reste[tab2 + 1] == '1')) {
+                verrou = reste[tab2 + 1] - '0';
+                reste.resize(tab2);
+            }
+
             // Texte pris en UTF-8 TEL QUEL : les chaines du jeu le sont aussi
             // (« La Guerrière » porte C3 A8 dans skyrim_french.strings).
-            neuf.emplace(static_cast<RE::FormID>(id), lignes[k].substr(tab + 1));
+            // Le nom PEUT ETRE VIDE — une maison creee et pas encore nommee.
+            // Elle compte quand meme, parce que son verrou bascule aussi et que
+            // son texte doit suivre ; c est le crochet qui refusera d ecrire un
+            // nom vide, pas le pont qui refusera de la porter.
+            neuf.emplace(static_cast<RE::FormID>(id), PorteEtat{ std::move(reste), verrou });
         }
-        /* QUELS NOMS ONT BOUGE ? On le decide AVANT l echange, tant que
-           l ancienne table est encore en place : apparu, disparu ou reecrit.
-           Une poussee qui ne change rien (le verrou d une autre maison, un
-           droit accorde ailleurs — et le serveur pousse a TOUT LE MONDE a
-           chaque mutation) laisse l ensemble vide et ne declenche RIEN : c est
-           ce qui separe un rafraichissement d un clignotement. */
+        /* QU EST-CE QUI A BOUGE ? On le decide AVANT l echange, tant que
+           l ancienne table est encore en place : apparu, disparu, renomme — ou
+           VERROUILLE/DEVERROUILLE. Le delta porte sur les DEUX, parce que les
+           deux changent le texte affiche : le nom par notre crochet, le verrou
+           par le verbe et la ligne de difficulte que le moteur recompose.
+           Une poussee qui ne change rien (une mutation dans la maison d un
+           autre — et le serveur pousse a TOUT LE MONDE a chaque mutation)
+           laisse l ensemble vide et ne declenche RIEN : c est ce qui separe un
+           rafraichissement d un clignotement. Le seul « seq » ne compte donc
+           JAMAIS comme un changement.
+
+           UN VERROU QUI PASSE A/DE L INCONNU N EST PAS UN CHANGEMENT. Si le
+           client redescend a deux colonnes (retour arriere) ou remonte a trois,
+           toutes les portes basculeraient d un coup et le reticule clignoterait
+           sur une information qu on n a pas. On ne compte que les bascules
+           entre deux etats CONNUS. */
         std::unordered_set<RE::FormID> change;
-        for (const auto& [id, nom] : neuf) {
+        int nomsChanges = 0, verrousChanges = 0;
+        for (const auto& [id, etat] : neuf) {
             const auto avant = g_nomsPortes.find(id);
-            if (avant == g_nomsPortes.end() || avant->second != nom) change.insert(id);
+            if (avant == g_nomsPortes.end()) {
+                change.insert(id);
+                ++nomsChanges;
+                continue;
+            }
+            bool bouge = false;
+            if (avant->second.nom != etat.nom) {
+                ++nomsChanges;
+                bouge = true;
+            }
+            if (avant->second.verrou != etat.verrou && avant->second.verrou >= 0 &&
+                etat.verrou >= 0) {
+                ++verrousChanges;
+                bouge = true;
+            }
+            if (bouge) change.insert(id);
         }
         for (const auto& paire : g_nomsPortes) {
-            if (neuf.find(paire.first) == neuf.end()) change.insert(paire.first);
+            if (neuf.find(paire.first) == neuf.end()) {
+                change.insert(paire.first);
+                ++nomsChanges;
+            }
         }
 
         g_nomsPortes.swap(neuf);
@@ -974,9 +1070,15 @@ namespace
         g_portesDateRejetee = {};
         g_portesRejets      = 0;
         g_porteSeq.store(PorteSeqDe(lignes.front()), std::memory_order_relaxed);
-        logger::info("[vulkaar] portes : {} nom(s) pose(s) pour ce personnage ({}), "
-                     "{} nom(s) change(s)",
-                     g_nomsPortes.size(), lignes.front(), change.size());
+        // LA LIGNE QUI PROUVE EN JEU. Elle separe le nom du verrou a dessein :
+        // c est elle qui dira si une simple bascule de serrure — nom inchange,
+        // « 0 nom(s) » et « 1 verrou(s) » — a bien ouvert une dette. Sans cette
+        // separation, une dette ouverte resterait indiscernable d une dette
+        // ouverte POUR LA BONNE RAISON.
+        logger::info("[vulkaar] portes : {} porte(s) posee(s) pour ce personnage ({}), "
+                     "{} nom(s) change(s), {} verrou(s) change(s), {} porte(s) due(s)",
+                     g_nomsPortes.size(), lignes.front(), nomsChanges, verrousChanges,
+                     change.size());
         PorteDetteOuvrir(std::move(change));
     }
 
@@ -1094,21 +1196,42 @@ namespace
                 const int drapeaux = serrure ? static_cast<int>(serrure->flags.underlying()) : -1;
                 const int ouverture =
                     porte ? static_cast<int>(RE::BGSOpenCloseForm::GetOpenState(porte)) : -1;
+                // CE QUE LE PONT DIT DE LA MEME SERRURE, a confronter aux
+                // colonnes du dessus. C est la seule facon de distinguer « le
+                // serveur n a pas pousse la bascule » de « il l a poussee et le
+                // moteur ne l a pas encore relue ». -2 = porte absente du pont
+                // (elle ressort intacte du crochet), -1 = portee sans verrou
+                // connu (client a deux colonnes). Une recherche de plus dans une
+                // table deja en memoire, sur la ligne deja budgetee.
+                int verrouPont = -2;
+                if (porte) {
+                    const auto vu = g_nomsPortes.find(porte->GetFormID());
+                    if (vu != g_nomsPortes.end()) verrouPont = vu->second.verrou;
+                }
                 logger::info(
                     "[vulkaar] porte : appel apres seq {} — ref 0x{:08X} (par {}), "
                     "base 0x{:08X}, rendu={}, serrure={} verrouNiveau={} verrouDrapeau={} "
-                    "brut={}/{} niveau={} ouverture={} clef={} drapeaux={}, "
+                    "brut={}/{} niveau={} ouverture={} clef={} drapeaux={} verrouPont={}, "
                     "texte vanilla = \"{}\"",
                     g_porteSeq.load(std::memory_order_relaxed),
                     porte ? porte->GetFormID() : 0u, dOu,
                     a_this ? a_this->GetFormID() : 0u, vanilla ? 1 : 0,
                     serrure ? "presente" : "absente", verrouNiveau, verrouDrapeau,
-                    brutSigne, brutOctet, niveau, ouverture, clef, drapeaux, a_dst.c_str());
+                    brutSigne, brutOctet, niveau, ouverture, clef, drapeaux, verrouPont,
+                    a_dst.c_str());
             }
 
             if (!porte || g_nomsPortes.empty()) return vanilla;
             const auto it = g_nomsPortes.find(porte->GetFormID());
             if (it == g_nomsPortes.end()) return vanilla;
+            // UN NOM VIDE VEUT DIRE « LAISSE AU JEU LE NOM QU IL DONNE », PAS
+            // « efface le nom ». Une maison creee et pas encore nommee est
+            // portee par le pont — il le faut, son verrou bascule et son texte
+            // doit suivre — mais elle ne doit rien effacer a l ecran : le
+            // joueur y perdrait le nom vanilla de la cellule sans rien gagner.
+            // Elle compte pour la dette, elle ne compte pas pour le texte.
+            const std::string& nom = it->second.nom;
+            if (nom.empty()) return vanilla;
 
             // ── LE VERBE RESTE AU JEU, LE NOM SEUL EST A NOUS ───────────────
             //
@@ -1137,11 +1260,11 @@ namespace
             std::string            compose;
             const auto             fin1 = brut.find('\n');
             if (brut.empty()) {
-                compose = it->second;
+                compose = nom;
             } else if (fin1 == std::string_view::npos) {
-                compose.assign(brut).append("\n").append(it->second);
+                compose.assign(brut).append("\n").append(nom);
             } else {
-                compose.assign(brut.substr(0, fin1 + 1)).append(it->second);
+                compose.assign(brut.substr(0, fin1 + 1)).append(nom);
                 const auto fin2 = brut.find('\n', fin1 + 1);
                 if (fin2 != std::string_view::npos) compose.append(brut.substr(fin2));
             }
