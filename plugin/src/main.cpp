@@ -220,12 +220,16 @@ namespace
         {
             REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
             // ★★★THE SLOT MOVES IN VR. CommonLibSSE splits it itself --
-            // Actor.cpp: RelocateVirtual<&Actor::Update>(0x0AD, 0x0AF, ...) --
-            // and this build ships with ENABLE_SKYRIM_VR, so SKSEVR loads us.
-            // Writing the SE/AE index there replaced Resurrect (VR 0x0AD),
-            // whose signature is nothing like ours, and left the real Update
-            // unhooked: no Tick ever ran and the game died the first time
-            // anything was resurrected. Silent on SE/AE, fatal on VR.
+            // Actor.cpp: RelocateVirtual<&Actor::Update>(0x0AD, 0x0AF, ...).
+            // Writing the SE/AE index on a VR runtime replaced Resurrect (VR
+            // 0x0AD), whose signature is nothing like ours, and left the real
+            // Update unhooked: no Tick ever ran and the game died the first
+            // time anything was resurrected. Silent on SE/AE, fatal on VR.
+            //
+            // This build is ENABLE_SKYRIM_VR=OFF (EXCLUSIVE_SKYRIM_FLAT), so
+            // IsVR() is a constant false here and only the 0xAD branch is ever
+            // taken. The split stays: it costs nothing, and it is the one line
+            // that has to be right on the day the option is turned back on.
             func = vtbl.write_vfunc(REL::Module::IsVR() ? 0xAF : 0xAD, thunk);
         }
     };
@@ -589,6 +593,257 @@ namespace
         std::unordered_map<RE::FormID, std::string> g_nomsPortes;
         std::filesystem::file_time_type             g_portesDate{};
         bool                                        g_portesLues = false;
+
+        // ── LA BORNE DES LECTURES REJETEES ──────────────────────────────────
+        //
+        // Une lecture sans ses bornes « seq »/« fin » est jetee SANS memoriser
+        // sa date, a dessein : la date memorisee est le seul critere de
+        // relecture, et la retenir figerait une troncature pour toujours (voir
+        // PortesRelire). Mais l inverse n est pas gratuit : un fichier present,
+        // stable et durablement invalide — troncature qu aucune reecriture ne
+        // vient corriger, fichier a moitie ecrit par un client qui s est arrete
+        // la — fait relire, redecouper et rejeter le fichier ENTIER a chaque
+        // trame, 60 fois par seconde jusqu a la fin de la session. Une table de
+        // 500 portes, c est 30 000 lignes decoupees par seconde sur le fil
+        // d Update, pour rien.
+        //
+        // On garde donc l intention (ne jamais perdre une poussee) et on borne
+        // les TENTATIVES SUR UNE MEME DATE. LE COMPROMIS, dit franchement : si
+        // le client reecrit le fichier — ce qu il fait a chaque poussee — la
+        // date change, le compteur repart, et la poussee n est pas perdue ;
+        // c est le cas normal, y compris celui d une troncature qu une
+        // reecriture repare. Ce qu on abandonne, c est le seul cas ou l on ne
+        // gagnait de toute facon rien : le meme fichier casse, octet pour octet
+        // et date pour date, relu indefiniment. Huit essais laissent passer
+        // l ecriture en cours (elle dure quelques millisecondes, soit une trame
+        // ou deux) sans laisser courir la boucle.
+        std::filesystem::file_time_type g_portesDateRejetee{};
+        int                             g_portesRejets   = 0;
+        constexpr int                   kPortesRejetsMax = 8;
+
+        // Le numero de sequence du dernier fichier accepte, GARDE POUR LE
+        // JOURNAL SEUL : il rattache un appel de GetActivateText a la mutation
+        // qui l a provoque. Ce n est PAS un critere de relecture — c est la
+        // date du fichier qui l est, et le client fait deja croitre la seq.
+        //
+        // ATOMIQUE, ET UN ENTIER PLUTOT QU UNE CHAINE, parce que deux fils
+        // PROUVES DISTINCTS y touchent : PortesTick ecrit depuis
+        // PlayerCharacter::Update, le crochet de texte lit depuis le fil qui
+        // compose le reticule. Un std::string partage ainsi, c est un pointeur
+        // qui se rebatit sous la lecture — meme raison qui a fait de
+        // g_vanillaKey un atomic en tete de fichier. 0 = aucune table posee.
+        std::atomic<std::uint32_t> g_porteSeq{ 0 };
+
+        // Le budget de lignes de mesure. Meme partage, meme remede : le tic le
+        // recharge, le crochet le consomme. Il ne se recharge QUE lorsqu un
+        // rafraichissement part vraiment (voir ReclamerTexteReticule) — le
+        // recharger a chaque table neuve accrochait la cadence du journal a
+        // celle des mutations DU SERVEUR ENTIER (une poussee a tous les joueurs
+        // par maison touchee, la notre ou pas), et chaque ligne est un vidage
+        // disque (flush_on(info)) sur le fil d Update. A 500-700 joueurs, c est
+        // le journal qui deviendrait le cout.
+        std::atomic<int> g_porteJournal{ 0 };
+
+        // ── LA DETTE DE RAFRAICHISSEMENT ────────────────────────────────────
+        //
+        // POURQUOI UNE DETTE ET PAS UN TEST PONCTUEL. Tirer a la trame exacte
+        // ou le fichier est relu rate son occasion deux fois sur deux :
+        //  (a) rien ne garantit que la cible du reticule y soit lisible, et ON
+        //      NE LE SAIT TOUJOURS PAS. Les 16 appels mesures du crochet ont
+        //      tous dit « par parametre » — mais cela ne dit RIEN de
+        //      GetActiveTarget : dans le crochet, la lecture par reticule est
+        //      une branche « else if » qui n est PAS EXECUTEE quand la branche
+        //      du parametre reussit. Seize succes du parametre, c est seize
+        //      fois ou le reticule n a jamais ete interroge. En conclure « le
+        //      reticule ne rend jamais la porte » serait une inference fausse,
+        //      et elle a ete ecrite ici une fois : on ne la reecrit pas.
+        //      L ignorance elle-meme est la raison d etre de la dette — c est
+        //      pour cela qu on retente au lieu de tirer une fois, et pour cela
+        //      que le cas sterile plus bas se journalise ;
+        //  (b) la mutation arrive PENDANT que le panneau /maison est ouvert
+        //      (mesure : table neuve posee 419 ms AVANT « menu hidden »), donc
+        //      sous un menu a curseur, ou l on ne sait pas ce que devient la
+        //      cible du pick ; et la fermeture ne rattrape pas de facon fiable
+        //      (une fois +0,46 s, une autre fois rien pendant 12,4 s).
+        // Or une occasion ratee est perdue POUR TOUJOURS, puisque la date du
+        // fichier est memorisee : il n y aura pas de deuxieme lecture.
+        //
+        // On garde donc l ENSEMBLE des portes dont le nom a bouge, et on
+        // retente a chaque trame tant qu il n est pas vide. Le cout par trame
+        // ne court que pendant cette fenetre.
+        std::unordered_set<RE::FormID> g_porteDette;
+        std::uint32_t                  g_porteDetteFin{ 0 };      // instant limite (ms)
+        bool                           g_porteDetteMenu = false;  // notre panneau etait-il ouvert ?
+        bool                           g_porteDetteDite = false;  // le cas sterile, dit une seule fois
+
+        // LA BORNE. Une dette qui ne trouve jamais son occasion couterait deux
+        // lectures par trame pour le reste de la session, et elle finirait par
+        // rafraichir un nom que le joueur a de toute facon revu autrement (une
+        // porte franchie, un chargement). Huit secondes couvrent largement le
+        // trajet « je referme le panneau, je regarde la porte » — au-dela il n y
+        // a plus rien a rattraper.
+        // QUINZE, PAS HUIT. Le seul contre-exemple MESURE d une fermeture de
+        // panneau qui ne re-pique pas dure 12,4 s (une autre fois 0,46 s) :
+        // huit secondes abandonnaient justement le cas pour lequel la dette a
+        // ete ecrite. Quinze le couvrent, et une dette ne coute qu un test d
+        // ensemble vide par trame tant qu elle attend.
+        constexpr std::uint32_t kPorteDetteMs = 15000;
+
+        // QUELLE PORTE LE JOUEUR REGARDE-T-IL A CET INSTANT ? Meme lecture que
+        // dans le crochet de texte, et depuis la meme trame.
+        RE::FormID PorteVisee()
+        {
+            auto* pick = RE::CrosshairPickData::GetSingleton();
+            if (!pick) return 0;
+            const auto cible = pick->GetActiveTarget().get();
+            return cible ? cible->GetFormID() : 0;
+        }
+
+        // POURQUOI CE RAPPEL EXISTE. Mesure du 04/09 : sur 3 min 29 s le
+        // moteur n a demande GetActivateText que 16 fois — il compose le texte
+        // du reticule SUR EVENEMENT et le laisse fige ensuite. Renommer un
+        // batiment ne touche a rien dans le moteur : le joueur devait detourner
+        // le regard et reviser la porte pour lire le nom neuf.
+        //
+        // On ne compose donc PAS le texte nous-memes : on force le moteur a le
+        // REDEMANDER, et notre crochet repasse derriere comme d habitude. Le
+        // verbe du jeu (« Ouvrir » / « Deverrouiller ») est ainsi preserve.
+        //
+        // UN SEUL COUP PAR DETTE, jamais par trame (le reticule clignoterait)
+        // et jamais depuis le crochet de texte (recursion).
+        void ReclamerTexteReticule(RE::FormID porte, const char* pourquoi)
+        {
+            auto* joueur = RE::PlayerCharacter::GetSingleton();
+            if (!joueur) return;
+            // LE BUDGET DE MESURE SE RECHARGE ICI ET NULLE PART AILLEURS : ce
+            // qu il faut lire, ce sont les appels qui SUIVENT un rafraichissement
+            // reellement parti — c est cela qui dira si UpdateCrosshairs mord.
+            //
+            // ET IL S ARME AVANT L APPEL, PAS APRES. Si UpdateCrosshairs
+            // recompose de facon SYNCHRONE — l hypothese la plus probable, c est
+            // le propre d un « rafraichis maintenant » —, le GetActivateText
+            // qu il declenche tourne AVANT que le store ne revienne : budget
+            // encore a zero, aucune ligne, et la session conclurait « ca ne mord
+            // pas » alors que ca a mordu. Faux negatif exactement sur la mesure
+            // pour laquelle tout ce dispositif existe. La ligne « reticule
+            // reclame » passe devant elle aussi, pour que l ordre du journal
+            // rende l ordre reel : reclamation d abord, appels declenches
+            // ensuite. Rien ne depend de l ordre a part la lisibilite — et si
+            // l appel etait finalement asynchrone, armer trop tot ne coute rien.
+            g_porteJournal.store(4, std::memory_order_relaxed);
+            logger::info("[vulkaar] portes : reticule reclame ({}) pour 0x{:08X} (seq {})",
+                         pourquoi, porte, g_porteSeq.load(std::memory_order_relaxed));
+            joueur->UpdateCrosshairs();
+        }
+
+        // La dette s ouvre — ou S AGRANDIT. On note l instant limite et l etat
+        // de NOTRE menu au moment meme : c est ce qui permet de reconnaitre sa
+        // FERMETURE sans se declencher sur la trame d ouverture.
+        //
+        // ON FUSIONNE, ON NE REMPLACE PAS. Le serveur repose le fichier a CHAQUE
+        // mutation de N IMPORTE QUELLE maison, et il le pousse a TOUT LE MONDE :
+        // pendant les huit secondes d une dette a nous, une poussee qui ne nous
+        // concerne pas (le verrou d un autre joueur, un droit accorde ailleurs)
+        // arrive tres normalement. Une affectation ecraserait alors une dette
+        // ENCORE DUE par un ensemble qui ne la contient pas : la porte que le
+        // joueur vient de renommer garderait son ancien nom jusqu au prochain
+        // chargement, et le symptome serait indiscernable de « UpdateCrosshairs
+        // ne mord pas » — le defaut mangerait la mesure. Union des formId donc,
+        // et borne repoussee : la porte la plus recemment changee merite ses
+        // huit secondes pleines, et prolonger ne coute rien puisque la dette se
+        // vide des le premier tir (PorteDetteHonorer efface TOUT l ensemble).
+        void PorteDetteOuvrir(std::unordered_set<RE::FormID>&& quoi)
+        {
+            if (quoi.empty()) return;
+            const bool premiere = g_porteDette.empty();
+            g_porteDette.insert(quoi.begin(), quoi.end());
+            g_porteDetteFin = RE::GetDurationOfApplicationRunTime() + kPorteDetteMs;
+            // Du contenu neuf merite une nouvelle ligne du cas sterile : sans
+            // cela une dette agrandie resterait muette sur ce qu elle attend.
+            g_porteDetteDite = false;
+            /* UN FILET DE MESURE, PETIT ET DELIBERE. Le budget du journal ne se
+               recharge qu au TIR, c est-a-dire au bout de trois conditions en
+               serie : un nom change, une dette s ouvre, une occasion se
+               presente. Si l occasion ne vient jamais, la session entiere reste
+               MUETTE sur l etat de la serrure — y compris si le symptome se
+               rejoue sous les yeux du joueur. Deux lignes suffisent alors a
+               savoir ce que le moteur voyait ; on les paye a chaque mutation qui
+               nous concerne, pas a chaque poussee du serveur. */
+            if (g_porteJournal.load(std::memory_order_relaxed) < 2) {
+                g_porteJournal.store(2, std::memory_order_relaxed);
+            }
+            // L ETAT DU MENU NE SE REPREND QUE POUR UNE DETTE NEUVE. Sur une
+            // dette deja en cours, c est PorteDetteHonorer qui suit ce drapeau
+            // de trame en trame ; le reecrire ici avec l etat de la trame
+            // COURANTE effacerait le souvenir de la trame precedente, et une
+            // fermeture survenue precisement a cet instant passerait inapercue.
+            if (premiere) {
+                auto* ui         = RE::UI::GetSingleton();
+                g_porteDetteMenu = ui && ui->IsMenuOpen("GridInventoryMenu"sv);
+            }
+        }
+
+        // Une trame de la fenetre d attente. Sort tout de suite hors fenetre :
+        // sans dette, ce tic ne coute qu un test d ensemble vide.
+        void PorteDetteHonorer()
+        {
+            if (g_porteDette.empty()) return;
+
+            // NOTRE PANNEAU VIENT-IL DE SE REFERMER ? C est l occasion la plus
+            // sure : celui qui vient de renommer son batiment au panneau
+            // /maison regarde justement la porte en sortant. On tire meme si la
+            // cible du reticule reste illisible — c est le cas ordinaire.
+            auto*      ui = RE::UI::GetSingleton();
+            const bool notreMenu     = ui && ui->IsMenuOpen("GridInventoryMenu"sv);
+            const bool vientDeFermer = g_porteDetteMenu && !notreMenu;
+            g_porteDetteMenu         = notreMenu;
+
+            const auto visee    = PorteVisee();
+            const bool viseeDue = visee != 0 && g_porteDette.count(visee) != 0;
+
+            if (viseeDue || vientDeFermer) {
+                ReclamerTexteReticule(visee, viseeDue ? "cible due" : "panneau referme");
+                g_porteDette.clear();
+                return;
+            }
+
+            // LE CAS STERILE DOIT SE VOIR, sinon une session de validation qui
+            // ne montre rien serait indiscernable entre « UpdateCrosshairs ne
+            // mord pas » et « on n a jamais appele ». Une fois par dette, pas
+            // par trame : sinon ce serait 60 vidages disque par seconde.
+            if (!g_porteDetteDite) {
+                g_porteDetteDite = true;
+                if (visee == 0)
+                    logger::info("[vulkaar] portes : reticule — aucune cible lisible, "
+                                 "{} porte(s) en attente",
+                                 g_porteDette.size());
+                else
+                    logger::info("[vulkaar] portes : cible 0x{:08X} hors de la dette, "
+                                 "{} porte(s) en attente",
+                                 visee, g_porteDette.size());
+            }
+
+            // Difference SIGNEE : l horloge du jeu compte des millisecondes sur
+            // 32 bits et repasse par zero ; une comparaison naive ferait durer
+            // la dette 49 jours de plus a ce moment-la.
+            const std::uint32_t maintenant = RE::GetDurationOfApplicationRunTime();
+            if (static_cast<std::int32_t>(maintenant - g_porteDetteFin) >= 0) {
+                logger::info("[vulkaar] portes : dette abandonnee apres {} ms — "
+                             "{} porte(s) jamais rafraichie(s)",
+                             kPorteDetteMs, g_porteDette.size());
+                g_porteDette.clear();
+            }
+        }
+
+        // « seq<TAB>N » -> N. Seul le NUMERO voyage entre les deux fils (voir
+        // g_porteSeq) ; l en-tete lui-meme ne quitte pas le fil du tic.
+        std::uint32_t PorteSeqDe(const std::string& enTete)
+        {
+            const auto chiffre = enTete.find_first_of("0123456789");
+            if (chiffre == std::string::npos) return 0;
+            return static_cast<std::uint32_t>(
+                std::strtoul(enTete.c_str() + chiffre, nullptr, 10));
+        }
     }
 
     // ETAT D EXECUTION : la liste appartient au personnage de la session en
@@ -604,8 +859,18 @@ namespace
         std::error_code ec;
         std::filesystem::remove(kCheminPortes, ec);
         g_nomsPortes.clear();
-        g_portesDate = {};
-        g_portesLues = false;
+        g_portesDate        = {};
+        g_portesLues        = false;
+        g_portesDateRejetee = {};
+        g_portesRejets      = 0;
+        g_porteDette.clear();
+        g_porteDetteMenu = false;
+        g_porteDetteDite = false;
+        g_porteSeq.store(0, std::memory_order_relaxed);
+        // Une avance de mesure a l entree, une seule fois par session : elle
+        // montre le tout premier etat du texte vanilla. Ensuite le budget ne
+        // revient que par un rafraichissement reellement parti.
+        g_porteJournal.store(6, std::memory_order_relaxed);
         logger::info("[vulkaar] portes : page blanche, en attente de la liste du serveur");
     }
 
@@ -618,7 +883,7 @@ namespace
     // reprennent en silence leur nom vanilla. On exige les deux bornes, et on
     // NE MEMORISE PAS la date d une lecture rejetee : sinon la troncature se
     // figerait pour toujours.
-    void PortesTick()
+    void PortesRelire()
     {
         std::error_code ec;
         const auto      date = std::filesystem::last_write_time(kCheminPortes, ec);
@@ -626,12 +891,22 @@ namespace
             // Pas de fichier : aucune porte nommee. C est le cas hors vulkaar,
             // et c est le bon defaut — le jeu garde ses propres noms.
             if (g_portesLues) {
+                // Le fichier disparait aussi SOUS LE REGARD du joueur (fin de
+                // session, page blanche) : TOUTES les portes qu il nommait
+                // doivent reprendre leur nom vanilla, donc toutes sont dues.
+                std::unordered_set<RE::FormID> change;
+                for (const auto& paire : g_nomsPortes) change.insert(paire.first);
                 g_nomsPortes.clear();
                 g_portesLues = false;
+                g_porteSeq.store(0, std::memory_order_relaxed);
+                PorteDetteOuvrir(std::move(change));
             }
             return;
         }
         if (g_portesLues && date == g_portesDate) return;
+        // Cette date-la a deja epuise ses essais : on ne redecoupe pas le
+        // fichier une 61e fois cette seconde (voir kPortesRejetsMax).
+        if (g_portesRejets >= kPortesRejetsMax && date == g_portesDateRejetee) return;
 
         std::ifstream            f(kCheminPortes);
         std::vector<std::string> lignes;
@@ -644,9 +919,22 @@ namespace
             if (!ligne.empty()) lignes.push_back(ligne);
         }
         // Les deux bornes, sans quoi la lecture est jetee TELLE QUELLE : on
-        // garde la table precedente et on reessaiera au prochain tic.
+        // garde la table precedente et on reessaiera au prochain tic — mais un
+        // nombre BORNE de fois pour cette meme date (voir kPortesRejetsMax).
         if (lignes.size() < 2 || lignes.front().rfind("seq", 0) != 0 ||
             lignes.back() != "fin") {
+            // On compte les essais PAR DATE : une date neuve, c est une
+            // ecriture neuve, donc un compteur neuf — la poussee n est pas
+            // perdue, c est toute l intention d origine.
+            if (date != g_portesDateRejetee) {
+                g_portesDateRejetee = date;
+                g_portesRejets      = 0;
+            }
+            if (++g_portesRejets == kPortesRejetsMax) {
+                logger::info("[vulkaar] portes : fichier sans ses bornes apres {} essais — "
+                             "on attend une reecriture ({} ligne(s) lue(s))",
+                             kPortesRejetsMax, lignes.size());
+            }
             return;
         }
 
@@ -663,11 +951,43 @@ namespace
             // (« La Guerrière » porte C3 A8 dans skyrim_french.strings).
             neuf.emplace(static_cast<RE::FormID>(id), lignes[k].substr(tab + 1));
         }
+        /* QUELS NOMS ONT BOUGE ? On le decide AVANT l echange, tant que
+           l ancienne table est encore en place : apparu, disparu ou reecrit.
+           Une poussee qui ne change rien (le verrou d une autre maison, un
+           droit accorde ailleurs — et le serveur pousse a TOUT LE MONDE a
+           chaque mutation) laisse l ensemble vide et ne declenche RIEN : c est
+           ce qui separe un rafraichissement d un clignotement. */
+        std::unordered_set<RE::FormID> change;
+        for (const auto& [id, nom] : neuf) {
+            const auto avant = g_nomsPortes.find(id);
+            if (avant == g_nomsPortes.end() || avant->second != nom) change.insert(id);
+        }
+        for (const auto& paire : g_nomsPortes) {
+            if (neuf.find(paire.first) == neuf.end()) change.insert(paire.first);
+        }
+
         g_nomsPortes.swap(neuf);
         g_portesDate = date;
         g_portesLues = true;
-        logger::info("[vulkaar] portes : {} nom(s) pose(s) pour ce personnage ({})",
-                     g_nomsPortes.size(), lignes.front());
+        // Une lecture acceptee solde les essais : la prochaine troncature
+        // repartira avec son quota entier.
+        g_portesDateRejetee = {};
+        g_portesRejets      = 0;
+        g_porteSeq.store(PorteSeqDe(lignes.front()), std::memory_order_relaxed);
+        logger::info("[vulkaar] portes : {} nom(s) pose(s) pour ce personnage ({}), "
+                     "{} nom(s) change(s)",
+                     g_nomsPortes.size(), lignes.front(), change.size());
+        PorteDetteOuvrir(std::move(change));
+    }
+
+    // LE TIC : relire le fichier quand il bouge, puis honorer la dette. Les
+    // deux sont separes parce que la relecture s arrete des la premiere trame
+    // (la date n a pas change) alors que la dette, elle, doit etre retentee
+    // trame apres trame jusqu a trouver son occasion.
+    void PortesTick()
+    {
+        PortesRelire();
+        PorteDetteHonorer();
     }
 
     // Le crochet — TESObjectDOOR::GetActivateText, slot 0x4C de la vtable de la
@@ -706,30 +1026,126 @@ namespace
                 }
             }
 
-            // LA MESURE, les 20 premiers appels et pas un de plus. C est ce
-            // journal qui dira si le verbe (« Ouvrir ») fait partie de ce texte
-            // ou si l interface le compose ailleurs : la capture du proprietaire
-            // montre DEUX lignes, donc le pari est « le nom seul » — mais on ne
-            // devine pas un texte qu on remplace. Il dit aussi si le parametre
-            // etait la porte ou l activateur.
-            static int s_dits = 0;
-            if (s_dits < 20) {
-                ++s_dits;
+            // LA MESURE, sur un budget que seul un rafraichissement reellement
+            // parti recharge (voir g_porteJournal) : ces lignes-la sont celles
+            // qui SUIVENT un UpdateCrosshairs, donc celles qui disent s il
+            // mord. Elles rapportent aussi le texte vanilla tel quel — le
+            // format est connu (mesure du 04/09, voir la composition plus bas),
+            // ce qui reste a surveiller c est qu il ne change pas d une porte a
+            // l autre — et si le parametre etait la porte ou l activateur.
+            //
+            // ── ET SURTOUT : CE QUE LE MOTEUR VOIT DE LA SERRURE ────────────
+            //
+            // Le constat a expliquer : le moteur a compose « Ouvrir » alors que
+            // le verrou Papyrus etait pose ET relu conforme, sans une seule
+            // ecriture de notre cote entre les deux. Aucune theorie ne tranchera
+            // cela ; seule une lecture PRISE ICI, dans la trame meme ou le texte
+            // se compose, peut le faire. On lit donc l etat de la reference a
+            // l instant exact de la composition, pour le confronter au texte.
+            //
+            // PLUSIEURS LECTURES, parce qu elles PEUVENT DIVERGER et que c est
+            // justement la divergence qui nommerait le fautif. Signatures
+            // relevees dans les en-tetes REELS du depot
+            // (build/_deps/commonlibsse-src), pas de memoire :
+            //  - TESObjectREFR::IsLocked() (TESObjectREFR.h:459) n est PAS un
+            //    drapeau : son corps (src/RE/T/TESObjectREFR.cpp:862) rend
+            //    « GetLockLevel() != LOCK_LEVEL::kUnlocked ». C est une question
+            //    de NIVEAU, pas d etat.
+            //  - REFR_LOCK::IsLocked() (ExtraLock.h:30) est le vrai drapeau,
+            //    « flags.all(Flag::kLocked) ». Les deux peuvent se contredire.
+            //  - REFR_LOCK::baseLevel (ExtraLock.h:36) est le champ BRUT que
+            //    Papyrus SetLockLevel ecrit. Il est declare std::int8_t : le 255
+            //    que nous posons s y relit -1 en signe. Et LOCK_LEVEL::kUnlocked
+            //    vaut precisement -1 (ExtraLock.h:11). On journalise les DEUX
+            //    lectures du meme octet, signee puis non signee, pour que la
+            //    comparaison se fasse sur des chiffres et non sur une idee.
+            //  - BGSOpenCloseForm::GetOpenState (BGSOpenCloseForm.h:30) est
+            //    STATIQUE et prend la reference : 1 kOpen, 3 kClosed.
+            // CE QUI N EXISTE PAS SOUS LA FORME DEMANDEE, et il faut le dire :
+            // il n y a pas de lecture du niveau BRUT par la reference.
+            // TESObjectREFR::GetLockLevel() rend deja l ENUMERE (il passe par
+            // REFR_LOCK::GetLockLevel, qui resout les serrures a niveau). Le
+            // brut ne s obtient que par GetLock()->baseLevel — c est donc ce
+            // qu on prend. Sans serrure attachee GetLock() rend nullptr, les
+            // colonnes de serrure valent -1 (« pas de serrure du tout »), et
+            // c est deja une reponse.
+            //
+            // Tout tient sur LA LIGNE DEJA BUDGETEE : pas un vidage disque de
+            // plus qu avant.
+            if (g_porteJournal.load(std::memory_order_relaxed) > 0) {
+                g_porteJournal.fetch_sub(1, std::memory_order_relaxed);
+                const RE::REFR_LOCK* serrure = porte ? porte->GetLock() : nullptr;
+                const int verrouNiveau  = porte ? (porte->IsLocked() ? 1 : 0) : -1;
+                const int verrouDrapeau = serrure ? (serrure->IsLocked() ? 1 : 0) : -1;
+                const int brutSigne     = serrure ? static_cast<int>(serrure->baseLevel) : -1;
+                const int brutOctet =
+                    serrure ? static_cast<int>(static_cast<std::uint8_t>(serrure->baseLevel)) : -1;
+                const int niveau    = porte ? static_cast<int>(porte->GetLockLevel()) : -99;
+                // LA CAUSE LA PLUS BANALE, ET LA SEULE QU ON NE MESURAIT PAS :
+                // en vanilla, une porte verrouillee DONT LE JOUEUR A LA CLEF
+                // s annonce « Ouvrir », pas « Deverrouiller ». C est donc
+                // l explication la plus ordinaire du constat a expliquer — le
+                // moteur dit « Ouvrir » alors que notre verrou est bien la — et
+                // sans cette colonne elle resterait invérifiable : il faudrait
+                // rebatir la DLL et rejouer une session pour la lever. Deux
+                // dereferencements sur un pointeur deja en main, sur la ligne
+                // deja budgetee : rien de plus n est ecrit au disque.
+                const int clef     = serrure ? (serrure->key ? 1 : 0) : -1;
+                const int drapeaux = serrure ? static_cast<int>(serrure->flags.underlying()) : -1;
+                const int ouverture =
+                    porte ? static_cast<int>(RE::BGSOpenCloseForm::GetOpenState(porte)) : -1;
                 logger::info(
-                    "[vulkaar] porte : appel {}/20 — ref 0x{:08X} (par {}), base 0x{:08X}, "
-                    "rendu={}, texte vanilla = \"{}\"",
-                    s_dits, porte ? porte->GetFormID() : 0u, dOu,
-                    a_this ? a_this->GetFormID() : 0u, vanilla ? 1 : 0, a_dst.c_str());
+                    "[vulkaar] porte : appel apres seq {} — ref 0x{:08X} (par {}), "
+                    "base 0x{:08X}, rendu={}, serrure={} verrouNiveau={} verrouDrapeau={} "
+                    "brut={}/{} niveau={} ouverture={} clef={} drapeaux={}, "
+                    "texte vanilla = \"{}\"",
+                    g_porteSeq.load(std::memory_order_relaxed),
+                    porte ? porte->GetFormID() : 0u, dOu,
+                    a_this ? a_this->GetFormID() : 0u, vanilla ? 1 : 0,
+                    serrure ? "presente" : "absente", verrouNiveau, verrouDrapeau,
+                    brutSigne, brutOctet, niveau, ouverture, clef, drapeaux, a_dst.c_str());
             }
 
             if (!porte || g_nomsPortes.empty()) return vanilla;
             const auto it = g_nomsPortes.find(porte->GetFormID());
             if (it == g_nomsPortes.end()) return vanilla;
 
-            // Remplacer TOUT le texte efface ce que le jeu y ajoutait (suffixe
-            // de verrou vanilla, mention de clef requise) : c est au serveur
-            // d envoyer le nom deja decore de ce qu il veut montrer.
-            a_dst = it->second.c_str();
+            // ── LE VERBE RESTE AU JEU, LE NOM SEUL EST A NOUS ───────────────
+            //
+            // Le texte du reticule est MULTILIGNE. Mesure du 04/09, en jeu :
+            //   porte ouverte      « Ouvrir\nWarmaiden's »
+            //   porte verrouillee  « Deverrouiller\nWarmaiden's\n<img
+            //                        src='DiamondMarker' ...>Apprenti »
+            // Le nom est donc la DEUXIEME ligne ; la premiere est le verbe et
+            // la troisieme la difficulte du crochetage, avec sa puce en balise
+            // <img>. La premiere version ecrasait TOUT le bloc : le joueur ne
+            // lisait plus ni « Ouvrir », ni « Deverrouiller », ni le rang de la
+            // serrure. On n echange que la ligne du nom.
+            //
+            // ON NE SUPPOSE PAS CETTE FORME, ON LA TESTE — le crochet vaut pour
+            // TOUTES les portes du jeu (une seule vtable), et rien ne garantit
+            // que chacune ait trois lignes :
+            //   deux lignes ou plus -> seule la deuxieme est remplacee, la
+            //                          queue (difficulte, et le reste) suit ;
+            //   une seule ligne     -> c est le verbe d une porte sans
+            //                          destination nommee : on AJOUTE le nom en
+            //                          deuxieme ligne, on ne mange pas le verbe ;
+            //   rien du tout        -> le jeu n avait rien a dire, le nom seul.
+            // Un nom ne peut pas contenir de saut de ligne : le pont est un
+            // fichier a une porte par ligne.
+            const std::string_view brut{ a_dst.c_str(), a_dst.size() };
+            std::string            compose;
+            const auto             fin1 = brut.find('\n');
+            if (brut.empty()) {
+                compose = it->second;
+            } else if (fin1 == std::string_view::npos) {
+                compose.assign(brut).append("\n").append(it->second);
+            } else {
+                compose.assign(brut.substr(0, fin1 + 1)).append(it->second);
+                const auto fin2 = brut.find('\n', fin1 + 1);
+                if (fin2 != std::string_view::npos) compose.append(brut.substr(fin2));
+            }
+            a_dst = compose.c_str();
             return true;
         }
         static inline REL::Relocation<decltype(thunk)> func;
