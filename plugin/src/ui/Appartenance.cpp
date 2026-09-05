@@ -1,4 +1,4 @@
-#include "ui/Maison.h"
+#include "ui/Appartenance.h"
 #include "ui/Etabli.h"
 
 #include "ui/Sfx.h"
@@ -15,15 +15,23 @@
 #include <string>
 #include <vector>
 
-// Voir Maison.h pour l'architecture. Ici : le parsing TSV de l'état, la
-// composition du panneau, et l'écriture des gestes.
+// Voir Appartenance.h pour l'architecture — et surtout pour la raison d'être
+// du `Sujet`. Ici : le parsing TSV de l'état, la composition du panneau, et
+// l'écriture des gestes.
+//
+// CE QUI DIFFÈRE ENTRE LES DEUX SUJETS, ET RIEN D'AUTRE :
+//   maison  le champ de nom, la section des portes, la colonne « Clefs » et
+//           sa fenêtre de choix, le verrou PAR PASSAGE.
+//   coffre  un en-tête sans nom, et UN verrou pour la fiche entière.
+// Chacun de ces morceaux est gardé par un `if (g_sujet == …)` ; tout le reste
+// est commun, et c'est bien pour cela qu'il n'y a qu'un fichier.
 
-namespace FUI::Maison
+namespace FUI::Appartenance
 {
     namespace
     {
-        constexpr const char* kCheminEtat = "Data/SKSE/Plugins/GridInventory_maison_etat.txt";
-        constexpr const char* kCheminGestes = "Data/SKSE/Plugins/GridInventory_maison.txt";
+        constexpr const char* kCheminEtat = "Data/SKSE/Plugins/GridInventory_appartenance_etat.txt";
+        constexpr const char* kCheminGestes = "Data/SKSE/Plugins/GridInventory_appartenance.txt";
 
         struct Membre
         {
@@ -67,6 +75,10 @@ namespace FUI::Maison
 
         // ---- état reçu (le serveur fait foi) ----
         bool                  g_ouvert = false;
+        /* DE QUOI CE PANNEAU PARLE. Il ne tient qu'un sujet à la fois : le
+           serveur n'ouvre jamais les deux, et l'écran ne saurait pas les
+           dessiner ensemble. `kAucun` tant qu'aucun état n'est arrivé. */
+        Sujet                 g_sujet = Sujet::kAucun;
         std::string           g_nom;
         bool                  g_gerer = false;      // ajouter / retirer / basculer
         bool                  g_renommer = false;
@@ -81,6 +93,12 @@ namespace FUI::Maison
            que les AUTRES ont. */
         bool                     g_mesClefsToutes = false;
         std::vector<std::string> g_mesClefs;
+        /* LE VERROU DU COFFRE (ligne `verrou`) : un seul pour la fiche, là où
+           la maison en a un par passage. VERROUILLÉ PAR DÉFAUT, comme les
+           portes et pour la même raison : la règle du registre est qu'une
+           fiche sans le champ est fermée, et un coffre affiché « Ouvert » à
+           tort inviterait à fouiller ce que le serveur, lui, refuse. */
+        bool                  g_coffreVerrouille = true;
         std::string           g_rechercheEcho;      // la requête à laquelle répondent les résultats
         std::vector<Candidat> g_resultats;
         unsigned long long    g_seqEtat = 0;
@@ -148,13 +166,33 @@ namespace FUI::Maison
             return n;
         }
 
+        /** Le mot du sujet, tel qu'il voyage dans les deux fichiers. */
+        const char* MotSujet(Sujet a_s)
+        {
+            return a_s == Sujet::kCoffre ? "coffre" : "maison";
+        }
+
+        /** `<seq>\t<sujet>\t<action>[\t<reste>]`.
+         *
+         *  LE SUJET EST ÉCRIT DANS LA LIGNE, ET C'EST TOUTE LA SÛRETÉ DU PONT
+         *  PARTAGÉ : le service ne relit ce fichier que quatre fois par
+         *  seconde, le joueur ferme un panneau et en ouvre un autre bien plus
+         *  vite. Un geste routé sur « le sujet ouvert au moment de la lecture »
+         *  partirait au mauvais registre — un « retirer » de la maison irait
+         *  vider le coffre. Routé sur le sujet ÉCRIT ICI, il ne se trompe
+         *  jamais, même si l'écran a changé entre-temps.
+         *
+         *  On écrit `g_sujet`, pas une valeur passée : tout geste naît d'un
+         *  clic dans le panneau courant, et un paramètre de plus serait un
+         *  paramètre à oublier. */
         void EcrireGeste(const char* a_action, const std::string& a_reste)
         {
             if (!g_pret) return;
             std::FILE* f = std::fopen(kCheminGestes, "a");
             if (!f) return;
-            if (a_reste.empty()) std::fprintf(f, "%llu\t%s\n", ++g_seqGeste, a_action);
-            else std::fprintf(f, "%llu\t%s\t%s\n", ++g_seqGeste, a_action, a_reste.c_str());
+            const char* sujet = MotSujet(g_sujet);
+            if (a_reste.empty()) std::fprintf(f, "%llu\t%s\t%s\n", ++g_seqGeste, sujet, a_action);
+            else std::fprintf(f, "%llu\t%s\t%s\t%s\n", ++g_seqGeste, sujet, a_action, a_reste.c_str());
             std::fclose(f);
         }
 
@@ -227,6 +265,11 @@ namespace FUI::Maison
 
             unsigned long long seq = 0;
             bool ouvert = false;
+            /* SANS LIGNE `sujet`, C'EST UNE MAISON : c'est l'état qui existait
+               avant les coffres, et le sujet le plus fourni — un panneau de
+               maison lu comme un coffre perdrait son nom et ses portes. */
+            Sujet sujet = Sujet::kMaison;
+            bool coffreVerrouille = true;   // fermé par défaut, voir g_coffreVerrouille
             bool gerer = false, renommer = false;
             bool finVue = false;
             std::string nom, moi, message, echo;
@@ -253,6 +296,14 @@ namespace FUI::Maison
                     seq = std::strtoull(c[1], nullptr, 10);
                 } else if (std::strcmp(c[0], "phase") == 0) {
                     ouvert = std::strcmp(c[1], "ouverte") == 0;
+                } else if (std::strcmp(c[0], "sujet") == 0) {
+                    sujet = std::strcmp(c[1], "coffre") == 0 ? Sujet::kCoffre : Sujet::kMaison;
+                } else if (std::strcmp(c[0], "verrou") == 0) {
+                    /* Le verrou du COFFRE, un seul pour la fiche. Comme pour
+                       les passages : seul un « 0 » EXACT déverrouille — une
+                       ligne absente, vide ou illisible laisse fermé. `atoi`
+                       rendait 0 sur n'importe quel texte, donc ouvrait. */
+                    coffreVerrouille = std::strcmp(c[1], "0") != 0;
                 } else if (std::strcmp(c[0], "nom") == 0) {
                     nom = c[1];
                 } else if (std::strcmp(c[0], "droits") == 0 && n >= 3) {
@@ -332,7 +383,17 @@ namespace FUI::Maison
             g_seqEtat = seq;
 
             const bool avant = g_ouvert;
+            /* LE CHANGEMENT DE SUJET COMPTE COMME UNE OUVERTURE : le joueur a
+               tapé `/coffre` alors que le panneau de la maison était devant
+               lui, le serveur a poussé l'autre sujet, et rien dans `ouvert`
+               ne le dit — sans cela le champ de recherche, le nom en cours de
+               frappe et la fenêtre de choix des clefs survivraient d'un sujet
+               à l'autre. La fenêtre de choix, surtout : ses cases parlent des
+               portes d'une maison qui n'est plus à l'écran. */
+            const bool changeDeSujet = ouvert && sujet != g_sujet;
             g_ouvert = ouvert;
+            g_sujet = sujet;
+            g_coffreVerrouille = coffreVerrouille;
             g_nom = std::move(nom);
             g_gerer = gerer;
             g_renommer = renommer;
@@ -371,7 +432,9 @@ namespace FUI::Maison
                 for (const auto& m : g_membres) {
                     if (m.personnageId == g_clefsPour && m.role != "proprietaire") encore = true;
                 }
-                if (!encore || !g_gerer || !g_ouvert) {
+                // Un coffre n'a pas de trousseau à distribuer : la fenêtre n'a
+                // plus de sujet du jour où l'écran a changé de sujet.
+                if (!encore || !g_gerer || !g_ouvert || g_sujet != Sujet::kMaison) {
                     g_clefsPour = 0;
                     g_clefsCoche.clear();
                     g_clefsRefus.clear();
@@ -383,10 +446,11 @@ namespace FUI::Maison
                 g_messageRestant = kTramesMessage;
             }
 
-            if (g_ouvert && !avant) {
-                // Le panneau s'ouvre : écran neuf, et on ouvre la racine — sans
-                // elle, UIRoot::Render n'est jamais appelé. Le chien de garde
-                // part d'ici, sinon il mordrait avant la première trame dessinée.
+            if (g_ouvert && (!avant || changeDeSujet)) {
+                // Le panneau s'ouvre — ou change de sujet sous le joueur :
+                // écran neuf, et on ouvre la racine — sans elle, UIRoot::Render
+                // n'est jamais appelé. Le chien de garde part d'ici, sinon il
+                // mordrait avant la première trame dessinée.
                 g_recherche[0] = '\0';
                 g_rechercheSale = false;
                 g_rechercheStable = 0;
@@ -490,7 +554,7 @@ namespace FUI::Maison
             ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Voile(0.10f));
             ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Voile(0.10f));
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
-            const bool parEntree = ImGui::InputTextWithHint("##vk_maison_nom", "donne un nom au bâtiment",
+            const bool parEntree = ImGui::InputTextWithHint("##vk_appart_nom", "donne un nom au bâtiment",
                 g_nomEdite, sizeof(g_nomEdite), ImGuiInputTextFlags_EnterReturnsTrue);
             ImGui::PopStyleColor(4);
             g_nomActif = ImGui::IsItemActive();
@@ -503,11 +567,87 @@ namespace FUI::Maison
             const bool aChange = voulu != g_nom;
             ImGui::SameLine(0.0f, 8.0f * a_S);
             ImGui::BeginDisabled(!aChange);
-            const bool parBouton = Sfx::Button("Sauvegarder##vk_maison_nom_ok", ImVec2(large, haut));
+            const bool parBouton = Sfx::Button("Sauvegarder##vk_appart_nom_ok", ImVec2(large, haut));
             ImGui::EndDisabled();
 
             // Entrée sur un nom inchangé n'a rien à demander au serveur.
             if ((parEntree || parBouton) && aChange) EcrireGeste("renommer", voulu);
+        }
+
+        /** L'EN-TÊTE DU COFFRE — « Coffre » et son verrou, rien d'autre.
+         *
+         *  PAS DE NOM, ET C'EST UNE DÉCISION, PAS UN MANQUE (propriétaire,
+         *  05/09/2026) : un coffre ne se nomme pas, ne s'annonce pas au
+         *  réticule, n'a pas de champ « Bâtiment ». N'en rajoute pas un ici
+         *  parce que le panneau paraît nu — le registre n'a pas le champ, la
+         *  route `/comptes/coffres/{id}/nom` rend 404, et le serveur
+         *  refuserait le geste.
+         *
+         *  LE VERROU EST CELUI D'UNE PORTE (règle du 03/09) : verrouillé =
+         *  fermé à TOUT LE MONDE, propriétaire compris ; la clef ne fait que
+         *  le TOURNER. Le bouton dit donc l'état ACTUEL et demande l'état
+         *  VOULU (0 = ouvrir, 1 = verrouiller), jamais « bascule » : deux
+         *  panneaux ouverts sur le même coffre se croiseraient, et le second
+         *  défairait le premier sans l'avoir vu.
+         *
+         *  ACTIF pour qui a la clef (ligne `mesclefs` à « toutes » : le
+         *  propriétaire, les locataires) ou la gestion (le personnel). Le
+         *  serveur reste seul juge ; ceci ne fait que griser un bouton. */
+        void LigneCoffre(float a_S)
+        {
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
+            ImGui::TextUnformatted("Coffre");
+            ImGui::PopStyleColor();
+
+            /* LARGEUR FIXE, mesurée sur le plus long des deux libellés : le
+               panneau est AlwaysAutoResize, et un bouton qui se mesurerait sur
+               le mot courant ferait sauter toute la ligne — et le panneau
+               entier — à chaque bascule. */
+            const float largeurBouton =
+                ImGui::CalcTextSize("Déverrouillé").x + ImGui::GetStyle().FramePadding.x * 2.0f + 12.0f * a_S;
+            const float haut = ImGui::GetFrameHeight();
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - largeurBouton);
+
+            const bool peutTourner = g_gerer || g_mesClefsToutes;
+            ImGui::PushStyleColor(ImGuiCol_Button, Voile(0.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Voile(0.10f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, Voile(0.16f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+            ImGui::BeginDisabled(!peutTourner);
+            // En or quand le coffre est ouvert — c'est l'exception qui doit se
+            // voir : le défaut du monde entier est « fermé ».
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                g_coffreVerrouille ? Theme::Chrome(0.70f) : Theme::GoldCol());
+            /* L'identité du bouton ne bouge PAS avec le libellé (le « ## » de
+               Sfx::Button) : un id qui change entre l'appui et le relâchement
+               est un bouton qu'on ne peut pas cliquer. */
+            const char* libelle = g_coffreVerrouille ? "Verrouillé##vk_appart_verrou"
+                                                     : "Déverrouillé##vk_appart_verrou";
+            const bool clic = Sfx::Button(libelle, ImVec2(largeurBouton, haut));
+            ImGui::PopStyleColor();
+            const bool survol = ImGui::IsItemHovered();
+            ImGui::EndDisabled();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+
+            if (clic) EcrireGeste("verrou", g_coffreVerrouille ? "0" : "1");
+            if (survol) {
+                ImGui::SetTooltip("%s", g_coffreVerrouille
+                    ? "déverrouiller — tout le monde pourra fouiller ce coffre"
+                    : "verrouiller — plus personne ne l'ouvrira, toi compris");
+            }
+
+            /* Le filet court sous TOUTE la ligne, pas sous le bouton seul :
+               `FiletSousItem` se règle sur le dernier widget posé, et le
+               dernier ici est le bouton, à droite. */
+            {
+                const ImVec2 b = ImGui::GetItemRectMax();
+                const float gauche = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x;
+                ImGui::GetWindowDrawList()->AddLine(
+                    ImVec2(gauche, b.y), ImVec2(b.x, b.y), OrSombre(0.35f), 1.0f);
+            }
         }
 
         /** La loupe, dessinée à la main : les polices cuites du greffon n'ont
@@ -536,7 +676,7 @@ namespace FUI::Maison
             ImGui::PushStyleColor(ImGuiCol_FrameBg, Voile(0.04f));
             ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Voile(0.10f));
             ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Voile(0.10f));
-            if (ImGui::InputTextWithHint("##vk_maison_rech", "ajouter quelqu'un — nom ou matricule",
+            if (ImGui::InputTextWithHint("##vk_appart_rech", "ajouter quelqu'un — nom ou matricule",
                     g_recherche, sizeof(g_recherche))) {
                 g_rechercheSale = true;
                 g_rechercheStable = 0;
@@ -651,12 +791,12 @@ namespace FUI::Maison
                panneau ne grandit plus. La hauteur = huit lignes exactement. */
             const bool defile = g_portes.size() > kPortesVisibles;
             if (defile) {
-                ImGui::BeginChild("##vk_maison_portes_def",
+                ImGui::BeginChild("##vk_appart_portes_def",
                     ImVec2(0.0f, haut * static_cast<float>(kPortesVisibles)), ImGuiChildFlags_None);
             }
 
             PousserStyleTable(a_S);
-            const bool table = ImGui::BeginTable("##vk_maison_portes", 4,
+            const bool table = ImGui::BeginTable("##vk_appart_portes", 4,
                 ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
                     ImGuiTableFlags_NoPadOuterX);
             if (table) {
@@ -740,33 +880,46 @@ namespace FUI::Maison
             if (defile) ImGui::EndChild();
         }
 
-        /** Les membres : Nom | ID | Rôle | Clefs | ✕. Le propriétaire en or et
-         *  sans croix (il ne se retire pas : on désigne d'abord un successeur —
-         *  règle du serveur, l'écran ne fait que ne pas la proposer). */
+        /** Les membres : Nom | ID | Rôle | Clefs | ✕ pour une MAISON,
+         *  Nom | ID | Rôle | ✕ pour un COFFRE.
+         *
+         *  LA COLONNE « CLEFS » DISPARAÎT AVEC LES PORTES : un coffre n'a
+         *  qu'une ancre, sa propre référence, donc aucun trousseau à
+         *  distribuer — être locataire, c'est avoir la clef. Une colonne qui
+         *  dirait « 0/0 » à tout le monde ne serait pas une information, et
+         *  son bouton ouvrirait une fenêtre de choix sans rien à choisir.
+         *
+         *  Le propriétaire en or et sans croix (il ne se retire pas : on
+         *  désigne d'abord un successeur — règle du serveur, l'écran ne fait
+         *  que ne pas la proposer). */
         void TableMembres(float a_S)
         {
             const float haut = 34.0f * a_S;
             const float largeurId = ImGui::CalcTextSize("ZZZZZ").x + 16.0f * a_S;
+            const bool avecClefs = g_sujet == Sujet::kMaison;
+            // Les index de colonne suivent : sans « Clefs », la croix remonte.
+            const int colonnes = avecClefs ? 5 : 4;
+            const int colCroix = colonnes - 1;
 
             /* Au-delà de douze membres, la table défile dans un enfant : l'en-tête
                plus douze lignes, et le panneau s'arrête de grandir. */
             const bool defile = g_membres.size() > kMembresVisibles;
             if (defile) {
                 const float hautEntete = ImGui::GetTextLineHeightWithSpacing() + 4.0f * a_S;
-                ImGui::BeginChild("##vk_maison_membres_def",
+                ImGui::BeginChild("##vk_appart_membres_def",
                     ImVec2(0.0f, hautEntete + haut * static_cast<float>(kMembresVisibles)), ImGuiChildFlags_None);
             }
 
             PousserStyleTable(a_S);
 
-            const bool table = ImGui::BeginTable("##vk_maison_membres", 5,
+            const bool table = ImGui::BeginTable("##vk_appart_membres", colonnes,
                 ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
                     ImGuiTableFlags_NoPadOuterX);
             if (table) {
                 ImGui::TableSetupColumn("Nom", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, largeurId);
                 ImGui::TableSetupColumn("Rôle", ImGuiTableColumnFlags_WidthFixed, 120.0f * a_S);
-                ImGui::TableSetupColumn("Clefs", ImGuiTableColumnFlags_WidthFixed, 90.0f * a_S);
+                if (avecClefs) ImGui::TableSetupColumn("Clefs", ImGuiTableColumnFlags_WidthFixed, 90.0f * a_S);
                 ImGui::TableSetupColumn("##x", ImGuiTableColumnFlags_WidthFixed, 30.0f * a_S);
 
                 ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.45f));
@@ -828,8 +981,8 @@ namespace FUI::Maison
                     // Clefs — « toutes » (or pour le propriétaire, qui les a de
                     // droit) ou « n/m » pour un invité ; cliquable en gestion,
                     // sauf sur le propriétaire : rien à lui donner de plus.
-                    ImGui::TableSetColumnIndex(3);
-                    {
+                    if (avecClefs) {
+                        ImGui::TableSetColumnIndex(3);
                         char clefs[32];
                         if (m.toutesClefs || proprietaire) {
                             std::snprintf(clefs, sizeof(clefs), "%s", "toutes");
@@ -852,7 +1005,7 @@ namespace FUI::Maison
                     }
 
                     // ✕ — jamais sur le propriétaire, jamais en lecture seule.
-                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TableSetColumnIndex(colCroix);
                     if (g_gerer && !proprietaire) {
                         ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.70f));
                         // « × » (U+00D7) : la croix de la maquette, avec un glyphe
@@ -861,7 +1014,9 @@ namespace FUI::Maison
                             EcrireGeste("retirer", std::to_string(m.personnageId));
                         }
                         ImGui::PopStyleColor();
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("retirer de la maison");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%s", avecClefs ? "retirer de la maison" : "retirer du coffre");
+                        }
                     }
                     ImGui::PopID();
                 }
@@ -910,7 +1065,7 @@ namespace FUI::Maison
             ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f * a_S, 6.0f * a_S));
-            ImGui::Begin("##vk_maison_clefs", nullptr,
+            ImGui::Begin("##vk_appart_clefs", nullptr,
                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
                     ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_AlwaysAutoResize);
@@ -937,7 +1092,7 @@ namespace FUI::Maison
             } else {
                 const bool defile = g_portes.size() > kPortesVisibles;
                 if (defile) {
-                    ImGui::BeginChild("##vk_maison_clefs_def",
+                    ImGui::BeginChild("##vk_appart_clefs_def",
                         ImVec2(0.0f, ImGui::GetFrameHeightWithSpacing() * static_cast<float>(kPortesVisibles)),
                         ImGuiChildFlags_None);
                 }
@@ -1028,9 +1183,9 @@ namespace FUI::Maison
         if (std::FILE* f = std::fopen(kCheminGestes, "w")) {
             std::fclose(f);
             g_pret = true;
-            SKSE::log::info("[MAISON] pont pret ({})", kCheminGestes);
+            SKSE::log::info("[APPART] pont pret ({})", kCheminGestes);
         } else {
-            SKSE::log::warn("[MAISON] impossible d'ouvrir {} — le panneau restera sourd", kCheminGestes);
+            SKSE::log::warn("[APPART] impossible d'ouvrir {} — le panneau restera sourd", kCheminGestes);
         }
         // UN ÉTAT RESCAPÉ D'UN PLANTAGE ferait surgir le panneau au lancement
         // du jeu : au boot g_seqEtat repart à 0, et le premier Tick lirait un
@@ -1064,7 +1219,7 @@ namespace FUI::Maison
            rendu) — après deux secondes sans une trame dessinée, on se ferme
            et on le DIT, sinon le serveur nous croit toujours devant le panneau. */
         if (g_ouvert && g_tic - g_dernierDessin > kTramesSansDessin) {
-            SKSE::log::info("[MAISON] panneau plus dessine depuis {} trames : fermeture", g_tic - g_dernierDessin);
+            SKSE::log::info("[APPART] panneau plus dessine depuis {} trames : fermeture", g_tic - g_dernierDessin);
             // Le choix d'abord, sinon Fermer() ne fermerait que lui et le
             // panneau attendrait deux secondes de plus.
             FermerChoix();
@@ -1075,6 +1230,11 @@ namespace FUI::Maison
     bool Ouvert()
     {
         return g_ouvert;
+    }
+
+    Sujet SujetCourant()
+    {
+        return g_ouvert ? g_sujet : Sujet::kAucun;
     }
 
     bool Fermer()
@@ -1120,7 +1280,7 @@ namespace FUI::Maison
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f * S, 6.0f * S));
-        ImGui::Begin("##vk_maison", nullptr,
+        ImGui::Begin("##vk_appart", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
                 ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_AlwaysAutoResize);
@@ -1138,12 +1298,21 @@ namespace FUI::Maison
             dl->AddLine(ImVec2(p.x, p.y + t.y - 1.0f), ImVec2(p.x + t.x, p.y + t.y - 1.0f), OrSombre(0.35f), 1.0f);
         }
 
-        LigneNom(S);
-        ImGui::Spacing();
+        /* LA SEULE DIFFÉRENCE DE COMPOSITION entre les deux sujets tient dans
+           ces deux `if` : la maison a son nom et sa section de portes, le
+           coffre un en-tête à verrou. Tout le reste — la recherche, la table
+           des membres, le message, le pied — est le même écran. */
+        if (g_sujet == Sujet::kCoffre) {
+            LigneCoffre(S);
+            ImGui::Spacing();
+        } else {
+            LigneNom(S);
+            ImGui::Spacing();
 
-        // Les portes AVANT la recherche : ce sont elles qu'on donne aux gens.
-        TablePortes(S);
-        ImGui::Spacing();
+            // Les portes AVANT la recherche : ce sont elles qu'on donne aux gens.
+            TablePortes(S);
+            ImGui::Spacing();
+        }
 
         if (g_gerer) {
             Recherche(S);
@@ -1154,7 +1323,8 @@ namespace FUI::Maison
 
         if (!g_gerer) {
             ImGui::Spacing();
-            ImGui::TextDisabled("Tu es locataire ici.");
+            ImGui::TextDisabled(g_sujet == Sujet::kCoffre ? "Tu as la clef de ce coffre."
+                                                          : "Tu es locataire ici.");
         }
 
         /* LE MESSAGE : ce que le serveur vient de répondre, sept secondes. */

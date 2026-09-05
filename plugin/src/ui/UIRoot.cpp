@@ -16,7 +16,7 @@
 #include "ui/Clavier.h"   // [vulkaar] le clavier déclaré dans le launcher
 #include "ui/Echange.h"
 #include "ui/Etabli.h"
-#include "ui/Maison.h"
+#include "ui/Appartenance.h"
 #include "ui/Lang.h"
 #include "ui/Sfx.h"
 #include "ui/Theme.h"
@@ -4104,7 +4104,7 @@ namespace FUI::UIRoot
             kInspect, kTrashConfirm, kLootPopup, kEquipPopup,
             kTrash, kPouch, kRecharge, kSettings, kEdit, kSearch,
             kEtabli,   // [vulkaar] l ecran de fabrication
-            kMaison,   // [vulkaar] le panneau de la maison
+            kAppartenance,   // [vulkaar] le panneau maison/coffre (un seul ecran)
             kCount
         };
 
@@ -4122,7 +4122,7 @@ namespace FUI::UIRoot
             case Layer::kEdit:         return Editor::IsEditMode();
             case Layer::kSearch:       return Grid::SearchActive();
             case Layer::kEtabli:       return Etabli::Ouvert();
-            case Layer::kMaison:       return Maison::Ouvert();
+            case Layer::kAppartenance:       return Appartenance::Ouvert();
             default:                   return false;
             }
         }
@@ -4151,17 +4151,17 @@ namespace FUI::UIRoot
                    lui evite au joueur un second Echap devant un inventaire
                    qu il n a pas demande. */
                 if (!Etabli::Fermer()) return false;
-                if (!Maison::Ouvert()) UIRoot::Close();   // la racine reste a l'autre ecran s'il est la
+                if (!Appartenance::Ouvert()) UIRoot::Close();   // la racine reste a l'autre ecran s'il est la
                 return true;
-            case Layer::kMaison:
+            case Layer::kAppartenance:
                 /* Meme raison que l etabli : la racine a ete ouverte pour le
                    panneau, elle s en va avec lui -- sauf si l'etabli la tient. */
-                if (!Maison::Fermer()) return false;
+                if (!Appartenance::Fermer()) return false;
                 /* Fermer() a pu ne refermer QUE la fenetre de choix des clefs
                    (etape 2) : le panneau est encore la, la racine reste — sans
                    cette garde, un Echap dans les clefs eteignait tout l'ecran
                    et le chien de garde envoyait « fermer » au serveur. */
-                if (!Maison::Ouvert() && !Etabli::Ouvert()) UIRoot::Close();
+                if (!Appartenance::Ouvert() && !Etabli::Ouvert()) UIRoot::Close();
                 return true;
             default: return false;
             }
@@ -4710,7 +4710,7 @@ namespace FUI::UIRoot
            veut la liste de fabrication a gauche et l objet en grand au
            milieu du monde. Les fenetres de sac, elles, restent permises. */
         if (Etabli::Ouvert()) Etabli::Dessiner();
-        else if (Maison::Ouvert()) Maison::Dessiner();   // [vulkaar] meme substitution
+        else if (Appartenance::Ouvert()) Appartenance::Dessiner();   // [vulkaar] meme substitution
         else DrawMainWindow();
         Grid::DrawBagWindows();   // one managed window per open bag (E2/E5)
         LootBarter::DrawWindows();  // container/merchant partner window (loot/barter)
@@ -4784,7 +4784,7 @@ namespace FUI::UIRoot
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
         Echange::Tick();                  // [vulkaar] pont etat/gestes de l echange
         Etabli::Tick();                   // [vulkaar] pont etat/gestes de l etabli
-        Maison::Tick();                   // [vulkaar] pont etat/gestes du panneau de la maison
+        Appartenance::Tick();                   // [vulkaar] pont etat/gestes du panneau maison/coffre
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)
         Grid::CapacityTick();       // W1+W2: weight bypass / space overload
         GoldCoins::Tick();          // G1: mirror the gold ledger into coins

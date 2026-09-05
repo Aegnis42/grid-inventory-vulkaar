@@ -8,7 +8,7 @@
 #include "game/SortiesVulkaar.h"
 #include "ui/Echange.h"
 #include "ui/Etabli.h"
-#include "ui/Maison.h"
+#include "ui/Appartenance.h"
 #include "ui/EssaiSwf.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
@@ -828,7 +828,7 @@ namespace
             const bool viseeDue = visee != 0 && g_porteDette.count(visee) != 0;
 
             /* NOTRE PANNEAU OUVERT NE CONSOMME PAS LA DETTE. Le geste de verrou
-               part de l ecran Maison, qui NE SE FERME PAS apres le clic : le
+               part de l ecran d appartenance, qui NE SE FERME PAS apres le clic : le
                serveur repond en quelques dizaines de ms, donc le pont est
                reecrit panneau OUVERT, et ce crochet tourne menu ouvert. Tirer
                la, c est demander au moteur de recomposer un texte que le joueur
@@ -1718,7 +1718,7 @@ namespace
                             // [vulkaar] nos ecrans (maison, etabli) n'ont pas de
                             // saut de menu -- cette route brute passe AVANT le
                             // canal des evenements utilisateur, elle a sa garde.
-                            if (FUI::Maison::Ouvert() || FUI::Etabli::Ouvert()) {
+                            if (FUI::Appartenance::Ouvert() || FUI::Etabli::Ouvert()) {
                                 return;
                             }
                             // plain inventory only: a loot/barter session has
@@ -3342,7 +3342,7 @@ namespace
             FUI::SortiesVulkaar::Initialiser();  // vulkaar : journal jets/destructions
             FUI::Echange::Initialiser();         // vulkaar : pont de la fenetre d echange
             FUI::Etabli::Initialiser();        // vulkaar : pont de l ecran d etabli
-            FUI::Maison::Initialiser();        // vulkaar : pont du panneau de la maison
+            FUI::Appartenance::Initialiser();        // vulkaar : pont du panneau de la maison
             RecolteInitialiser();              // vulkaar : la liste de recolte est de CETTE session
             PortesInitialiser();               // vulkaar : les noms de portes sont de CETTE session
             // FUI::EssaiSwf::Initialiser();  // vulkaar : ecran Scaleform d'essai —
