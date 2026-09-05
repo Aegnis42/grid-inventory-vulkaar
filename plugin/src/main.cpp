@@ -585,6 +585,44 @@ namespace
     // On passe donc par un crochet de vtable, alimente par un fichier que le
     // client TypeScript pose — exactement le pont de la recolte ci-dessus, et
     // pour la meme raison : le pont CEF tronque les formId en int32.
+    //
+    // ── CE PONT N EST PAS CELUI DES PORTES : C EST CELUI DU RETICULE ───────
+    //
+    // Depuis le 05/09 au soir, le client y ecrit l UNION de deux sujets — les
+    // PORTES de maison et les COFFRES. Pas une ligne de ce qui suit n a change
+    // pour cela, et c est le fait interessant : ce lecteur a toujours ete
+    // AGNOSTIQUE. Il tient un `formId -> { nom, verrou }`, il calcule ce qui a
+    // BOUGE d une ecriture a l autre, et pour ces references-la il force le
+    // moteur a redemander son texte. Rien la-dedans ne parle de portes : ce
+    // sont des references dont le texte a vieilli.
+    //
+    // DEUX PROPRIETES RENDENT LE PARTAGE EXACT, ET IL FAUT LES CONNAITRE AVANT
+    // DE TOUCHER A QUOI QUE CE SOIT ICI :
+    //
+    //   1. UN NOM VIDE EST LICITE et veut dire « laisse au jeu le nom qu il
+    //      donne ». C est le cas de TOUS les coffres — le proprietaire a
+    //      tranche : « le meme menu que /maison mais SANS le changement de
+    //      nom ». Leur ligne ne porte donc qu un verrou, et c est tout ce qu il
+    //      faut : le verrou suffit au delta, et le delta suffit a la dette.
+    //   2. LE CROCHET DE TEXTE EST POSE SUR LA VTABLE DE TESObjectDOOR (slot
+    //      0x4C). Une reference de conteneur n y passe JAMAIS. Elle entre dans
+    //      la table, elle compte pour le delta et pour la dette, et elle ne
+    //      peut pas emprunter le nom d une porte. Un formId est un conteneur ou
+    //      une porte, jamais les deux : aucune collision possible.
+    //
+    // POURQUOI UN SEUL FICHIER ET PAS DEUX. Un second lecteur, c etait ~150
+    // lignes dupliquees ici (ou une refonte en gabarit), une seconde borne, un
+    // second compteur de rejets, un second seq — et surtout une reconstruction
+    // du greffon, donc une publication de la source et un depot de DLL, JEU
+    // FERME, pour une fonction que le client seul pouvait livrer. Cote client
+    // l ecrivain est unique (`extensions/pontReticule.ts`) : le fichier etant
+    // reecrit ENTIER a chaque poussee, deux ecrivains se seraient efface l un
+    // l autre.
+    //
+    // LES NOMS D IDENTIFICATEURS, EUX, RESTENT CEUX DES PORTES (PorteDette,
+    // PortesRelire, PortesTick). Ils datent du 04/09 et disent l origine du
+    // dispositif, pas sa portee : ce qui suit vaut pour tout ce que le pont
+    // porte.
     namespace
     {
         constexpr const char* kCheminPortes = "Data/SKSE/Plugins/GridInventory_portes.txt";
@@ -609,14 +647,14 @@ namespace
         //
         // verrou : 1 verrouille, 0 non, -1 INCONNU (ligne a deux colonnes d un
         // client plus ancien). L inconnu ne clignote pas — voir le delta.
-        struct PorteEtat
+        struct EtatReticule
         {
             std::string nom;              // peut etre VIDE : « laisse le nom du jeu »
             int         verrou = -1;      // -1 inconnu, 0 ouvert, 1 verrouille
         };
 
         // formId de la REFERENCE (une entree par FACE) -> ce que le pont porte.
-        std::unordered_map<RE::FormID, PorteEtat> g_nomsPortes;
+        std::unordered_map<RE::FormID, EtatReticule> g_pontReticule;
         std::filesystem::file_time_type           g_portesDate{};
         bool                                      g_portesLues = false;
 
@@ -757,7 +795,7 @@ namespace
             // ensuite. Rien ne depend de l ordre a part la lisibilite — et si
             // l appel etait finalement asynchrone, armer trop tot ne coute rien.
             g_porteJournal.store(4, std::memory_order_relaxed);
-            logger::info("[vulkaar] portes : reticule reclame ({}) pour 0x{:08X} (seq {})",
+            logger::info("[vulkaar] reticule : rafraichissement reclame ({}) pour 0x{:08X} (seq {})",
                          pourquoi, porte, g_porteSeq.load(std::memory_order_relaxed));
             joueur->UpdateCrosshairs();
         }
@@ -850,12 +888,12 @@ namespace
             if (!g_porteDetteDite) {
                 g_porteDetteDite = true;
                 if (visee == 0)
-                    logger::info("[vulkaar] portes : reticule — aucune cible lisible, "
-                                 "{} porte(s) en attente",
+                    logger::info("[vulkaar] reticule : aucune cible lisible, "
+                                 "{} reference(s) en attente",
                                  g_porteDette.size());
                 else
-                    logger::info("[vulkaar] portes : cible 0x{:08X} hors de la dette, "
-                                 "{} porte(s) en attente",
+                    logger::info("[vulkaar] reticule : cible 0x{:08X} hors de la dette, "
+                                 "{} reference(s) en attente",
                                  visee, g_porteDette.size());
             }
 
@@ -864,8 +902,8 @@ namespace
             // la dette 49 jours de plus a ce moment-la.
             const std::uint32_t maintenant = RE::GetDurationOfApplicationRunTime();
             if (static_cast<std::int32_t>(maintenant - g_porteDetteFin) >= 0) {
-                logger::info("[vulkaar] portes : dette abandonnee apres {} ms — "
-                             "{} porte(s) jamais rafraichie(s)",
+                logger::info("[vulkaar] reticule : dette abandonnee apres {} ms — "
+                             "{} reference(s) jamais rafraichie(s)",
                              kPorteDetteMs, g_porteDette.size());
                 g_porteDette.clear();
             }
@@ -894,7 +932,7 @@ namespace
     {
         std::error_code ec;
         std::filesystem::remove(kCheminPortes, ec);
-        g_nomsPortes.clear();
+        g_pontReticule.clear();
         g_portesDate        = {};
         g_portesLues        = false;
         g_portesDateRejetee = {};
@@ -907,7 +945,7 @@ namespace
         // montre le tout premier etat du texte vanilla. Ensuite le budget ne
         // revient que par un rafraichissement reellement parti.
         g_porteJournal.store(6, std::memory_order_relaxed);
-        logger::info("[vulkaar] portes : page blanche, en attente de la liste du serveur");
+        logger::info("[vulkaar] reticule : page blanche, en attente de la liste du serveur");
     }
 
     // Relu quand le fichier bouge — le serveur le repose a chaque mutation qui
@@ -924,15 +962,15 @@ namespace
         std::error_code ec;
         const auto      date = std::filesystem::last_write_time(kCheminPortes, ec);
         if (ec) {
-            // Pas de fichier : aucune porte nommee. C est le cas hors vulkaar,
-            // et c est le bon defaut — le jeu garde ses propres noms.
+            // Pas de fichier : rien a nous sous le reticule. C est le cas hors
+            // vulkaar, et c est le bon defaut — le jeu garde ses propres noms.
             if (g_portesLues) {
                 // Le fichier disparait aussi SOUS LE REGARD du joueur (fin de
-                // session, page blanche) : TOUTES les portes qu il nommait
-                // doivent reprendre leur nom vanilla, donc toutes sont dues.
+                // session, page blanche) : toute reference qu il decrivait doit
+                // reprendre son texte vanilla, donc toutes sont dues.
                 std::unordered_set<RE::FormID> change;
-                for (const auto& paire : g_nomsPortes) change.insert(paire.first);
-                g_nomsPortes.clear();
+                for (const auto& paire : g_pontReticule) change.insert(paire.first);
+                g_pontReticule.clear();
                 g_portesLues = false;
                 g_porteSeq.store(0, std::memory_order_relaxed);
                 PorteDetteOuvrir(std::move(change));
@@ -967,14 +1005,14 @@ namespace
                 g_portesRejets      = 0;
             }
             if (++g_portesRejets == kPortesRejetsMax) {
-                logger::info("[vulkaar] portes : fichier sans ses bornes apres {} essais — "
+                logger::info("[vulkaar] reticule : fichier sans ses bornes apres {} essais — "
                              "on attend une reecriture ({} ligne(s) lue(s))",
                              kPortesRejetsMax, lignes.size());
             }
             return;
         }
 
-        std::unordered_map<RE::FormID, PorteEtat> neuf;
+        std::unordered_map<RE::FormID, EtatReticule> neuf;
         for (std::size_t k = 1; k + 1 < lignes.size(); ++k) {
             const auto tab = lignes[k].find('\t');
             if (tab == std::string::npos) continue;
@@ -1016,7 +1054,7 @@ namespace
             // Elle compte quand meme, parce que son verrou bascule aussi et que
             // son texte doit suivre ; c est le crochet qui refusera d ecrire un
             // nom vide, pas le pont qui refusera de la porter.
-            neuf.emplace(static_cast<RE::FormID>(id), PorteEtat{ std::move(reste), verrou });
+            neuf.emplace(static_cast<RE::FormID>(id), EtatReticule{ std::move(reste), verrou });
         }
         /* QU EST-CE QUI A BOUGE ? On le decide AVANT l echange, tant que
            l ancienne table est encore en place : apparu, disparu, renomme — ou
@@ -1037,8 +1075,8 @@ namespace
         std::unordered_set<RE::FormID> change;
         int nomsChanges = 0, verrousChanges = 0;
         for (const auto& [id, etat] : neuf) {
-            const auto avant = g_nomsPortes.find(id);
-            if (avant == g_nomsPortes.end()) {
+            const auto avant = g_pontReticule.find(id);
+            if (avant == g_pontReticule.end()) {
                 change.insert(id);
                 ++nomsChanges;
                 continue;
@@ -1055,14 +1093,14 @@ namespace
             }
             if (bouge) change.insert(id);
         }
-        for (const auto& paire : g_nomsPortes) {
+        for (const auto& paire : g_pontReticule) {
             if (neuf.find(paire.first) == neuf.end()) {
                 change.insert(paire.first);
                 ++nomsChanges;
             }
         }
 
-        g_nomsPortes.swap(neuf);
+        g_pontReticule.swap(neuf);
         g_portesDate = date;
         g_portesLues = true;
         // Une lecture acceptee solde les essais : la prochaine troncature
@@ -1075,9 +1113,12 @@ namespace
         // « 0 nom(s) » et « 1 verrou(s) » — a bien ouvert une dette. Sans cette
         // separation, une dette ouverte resterait indiscernable d une dette
         // ouverte POUR LA BONNE RAISON.
-        logger::info("[vulkaar] portes : {} porte(s) posee(s) pour ce personnage ({}), "
-                     "{} nom(s) change(s), {} verrou(s) change(s), {} porte(s) due(s)",
-                     g_nomsPortes.size(), lignes.front(), nomsChanges, verrousChanges,
+        // « reference(s) », pas « porte(s) » : cette table porte les portes ET
+        // les coffres depuis le 05/09, et un journal qui compte des portes
+        // ferait chercher un defaut la ou il n y en a pas.
+        logger::info("[vulkaar] reticule : {} reference(s) posee(s) pour ce personnage ({}), "
+                     "{} nom(s) change(s), {} verrou(s) change(s), {} due(s)",
+                     g_pontReticule.size(), lignes.front(), nomsChanges, verrousChanges,
                      change.size());
         PorteDetteOuvrir(std::move(change));
     }
@@ -1205,8 +1246,8 @@ namespace
                 // table deja en memoire, sur la ligne deja budgetee.
                 int verrouPont = -2;
                 if (porte) {
-                    const auto vu = g_nomsPortes.find(porte->GetFormID());
-                    if (vu != g_nomsPortes.end()) verrouPont = vu->second.verrou;
+                    const auto vu = g_pontReticule.find(porte->GetFormID());
+                    if (vu != g_pontReticule.end()) verrouPont = vu->second.verrou;
                 }
                 logger::info(
                     "[vulkaar] porte : appel apres seq {} — ref 0x{:08X} (par {}), "
@@ -1221,9 +1262,9 @@ namespace
                     a_dst.c_str());
             }
 
-            if (!porte || g_nomsPortes.empty()) return vanilla;
-            const auto it = g_nomsPortes.find(porte->GetFormID());
-            if (it == g_nomsPortes.end()) return vanilla;
+            if (!porte || g_pontReticule.empty()) return vanilla;
+            const auto it = g_pontReticule.find(porte->GetFormID());
+            if (it == g_pontReticule.end()) return vanilla;
             // UN NOM VIDE VEUT DIRE « LAISSE AU JEU LE NOM QU IL DONNE », PAS
             // « efface le nom ». Une maison creee et pas encore nommee est
             // portee par le pont — il le faut, son verrou bascule et son texte
