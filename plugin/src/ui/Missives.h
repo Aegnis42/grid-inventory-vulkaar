@@ -25,13 +25,25 @@
 // route prend, quand une lettre est arrivée, et SURTOUT si le lecteur est dans
 // une ville ou un village. Ici on ne fait que MONTRER et DEMANDER.
 //
-// LE TEXTE D'UNE LETTRE NE DESCEND PAS TANT QU'ON N'A PAS LE DROIT DE LA LIRE,
-// et c'est la force de la règle : le serveur ne l'envoie pas au client hors
-// d'un lieu habité, donc un client bricolé n'a rien à lire. Cet écran ne fait
-// que le CONSTATER — quand `ici` est faux, la lettre choisie affiche « Il faut
-// être dans une ville ou un village pour lire son courrier. » à la place d'un
-// texte qui, de toute façon, n'est pas là. N'écris jamais de repli qui
-// devinerait le texte : il n'y a rien à deviner.
+// UNE LETTRE REÇUE N'APPARAÎT QUE QUAND ELLE SE LIT (propriétaire, 06/09/2026
+// au soir : « la missive apparaît dans le menu du receveur qu'à partir du
+// moment où il peut la lire »). Le serveur ne pousse une reçue que si elle est
+// ARRIVÉE et que le lecteur est dans une ville ou un village — son texte avec
+// elle. Hors d'un lieu habité, le bloc « Courrier reçu » (bas de la colonne de
+// gauche) est donc VIDE, et il dit où aller au lieu d'annoncer une boîte vide ;
+// le seul endroit qui compte encore le courrier en attente est le bandeau de
+// l'entrée en jeu. Cet écran ne fait que le CONSTATER :
+// n'écris jamais de repli qui devinerait un texte, il n'y a rien à deviner, et
+// ne remets pas le pavé « Il faut être dans une ville ou un village pour lire
+// son courrier. » dans la lettre choisie — `ici` et la liste viennent du MÊME
+// plateau, donc une lettre sous les yeux prouve qu'on est en ville.
+//
+// ON ÉCRIT DE PARTOUT. La règle du lieu ne porte QUE sur la réception :
+// « l'envoi doit se faire de n'importe où, c'est uniquement la réception qui se
+// fait en ville » (propriétaire, même soir). « Envoyer » n'a pas de garde de
+// lieu, le serveur non plus, et les lettres ENVOYÉES se voient de partout avec
+// leur heure d'arrivée. La symétrie paraîtra naturelle au prochain lecteur :
+// elle est fausse.
 //
 // LE CARNET EST LE SEUL ANNUAIRE. On n'écrit qu'à quelqu'un qui s'y trouve —
 // ceux qui se sont présentés à nous OU à qui nous nous sommes présentés. La

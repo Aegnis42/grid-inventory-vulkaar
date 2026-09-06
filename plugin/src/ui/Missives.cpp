@@ -60,11 +60,19 @@ namespace FUI::Missives
                qui commande un texte, et l'horloge du poste n'a pas voix au
                chapitre. Colonne absente ⇒ PAS arrivée, et c'est le bon défaut :
                une lettre montrée « en route » se lit une minute plus tard,
-               une lettre ouverte trop tôt ne se referme pas. */
+               une lettre ouverte trop tôt ne se referme pas.
+               DEPUIS LE 06/09/2026 AU SOIR, ELLE VAUT TOUJOURS 1 : le serveur ne
+               pousse plus qu'une reçue LISIBLE, donc arrivée (voir `g_ici`). La
+               colonne reste dans le pont — un pont qui change de largeur casse
+               des deux côtés le même jour —, et on continue de la LIRE : un 0
+               (ligne recousue, serveur plus vieux que la DLL) doit se voir « en
+               route » plutôt que se faire passer pour une lettre à lire. */
             bool        arriveeFaite = false;
-            /* VIDE tant que la lettre n'a pas le droit d'être lue : le serveur
-               ne l'envoie pas hors d'un lieu habité, et le client ne l'écrit
-               pas non plus. Il n'y a rien à deviner ici. */
+            /* Le texte de la lettre. Il n'arrive qu'avec le droit de la lire, et
+               depuis le 06/09/2026 au soir la ligne elle-même n'arrive plus sans
+               lui : une reçue est ici parce qu'elle se lit. VIDE reste possible
+               — un serveur qui régresserait —, et cela se DIT (« Cette missive
+               est vide. ») ; on ne devine jamais une lettre. */
             std::string texte;
         };
 
@@ -81,7 +89,16 @@ namespace FUI::Missives
         // ---- état reçu (le serveur fait foi) ----
         bool                       g_ouvert = false;
         /* Suis-je dans une ville ou un village — la seule chose que le lieu
-           commande. On écrit de partout ; on ne LIT que d'ici. */
+           commande. On écrit de partout ; on ne LIT que d'ici.
+           LE PROPRIÉTAIRE L'A REDIT LE 06/09/2026 AU SOIR, mot pour mot :
+           « l'envoi doit se faire de n'importe où, c'est uniquement la
+           réception qui se fait en ville ». Ne pose JAMAIS de garde de lieu sur
+           la composition — la symétrie paraîtra naturelle, elle est fausse.
+           ET DEPUIS CE MÊME SOIR, `ici` COMMANDE AUSSI LA LISTE DES REÇUES : le
+           serveur ne pousse une lettre reçue que si elle est ARRIVÉE et qu'on
+           est ICI. Hors d'un lieu habité, `g_recues` est donc VIDE — une lettre
+           n'apparaît même pas tant qu'elle ne se lit pas. Les ENVOYÉES, elles,
+           descendent de partout : c'est SA lettre, elle ne se cache pas de lui. */
         bool                       g_ici = false;
         std::string                g_message;
         std::vector<Correspondant> g_carnet;
@@ -216,6 +233,15 @@ namespace FUI::Missives
             if (a_reste.empty()) std::fprintf(f, "%llu\t%s\n", ++g_seqGeste, a_action);
             else std::fprintf(f, "%llu\t%s\t%s\n", ++g_seqGeste, a_action, a_reste.c_str());
             std::fclose(f);
+            /* LA TRACE DU CLIC, ET ELLE A UNE HISTOIRE (07/09/2026) : « en
+               cliquant sur envoyer rien ne se faisait ». Pour savoir si le
+               clic avait seulement quitté l'écran, il a fallu aller lire le
+               FICHIER du pont, qui ne garde que ce qui est parti — ni l'heure,
+               ni le reste. Une ligne par geste ne coûte qu'un appel de journal
+               quand le joueur agit, et elle répond du premier coup à « le geste
+               est-il parti ? ». LE TEXTE D'UNE LETTRE N'Y FIGURE JAMAIS : on
+               note le geste, pas la correspondance. */
+            SKSE::log::info("[MISSIVES] geste ecrit : {} (seq {})", a_action, g_seqGeste);
         }
 
         /** L'or du thème, assombri et rendu presque transparent : le filet
@@ -402,7 +428,13 @@ namespace FUI::Missives
                ancienne lettre LUE au-delà de cent, et un correspondant peut
                sortir du carnet : sans ce ménage, la colonne de droite
                resterait sur un fantôme et « Envoyer » viserait quelqu'un que le
-               serveur refuserait. */
+               serveur refuserait.
+               DEPUIS LE 06/09/2026 AU SOIR, C'EST AUSSI LE CHEMIN ORDINAIRE :
+               sortir d'une ville vide `recues` d'un coup (le serveur ne pousse
+               plus que les lisibles), et la lettre ouverte doit se refermer
+               d'elle-même — la colonne de droite revient à la composition, qui,
+               elle, marche de partout. Le destinataire choisi, lui, SURVIT :
+               le carnet ne dépend pas du lieu. */
             if (g_lettre != 0) {
                 bool encore = false;
                 for (const auto& m : g_recues) {
@@ -697,7 +729,13 @@ namespace FUI::Missives
         }
 
         /** Le courrier reçu : l'expéditeur, et « arrivée » ou « en route ». Les
-         *  NON LUES en or — c'est ce qu'on vient chercher. */
+         *  NON LUES en or — c'est ce qu'on vient chercher.
+         *
+         *  CETTE LISTE NE PORTE QUE DES LETTRES LISIBLES depuis le 06/09/2026 au
+         *  soir : le serveur ne pousse une reçue que si elle est arrivée ET que
+         *  le lecteur est dans un lieu habité. Hors d'un lieu habité, elle est
+         *  donc VIDE — et c'est là que « Aucune missive. » se mettait à mentir,
+         *  puisqu'une lettre peut très bien attendre à la poste. */
         void BlocRecues(float a_S)
         {
             int attendent = 0;
@@ -710,7 +748,26 @@ namespace FUI::Missives
             TitreBloc(titre);
 
             if (g_recues.empty()) {
-                ImGui::TextDisabled("Aucune missive.");
+                /* DEUX VIDES QUI NE VEULENT PAS DIRE LA MÊME CHOSE. En ville, la
+                   boîte est vraiment vide. Ailleurs, on ne sait RIEN d'elle : le
+                   serveur ne descend pas les reçues, et le bandeau de l'entrée en
+                   jeu est le seul à en donner le compte. Dire « Aucune missive. »
+                   hors d'un lieu habité, c'était affirmer un fait qu'on n'a pas.
+
+                   LA PHRASE DU DEHORS DIT LA RÈGLE, PAS UN FAIT, et c'est la même
+                   raison retournée : « ton courrier t'ATTEND » affirmerait qu'il y
+                   en a, alors qu'on n'en sait rien — un joueur dont la boîte est
+                   vide traverserait la carte pour lire « Aucune missive. ». On dit
+                   donc où le courrier SE LIT, ce qui reste vrai que la boîte soit
+                   pleine ou vide. Le seul endroit qui a le droit d'annoncer un
+                   COMPTE est le bandeau de l'entrée en jeu, parce que lui, il a
+                   compté.
+                   TextWrapped et non TextDisabled : la colonne de gauche fait
+                   quatre dixièmes du panneau, et la phrase du dehors est longue. */
+                ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.45f));
+                ImGui::TextWrapped("%s", g_ici ? "Aucune missive."
+                                               : "Ton courrier se lit dans une ville ou un village.");
+                ImGui::PopStyleColor();
                 return;
             }
 
@@ -732,7 +789,11 @@ namespace FUI::Missives
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 const float milieu = depart.y + (haut - ImGui::GetTextLineHeight()) * 0.5f;
                 /* EN OR TANT QU'ELLE N'EST PAS LUE, et seulement si elle est
-                   arrivée : une lettre encore en route n'a rien à réclamer. */
+                   arrivée : une lettre encore en route n'a rien à réclamer.
+                   « en route » NE SE VOIT PLUS depuis le 06/09/2026 au soir (le
+                   serveur ne pousse que des arrivées) ; le rendu reste, parce
+                   que la colonne se lit toujours et qu'un 0 venu d'ailleurs doit
+                   se montrer pour ce qu'il est, jamais se déguiser en « à lire ». */
                 const bool aLire = m.arriveeFaite && !m.lue;
                 const ImU32 couleur = aLire ? Theme::GoldCol()
                                             : Theme::Chrome(m.arriveeFaite ? 0.80f : 0.50f);
@@ -786,9 +847,16 @@ namespace FUI::Missives
         // ── la colonne de droite : la lettre, ou la composition ───────────
 
         /** La lettre choisie. Le texte n'est là que si le serveur l'a fait
-         *  descendre ; sinon on dit POURQUOI — c'est la seule chose que le lieu
-         *  commande, et le joueur doit l'apprendre par une phrase, pas par un
-         *  cadre vide. */
+         *  descendre — et depuis le 06/09/2026 au soir, une lettre qui est ICI
+         *  est une lettre qu'on a le droit de lire : le serveur ne pousse plus
+         *  les autres.
+         *
+         *  D'OÙ LE PAVÉ QUI A DISPARU. On affichait, quand `ici` était faux,
+         *  « Il faut être dans une ville ou un village pour lire son courrier. »
+         *  à la place du texte. Il est devenu INATTEIGNABLE, et surtout il se
+         *  contredirait : `ici` et la liste des reçues viennent du MÊME plateau,
+         *  donc une lettre sous les yeux prouve qu'on est en ville. Le dehors se
+         *  dit maintenant là où il est vrai — la liste vide de `BlocRecues`. */
         void BlocLettre(const Recue& a_m, float a_S)
         {
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
@@ -807,13 +875,14 @@ namespace FUI::Missives
                dehors. */
             const float hautBoutons = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y * 2.0f;
             ImGui::BeginChild("##vk_missives_lettre", ImVec2(0.0f, -hautBoutons), ImGuiChildFlags_None);
+            /* « PAS ENCORE ARRIVÉE » NE SE VOIT PLUS non plus, et il reste pour
+               la même raison que le libellé « en route » de la liste : la
+               colonne d'arrivée se lit toujours, et un 0 doit se dire. Ce
+               pavé-là, lui, ne contredit RIEN — d'où la différence avec celui du
+               lieu, qui est parti. */
             if (!a_m.arriveeFaite) {
                 ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.60f));
                 ImGui::TextWrapped("%s", "Cette missive n'est pas encore arrivée. Laisse au courrier le temps de faire la route.");
-                ImGui::PopStyleColor();
-            } else if (!g_ici) {
-                ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.60f));
-                ImGui::TextWrapped("%s", "Il faut être dans une ville ou un village pour lire son courrier.");
                 ImGui::PopStyleColor();
             } else if (a_m.texte.empty()) {
                 /* Le serveur nous croit en droit de lire, et pourtant rien
@@ -871,7 +940,12 @@ namespace FUI::Missives
 
         /** Les lettres parties : à qui, et où elles en sont. Le contrat les
          *  fait descendre, et c'est la seule façon de savoir si la sienne est
-         *  arrivée — son texte, lui, ne redescend jamais : on l'a écrit. */
+         *  arrivée — son texte, lui, ne redescend jamais : on l'a écrit.
+         *
+         *  ELLES SE VOIENT DE PARTOUT, et c'est voulu : le lieu ne commande que
+         *  la LECTURE du courrier reçu. Depuis le 06/09/2026 au soir les reçues
+         *  disparaissent de l'écran hors d'un lieu habité ; celles-ci restent —
+         *  c'est SA lettre, elle n'a pas à se cacher de lui. */
         void BlocEnvoyees(float a_S)
         {
             TitreBloc("Envoyées");
@@ -967,7 +1041,16 @@ namespace FUI::Missives
             /* GRISÉ TANT QU'IL MANQUE UN DESTINATAIRE OU UN TEXTE — et tant que
                le texte dépasse la borne du serveur, qui le refuserait pour la
                forme. Ceci ne fait que griser un bouton : le serveur rejuge
-               tout, et c'est sa phrase que le joueur lit ensuite. */
+               tout, et c'est sa phrase que le joueur lit ensuite.
+               `g_ici` N'EST PAS DANS CETTE CONDITION, ET IL NE DOIT PAS Y
+               ENTRER. Le propriétaire l'a tranché le 06/09/2026 au soir :
+               « l'envoi doit se faire de n'importe où, c'est uniquement la
+               réception qui se fait en ville ». On écrit d'une grotte, d'un
+               campement, du fond d'une mine ; le `poster` de relaisMissives.ts
+               ne refuse que sur la demande illisible, soi-même, le hors-carnet,
+               le texte et le registre — aucune garde de lieu, et c'est LU, pas
+               supposé. Ajouter la symétrie ici paraîtra naturel : ce serait un
+               défaut. */
             const bool peutEnvoyer = cible != nullptr && caracteres > 0 && !tropLong;
             ImGui::PushStyleColor(ImGuiCol_Button, Voile(0.04f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Voile(0.10f));
@@ -993,6 +1076,32 @@ namespace FUI::Missives
                 ImGui::SetTooltip("%s", cible == nullptr ? "choisis d'abord quelqu'un dans ton carnet"
                                       : tropLong         ? "trop long — sept cents caractères au plus"
                                                          : "écris quelque chose");
+            }
+
+            /* ET IL LE DIT SANS QU'ON AIT À SURVOLER — 07/09/2026, après un
+               essai en jeu du propriétaire : « en cliquant sur envoyer rien ne
+               se faisait ». Rien ne se faisait, en effet : le bouton était
+               grisé, et un bouton grisé est MUET. L'infobulle ci-dessus ne se
+               découvre que si l'on soupçonne déjà qu'il y a quelque chose à
+               découvrir ; un manque se dit à l'écran, sous le bouton, ou il ne
+               se dit pas.
+
+               MESURÉ CE JOUR-LÀ, et c'est ce qui fixe le texte : le fichier du
+               pont ne portait AUCUN geste « poster » à l'heure de l'essai — le
+               clic n'avait jamais quitté l'écran. Ni le serveur ni cet écran
+               n'ont de garde de LIEU sur l'envoi (on écrit de partout) : il
+               manquait un destinataire, un texte, ou les deux.
+
+               ELLE SE TAIT SUR UNE FEUILLE VIERGE que personne n'a commencée :
+               un reproche en rouge y serait du bruit. Elle parle dès qu'il y a
+               une intention — un nom choisi, ou une lettre commencée. */
+            if (!peutEnvoyer && (cible != nullptr || caracteres > 0)) {
+                ImGui::PushStyleColor(ImGuiCol_Text, RougeSombre());
+                ImGui::TextWrapped("%s", cible == nullptr
+                        ? "Choisis d'abord quelqu'un dans ton carnet, à gauche."
+                        : tropLong ? "Ta lettre dépasse sept cents caractères."
+                                   : "Écris ta lettre avant de l'envoyer.");
+                ImGui::PopStyleColor();
             }
 
             ImGui::Spacing();
@@ -1039,19 +1148,28 @@ namespace FUI::Missives
             if (--g_messageRestant == 0) g_message.clear();
         }
 
-        /* LA LECTURE SE RÉCLAME D'ICI, PAS DU CLIC. Une lettre ouverte hors
-           d'une ville n'est pas lue ; le joueur y entre, le serveur pousse un
-           plateau avec le texte, et c'est CE moment-là qui doit marquer la
-           lettre lue. Le clic seul aurait laissé « à lire » une lettre grande
-           ouverte sous les yeux du joueur.
-           CE PLATEAU-LÀ EXISTE VRAIMENT depuis le 06/09/2026 au soir, et il a
-           fallu l'écrire : `relaisMissives.veiller()` regarde toutes les cinq
-           secondes les panneaux OUVERTS et repousse le plateau au seul moment
-           où le lieu BASCULE (dedans ⇄ dehors). Sans lui, `ici` restait
-           l'instantané du dernier geste, la garde ci-dessous ne s'ouvrait
-           jamais, et le joueur pouvait chevaucher jusqu'à Blancherive sans
-           qu'aucun clic ne parte — l'écran répondant, en pleine ville, qu'il
-           faut être en ville.
+        /* LA LECTURE SE RÉCLAME D'ICI, PAS DU CLIC : elle se juge sur l'ÉTAT —
+           une lettre choisie, arrivée, pas encore lue — et jamais sur un
+           événement, dont on ne saurait pas s'il a porté. Le clic ne fait que
+           poser `g_lettre` ; cette garde-ci, qui tourne à chaque trame, en tire
+           le geste une fois et une seule.
+           `g_ici` RESTE DANS LA CONDITION alors qu'il est désormais impliqué :
+           depuis le 06/09/2026 au soir, une lettre reçue n'entre dans
+           `g_recues` que si elle est lisible, donc `g_lettre != 0` dit déjà
+           qu'on est en ville. Redire le fait ne coûte rien et ne ment pas.
+           LA VEILLE DU SERVEUR NE DÉBLOQUE PLUS UNE LETTRE OUVERTE : ELLE LA
+           FAIT APPARAÎTRE. `relaisMissives.veiller()` regarde toutes les cinq
+           secondes les panneaux OUVERTS et repousse un plateau sur DEUX motifs
+           — la BASCULE du lieu (dedans ⇄ dehors) et l'ARRIVÉE d'une lettre
+           quand on est en ville. En entrant, le courrier surgit dans la colonne
+           de gauche ; en sortant, il s'en va, et le ménage de `LireEtat` lâche
+           la lettre choisie ; et l'heure qui passe le fait surgir sans que
+           personne n'ait bougé — sans ce second motif, l'écran affirmait
+           « Aucune missive. » en pleine ville sur une lettre parfaitement
+           lisible, et ne se démentait jamais. Avant cette veille,
+           `ici` restait l'instantané du dernier geste et la boucle était fermée :
+           le joueur chevauchait jusqu'à Blancherive sans qu'aucun geste ne
+           parte, l'écran lui répondant en pleine ville qu'il faut être en ville.
            `g_lireDemande` retient l'id déjà réclamé : sans lui, la condition
            resterait vraie à chaque trame jusqu'à la réponse du serveur, et le
            fichier des gestes prendrait soixante lignes par seconde. */
@@ -1134,7 +1252,10 @@ namespace FUI::Missives
             dl->AddLine(ImVec2(p.x, p.y + t.y - 1.0f), ImVec2(p.x + t.x, p.y + t.y - 1.0f), OrSombre(0.35f), 1.0f);
         }
 
-        // L'en-tête : le titre, et la règle du lieu dite d'entrée de jeu.
+        /* L'en-tête : le titre, et la règle du lieu dite d'entrée de jeu. Les
+           deux phrases restent VRAIES après le 06/09/2026 au soir, et la
+           seconde porte désormais double sens : elle annonce l'écriture permise
+           de partout ET explique la colonne de gauche restée vide. */
         ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
         ImGui::TextUnformatted("Missives");
         ImGui::PopStyleColor();
@@ -1170,9 +1291,11 @@ namespace FUI::Missives
         ColonneDroite(S);
         ImGui::EndChild();
 
-        /* LE MESSAGE : ce que le serveur vient de répondre (« Elle partira et
-           arrivera dans environ 40 minutes. »), sept secondes ; puis la ligne
-           d'aide reprend sa place. */
+        /* LE MESSAGE : ce que le serveur vient de répondre (« Missive confiée au
+           courrier. Elle arrivera dans environ 7 minutes. »), sept secondes ;
+           puis la ligne d'aide reprend sa place. Le nombre de l'exemple tient
+           sous le plafond de dix minutes du 06/09 au soir — un exemple hors des
+           bornes ferait lire le monde d'avant. */
         ImGui::Spacing();
         if (!g_message.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
