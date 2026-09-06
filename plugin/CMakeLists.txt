@@ -77,6 +77,8 @@ set(SOURCES
     src/ui/Etabli.cpp
     src/ui/Appartenance.h
     src/ui/Appartenance.cpp
+    src/ui/Banque.h        # [vulkaar] le comptoir de la banque
+    src/ui/Banque.cpp
     src/ui/Clavier.h
     src/ui/Clavier.cpp
     src/ui/ClavierTables.gen.h
