@@ -135,6 +135,7 @@ namespace
     void RecolteInitialiser();      // [vulkaar] page blanche a chaque session
     void PortesTick();              // [vulkaar] defini plus bas (noms des portes de maison)
     void PortesInitialiser();       // [vulkaar] page blanche a chaque session
+    void PriseTick();               // [vulkaar] defini plus bas (on ne saisit plus rien)
     void MenuCloseEchoTick();        // defined below (⑫ — the close nobody heard)
 
     // ---- PlayerCharacter::Update vtable hook (index 0xAD) ----
@@ -213,6 +214,7 @@ namespace
             LockpickReopenTick();      // lockpick auto-open fallback
             RecolteTick();              // [vulkaar] la liste des recoltes interdites
             PortesTick();               // [vulkaar] les noms des portes de maison
+            PriseTick();                // [vulkaar] rien ne se traine a la main
             MenuCloseEchoTick();        // ⑫ — the close, when it is true
         }
         static inline REL::Relocation<decltype(thunk)> func;
@@ -1321,6 +1323,133 @@ namespace
             func = vtbl.write_vfunc(0x4C, thunk);
         }
     };
+
+    // ── [vulkaar] ON NE SAISIT PLUS RIEN : LA PRISE EN MAIN EST DEFAITE ───
+    //
+    // Ordre du proprietaire (06/09/2026), mot pour mot : « pas de bandeaux
+    // juste un refus silencieux et empeche le fait de pouvoir maintenir E
+    // pour deplacer un objet ».
+    //
+    // POURQUOI IL FAUT DU CODE ICI, ET C EST MESURE : le veto d activation ne
+    // couvre PAS la prise. Le serveur pose deja `blockActivation` par
+    // `dealWithRef` (et meme un `setMotionType(Keyframed)`), et le
+    // proprietaire deplace pourtant encore les objets aujourd hui. La prise en
+    // main du moteur n est pas une activation : c est un ressort de souris
+    // (`bhkMouseSpringAction`) accroche a la reference tant que la touche
+    // reste enfoncee. Rien de ce que le serveur peut refuser ne passe par la.
+    //
+    // LE GESTE. On ne pose aucun crochet neuf, on ne touche ni aux reglages du
+    // moteur ni a `ControlMap` : le crochet par trame existe deja (UpdateHook,
+    // slot 0xAD) et il suffit. A chaque trame, si le joueur tient quelque
+    // chose, on le relache immediatement — la prise ne dure donc jamais assez
+    // longtemps pour trainer quoi que ce soit. C est le chemin le plus court
+    // et le plus mesurable, exactement comme RecolteTick et PortesTick.
+    //
+    // POUR TOUT OBJET, SANS EXCEPTION. C est la lettre de l ordre recu, et une
+    // regle simple se garde vraie : aucune liste a tenir, aucun cas oublie.
+    // Si le proprietaire demande un jour de n empecher que les references du
+    // MONDE (celles qui viennent d un greffon, par opposition a celles creees
+    // en cours de partie), cela tient en UNE ligne posee juste avant le
+    // relachement :
+    //
+    //     if (tenu->GetFormID() >= 0xff000000) return;
+    //
+    // CE QUE LA PRISE RELACHEE COUTE A L ECRAN, ET IL FAUT LE DIRE EN ENTIER.
+    // De NOUS, rien : aucun message, aucune notification, aucun son — meme
+    // decision que pour le refus de ramassage, le silence des vetos de portes
+    // et de conteneurs. Du MOTEUR, une trame au plus : le joueur appuie, le
+    // ressort de souris naquit, et la passe suivante de UpdateHook le detruit
+    // avant qu il ait tire quoi que ce soit. Ce que le joueur voit, c est donc
+    // un objet qui NE SUIT PAS le curseur — pas un objet qui tombe : sur tout
+    // ce que le serveur tient pour un item, le client a deja pose
+    // `setMotionType(Keyframed)` (skymp5-client/src/extensions/
+    // objectReferenceEx.ts:401), et un corps keyframe n est pas simule par
+    // havok — le ressort d une trame n a rien a pousser.
+    //
+    // LA BORNE HONNETE, la meme que celle du ramassage : une reference que le
+    // client n a pas encore recue n a pas recu son Keyframed non plus. La,
+    // pendant la trame ou le ressort a vecu, le moteur local peut la bouger de
+    // quelques centimetres. C est local, ce n est pas une duplication, et cela
+    // ne dure pas — ne pas promettre cette fenetre plus petite qu elle n est.
+    //
+    // LE JOURNAL EST BORNE EN TRAMES, et il faut voir pourquoi : ce code
+    // tourne 60 fois par seconde, et une prise dure plusieurs dizaines de
+    // trames — une ligne par trame, ce serait des milliers de vidages disque
+    // pour un seul appui. On ecrit donc UNE ligne, puis plus rien avant un
+    // delai franc. Le compte se tient en trames, comme g_pickReopenDelay
+    // ci-dessous et comme le reste du fichier, plutot qu en millisecondes : le
+    // crochet ne tourne QUE hors pause, donc la trame est la seule unite qui
+    // compte vraiment ce qui s est passe.
+    //
+    // ET LA TELEKINESIE PASSE — MAIS ELLE SORT PAR LA PORTE, PAS PAR HASARD.
+    // `EndGrabObject` (src/RE/P/PlayerCharacter.cpp:84-89) n appelle
+    // `DestroyMouseSprings` que si `grabType == GrabbingType::kNormal` : le
+    // sort garde donc son effet quoi qu on fasse ici, et on ne cherche pas a
+    // le rattraper (l ordre parle de « maintenir E », rien de plus).
+    // SEULEMENT, `GetGrabbedRef` ne lit QUE le membre `grabbedObject`
+    // (src/RE/P/PlayerCharacter.cpp:120-127) — un slot UNIQUE, partage par les
+    // deux sortes de prise — et il ne regarde pas `grabType`. Laisser la
+    // telekinesie entrer dans ce code, c est faire ecrire au journal un
+    // relachement QUI N A PAS EU LIEU, et cette ligne mensongere consomme les
+    // 1800 trames de silence : la vraie prise defaite juste apres ne laisse
+    // aucune trace. Le journal etant la SEULE preuve que la regle mord, on
+    // teste donc `grabType` EN PREMIER, et on se borne exactement au cas
+    // qu `EndGrabObject` sait traiter.
+    namespace
+    {
+        // 1800 trames ~ 30 s a 60 images/s. Assez long pour qu une partie de
+        // jeu entiere ne laisse que quelques lignes, assez court pour qu une
+        // session de verification en voie au moins une.
+        constexpr int kPriseSilenceTrames = 1800;
+        int           g_priseSilence      = 0;   // trames avant la prochaine ligne
+    }
+
+    void PriseTick()
+    {
+        if (g_priseSilence > 0) --g_priseSilence;
+
+        // GetSingleton peut rendre nul (chargement, sortie de jeu) : on ne
+        // leve jamais depuis une trame.
+        auto* joueur = RE::PlayerCharacter::GetSingleton();
+        if (!joueur) return;
+
+        // LE CAS NORMAL EST « RIEN EN MAIN », ET IL SORT ICI, SANS APPELER LE
+        // MOTEUR : `grabType` est un membre de PLAYER_RUNTIME_DATA
+        // (include/RE/P/PlayerCharacter.h:848), lu par un accesseur public
+        // (idem:982). Une lecture, une comparaison, retour — et la telekinesie
+        // (kTelekinesis) sort par le meme test, voir le cartouche.
+        if (joueur->GetPlayerRuntimeData().grabType.get() !=
+            RE::PlayerCharacter::GrabbingType::kNormal) {
+            return;
+        }
+
+        // ET SEULEMENT MAINTENANT LA REFERENCE TENUE, parce qu elle N EST PAS
+        // GRATUITE : `GetGrabbedRef` rend `…<ObjectRefHandle>(…, 0x8C8,
+        // 0x8D0).get()`, et `.get()` ne teste meme pas `has_value()` — il
+        // appelle sans condition `BSPointerHandleManagerInterface<
+        // TESObjectREFR>::GetSmartPointer` (include/RE/B/BSPointerHandle.h:154
+        // et 226, RELOCATION_ID 12785/12922), une fonction NATIVE du
+        // gestionnaire de handles, dans sa surcharge non-const annotee
+        // « clears the handle » — elle peut donc ecrire dans le membre du
+        // joueur pour nettoyer un handle perime. Aucune allocation tas, le
+        // cout reste petit ; mais il se paie une fois par trame si on le met
+        // en tete, et jamais si on le met ici.
+        const auto tenu = joueur->GetGrabbedRef();
+        if (!tenu) return;
+
+        const RE::FormID id = tenu->GetFormID();
+        joueur->EndGrabObject();
+
+        if (g_priseSilence == 0) {
+            g_priseSilence = kPriseSilenceTrames;
+            // Le « kNormal » est dans la ligne A DESSEIN : il dit au lecteur du
+            // journal que la telekinesie n a jamais pu ecrire ici, et il sert
+            // de marqueur pour prouver qu une DLL porte bien ce code.
+            logger::info("[vulkaar] prise en main (kNormal) defaite : 0x{:08X} relache "
+                         "aussitot (silence {} trames)",
+                         id, kPriseSilenceTrames);
+        }
+    }
 
     // Capacity: harvesting (flora / food-bearing trees) — TESBoundObject::
     // Activate override slot 0x37; the produce item is checked BEFORE the
