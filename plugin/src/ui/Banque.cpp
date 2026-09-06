@@ -1,5 +1,6 @@
 #include "ui/Banque.h"
 #include "ui/Appartenance.h"
+#include "ui/Missives.h"   // [vulkaar] les missives tiennent la racine comme nous
 #include "ui/Etabli.h"
 
 #include "game/MonnaiesVulkaar.h"
@@ -338,8 +339,11 @@ namespace FUI::Banque
                    registre) : la racine, ouverte pour nous, se referme avec —
                    sinon le joueur tombe sur son inventaire sans l'avoir
                    demandé. Sauf si un autre de nos écrans la tient encore :
-                   elle est à lui. */
-                if (!Etabli::Ouvert() && !Appartenance::Ouvert()) UIRoot::Close();
+                   elle est à lui. [vulkaar] LES MISSIVES EN FONT PARTIE depuis
+                   le 06/09/2026 : un écran de plus qui tient la racine, un oubli
+                   de plus qui la lui volerait — et son chien de garde le
+                   fermerait deux secondes plus tard sans un mot. */
+                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Missives::Ouvert()) UIRoot::Close();
             }
         }
 

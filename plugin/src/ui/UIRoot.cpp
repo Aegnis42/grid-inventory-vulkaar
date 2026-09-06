@@ -18,6 +18,7 @@
 #include "ui/Etabli.h"
 #include "ui/Appartenance.h"
 #include "ui/Banque.h"   // [vulkaar] le comptoir de la banque
+#include "ui/Missives.h"   // [vulkaar] les missives
 #include "ui/Lang.h"
 #include "ui/Sfx.h"
 #include "ui/Theme.h"
@@ -4107,6 +4108,7 @@ namespace FUI::UIRoot
             kEtabli,   // [vulkaar] l ecran de fabrication
             kAppartenance,   // [vulkaar] le panneau maison/coffre (un seul ecran)
             kBanque,   // [vulkaar] le comptoir de la banque
+            kMissives,   // [vulkaar] le panneau des missives
             kCount
         };
 
@@ -4126,6 +4128,7 @@ namespace FUI::UIRoot
             case Layer::kEtabli:       return Etabli::Ouvert();
             case Layer::kAppartenance:       return Appartenance::Ouvert();
             case Layer::kBanque:       return Banque::Ouvert();   // [vulkaar]
+            case Layer::kMissives:     return Missives::Ouvert();   // [vulkaar]
             default:                   return false;
             }
         }
@@ -4154,8 +4157,9 @@ namespace FUI::UIRoot
                    lui evite au joueur un second Echap devant un inventaire
                    qu il n a pas demande. */
                 if (!Etabli::Fermer()) return false;
-                // la racine reste a l'un de nos autres ecrans s'il est la ([vulkaar] la banque aussi)
-                if (!Appartenance::Ouvert() && !Banque::Ouvert()) UIRoot::Close();
+                // la racine reste a l'un de nos autres ecrans s'il est la
+                // ([vulkaar] la banque et les missives aussi)
+                if (!Appartenance::Ouvert() && !Banque::Ouvert() && !Missives::Ouvert()) UIRoot::Close();
                 return true;
             case Layer::kAppartenance:
                 /* Meme raison que l etabli : la racine a ete ouverte pour le
@@ -4165,14 +4169,22 @@ namespace FUI::UIRoot
                    (etape 2) : le panneau est encore la, la racine reste — sans
                    cette garde, un Echap dans les clefs eteignait tout l'ecran
                    et le chien de garde envoyait « fermer » au serveur. */
-                if (!Appartenance::Ouvert() && !Etabli::Ouvert() && !Banque::Ouvert()) UIRoot::Close();   // [vulkaar] la banque aussi
+                if (!Appartenance::Ouvert() && !Etabli::Ouvert() && !Banque::Ouvert() &&
+                    !Missives::Ouvert()) UIRoot::Close();   // [vulkaar] la banque et les missives aussi
                 return true;
             case Layer::kBanque:
                 /* [vulkaar] Meme raison encore : la racine a ete ouverte pour le
-                   comptoir, elle s en va avec lui -- sauf si l'etabli ou le
-                   panneau d'appartenance la tiennent. */
+                   comptoir, elle s en va avec lui -- sauf si l'etabli, le
+                   panneau d'appartenance ou les missives la tiennent. */
                 if (!Banque::Fermer()) return false;
-                if (!Etabli::Ouvert() && !Appartenance::Ouvert()) UIRoot::Close();
+                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Missives::Ouvert()) UIRoot::Close();
+                return true;
+            case Layer::kMissives:
+                /* [vulkaar] Et une quatrieme fois : la racine a ete ouverte pour
+                   le panneau des missives, elle s en va avec lui -- sauf si un
+                   autre de nos ecrans la tient. */
+                if (!Missives::Fermer()) return false;
+                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Banque::Ouvert()) UIRoot::Close();
                 return true;
             default: return false;
             }
@@ -4723,6 +4735,7 @@ namespace FUI::UIRoot
         if (Etabli::Ouvert()) Etabli::Dessiner();
         else if (Appartenance::Ouvert()) Appartenance::Dessiner();   // [vulkaar] meme substitution
         else if (Banque::Ouvert()) Banque::Dessiner();   // [vulkaar] meme substitution
+        else if (Missives::Ouvert()) Missives::Dessiner();   // [vulkaar] meme substitution
         else DrawMainWindow();
         Grid::DrawBagWindows();   // one managed window per open bag (E2/E5)
         LootBarter::DrawWindows();  // container/merchant partner window (loot/barter)
@@ -4798,6 +4811,7 @@ namespace FUI::UIRoot
         Etabli::Tick();                   // [vulkaar] pont etat/gestes de l etabli
         Appartenance::Tick();                   // [vulkaar] pont etat/gestes du panneau maison/coffre
         Banque::Tick();                   // [vulkaar] pont etat/gestes du comptoir de la banque
+        Missives::Tick();                 // [vulkaar] pont etat/gestes du panneau des missives
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)
         Grid::CapacityTick();       // W1+W2: weight bypass / space overload
         GoldCoins::Tick();          // G1: mirror the gold ledger into coins

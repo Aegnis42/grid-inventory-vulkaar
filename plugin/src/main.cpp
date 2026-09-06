@@ -10,6 +10,7 @@
 #include "ui/Etabli.h"
 #include "ui/Appartenance.h"
 #include "ui/Banque.h"   // [vulkaar] le comptoir de la banque
+#include "ui/Missives.h"   // [vulkaar] les missives
 #include "ui/EssaiSwf.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
@@ -1886,10 +1887,11 @@ namespace
                             if (FUI::UIRoot::IsTextInputActive()) {
                                 return;   // typing 'p' into a text field
                             }
-                            // [vulkaar] nos ecrans (maison, etabli, banque) n'ont pas
-                            // de saut de menu -- cette route brute passe AVANT le
-                            // canal des evenements utilisateur, elle a sa garde.
-                            if (FUI::Appartenance::Ouvert() || FUI::Etabli::Ouvert() || FUI::Banque::Ouvert()) {
+                            // [vulkaar] nos ecrans (maison, etabli, banque, missives)
+                            // n'ont pas de saut de menu -- cette route brute passe
+                            // AVANT le canal des evenements utilisateur, elle a sa garde.
+                            if (FUI::Appartenance::Ouvert() || FUI::Etabli::Ouvert() || FUI::Banque::Ouvert() ||
+                                FUI::Missives::Ouvert()) {   // [vulkaar] les missives aussi
                                 return;
                             }
                             // plain inventory only: a loot/barter session has
@@ -3515,6 +3517,7 @@ namespace
             FUI::Etabli::Initialiser();        // vulkaar : pont de l ecran d etabli
             FUI::Appartenance::Initialiser();        // vulkaar : pont du panneau de la maison
             FUI::Banque::Initialiser();              // [vulkaar] pont du comptoir de la banque
+            FUI::Missives::Initialiser();            // [vulkaar] pont du panneau des missives
             RecolteInitialiser();              // vulkaar : la liste de recolte est de CETTE session
             PortesInitialiser();               // vulkaar : les noms de portes sont de CETTE session
             // FUI::EssaiSwf::Initialiser();  // vulkaar : ecran Scaleform d'essai —

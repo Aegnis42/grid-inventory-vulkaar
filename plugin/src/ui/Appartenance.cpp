@@ -1,5 +1,6 @@
 #include "ui/Appartenance.h"
 #include "ui/Banque.h"   // [vulkaar] la banque tient la racine comme nous
+#include "ui/Missives.h"   // [vulkaar] les missives aussi
 #include "ui/Etabli.h"
 
 #include "ui/Sfx.h"
@@ -473,8 +474,11 @@ namespace FUI::Appartenance
                    et le miroir de Banque.cpp le disait déjà de son côté :
                    éteindre la racine sous un comptoir ouvert le laissait sans
                    trame dessinée, et son chien de garde (120 trames) le fermait
-                   deux secondes plus tard sans un mot pour le joueur. */
-                if (!Etabli::Ouvert() && !Banque::Ouvert()) UIRoot::Close();
+                   deux secondes plus tard sans un mot pour le joueur.
+                   [vulkaar] LES MISSIVES EN FONT PARTIE depuis le 06/09/2026, et
+                   pour la même raison exactement : un écran de plus qui tient la
+                   racine, un oubli de plus qui la lui volerait. */
+                if (!Etabli::Ouvert() && !Banque::Ouvert() && !Missives::Ouvert()) UIRoot::Close();
             }
 
             if (!g_nomActif) {

@@ -1,5 +1,6 @@
 #include "ui/Appartenance.h"
 #include "ui/Banque.h"   // [vulkaar] le comptoir de la banque
+#include "ui/Missives.h"   // [vulkaar] les missives
 #include "ui/GridMenu.h"
 #include "game/Census.h"
 #include "game/DeltaWatch.h"
@@ -296,7 +297,8 @@ namespace FUI
                 // Tab le menu de raccourcis par-dessus -- « le jeu garde la
                 // detection des touches ». Tout le canal est avale ici ; Echap
                 // et la touche d'inventaire ont deja ferme l'ecran juste au-dessus.
-                if (Appartenance::Ouvert() || Etabli::Ouvert() || Banque::Ouvert()) {   // [vulkaar] la banque aussi
+                if (Appartenance::Ouvert() || Etabli::Ouvert() || Banque::Ouvert() ||
+                    Missives::Ouvert()) {   // [vulkaar] la banque et les missives aussi
                     // La console et la capture d'ecran ne sont pas des sauts de
                     // menu : elles passent (les gardes IsConsoleOpen du thunk, du
                     // relais et du rendu prennent le relais une fois la console

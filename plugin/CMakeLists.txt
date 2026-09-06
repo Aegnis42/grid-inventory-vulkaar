@@ -79,6 +79,8 @@ set(SOURCES
     src/ui/Appartenance.cpp
     src/ui/Banque.h        # [vulkaar] le comptoir de la banque
     src/ui/Banque.cpp
+    src/ui/Missives.h      # [vulkaar] les missives (ecrire, attendre, lire)
+    src/ui/Missives.cpp
     src/ui/Clavier.h
     src/ui/Clavier.cpp
     src/ui/ClavierTables.gen.h
