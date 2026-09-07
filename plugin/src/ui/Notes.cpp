@@ -1402,8 +1402,20 @@ namespace FUI::Notes
            est dessiné, une ligne par seconde et pas une de plus. Sans elle, un
            écran muet et un écran ABSENT se ressemblent dans un journal. */
         if (g_tic % 60 == 0) {
-            SKSE::log::info("[NOTES] sonde : panneau dessine (tic {}, {} page(s), souris capturee={})",
-                g_tic, g_pages.size(), ImGui::GetIO().WantCaptureMouse ? 1 : 0);
+            /* `clavierPris` est le témoin décisif d'Échap : GridMenu avale TOUT
+               le canal des touches quand `UIRoot::IsTextInputActive()` est vrai
+               (« pendant qu'un champ tient le clavier, chaque touche est du
+               texte »). Si Échap ne ferme pas ET que ce témoin vaut 1 alors
+               qu'aucune page n'est ouverte, la cause est là et nulle part
+               ailleurs. */
+            SKSE::log::info(
+                "[NOTES] sonde : panneau dessine (tic {}, {} page(s), chargee={}, demandee={}, "
+                "sourisCapturee={}, clavierPris={}, wantTexte={}, fenetreSurvolee={})",
+                g_tic, g_pages.size(), g_chargee, g_demandee,
+                ImGui::GetIO().WantCaptureMouse ? 1 : 0,
+                UIRoot::IsTextInputActive() ? 1 : 0,
+                ImGui::GetIO().WantTextInput ? 1 : 0,
+                ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) ? 1 : 0);
         }
 
         const ImGuiIO& io = ImGui::GetIO();
