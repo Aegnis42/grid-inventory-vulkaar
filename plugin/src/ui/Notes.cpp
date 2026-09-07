@@ -1415,7 +1415,16 @@ namespace FUI::Notes
                 ImGui::GetIO().WantCaptureMouse ? 1 : 0,
                 UIRoot::IsTextInputActive() ? 1 : 0,
                 ImGui::GetIO().WantTextInput ? 1 : 0,
-                ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) ? 1 : 0);
+                ImGui::IsAnyItemHovered() ? 1 : 0);
+            /* Le survol marche (le bouton s'éclaire) : ce qui manque est le
+               BOUTON DE LA SOURIS. On dit donc où elle est et si elle est
+               enfoncée — `IsWindowHovered` de la ligne d'avant ne valait rien,
+               appelée avant `Begin` : elle interrogeait une autre fenêtre. */
+            const ImGuiIO& sondeIo = ImGui::GetIO();
+            SKSE::log::info("[NOTES] sonde souris : pos ({:.0f},{:.0f}) gauche={} droite={} anyItem={}",
+                sondeIo.MousePos.x, sondeIo.MousePos.y,
+                sondeIo.MouseDown[0] ? 1 : 0, sondeIo.MouseDown[1] ? 1 : 0,
+                ImGui::IsAnyItemHovered() ? 1 : 0);
         }
 
         const ImGuiIO& io = ImGui::GetIO();
