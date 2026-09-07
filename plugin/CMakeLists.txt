@@ -81,6 +81,8 @@ set(SOURCES
     src/ui/Banque.cpp
     src/ui/Missives.h      # [vulkaar] les missives (ecrire, attendre, lire)
     src/ui/Missives.cpp
+    src/ui/Notes.h         # [vulkaar] le carnet de notes (F4)
+    src/ui/Notes.cpp
     src/ui/Clavier.h
     src/ui/Clavier.cpp
     src/ui/ClavierTables.gen.h

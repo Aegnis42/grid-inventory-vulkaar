@@ -2,6 +2,7 @@
 #include "ui/Appartenance.h"
 #include "ui/Banque.h"
 #include "ui/Etabli.h"
+#include "ui/Notes.h"   // [vulkaar] le carnet de notes tient la racine comme nous
 
 #include "ui/Sfx.h"
 #include "ui/Theme.h"
@@ -151,9 +152,12 @@ namespace FUI::Missives
         //            n'importe quoi d'autre — ou en fin de texte — est un `\`
         //            littéral, et le caractère qui suit est lu normalement.
         //
-        // LE MIROIR TS est `missivesTexte.ts` (vulkaar-engine), où la paire
+        // LE MIROIR TS est `pontTexte.ts` (vulkaar-engine), où la paire
         // s'éprouve dans les deux sens ; une ligne corrigée ici se corrige
-        // là-bas, sans quoi le pont ment dans un sens.
+        // là-bas, sans quoi le pont ment dans un sens. IL SERT AUSSI AUX NOTES
+        // depuis le 07/09/2026 — d'où son nom neutre, et d'où le fait qu'une
+        // correction porte désormais sur TROIS fichiers : celui-ci, Notes.cpp
+        // et pontTexte.ts.
         //
         // OCTET PAR OCTET, et c'est sûr en UTF-8 : les octets de continuation
         // valent tous 0x80 ou plus, donc aucun ne peut être pris pour une
@@ -472,7 +476,8 @@ namespace FUI::Missives
                    racine, ouverte pour nous, se referme avec — sinon le joueur
                    tombe sur son inventaire sans l'avoir demandé. Sauf si un
                    autre de nos écrans la tient encore : elle est à lui. */
-                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Banque::Ouvert()) UIRoot::Close();
+                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Banque::Ouvert() &&
+                    !Notes::Ouvert()) UIRoot::Close();   // [vulkaar] ils sont CINQ
             }
         }
 

@@ -75,7 +75,7 @@
 // point du pont où l'on peut diverger sans que rien ne tombe : une colonne
 // décalée ferait une ligne jetée, qui se voit ; un texte mal déséchappé, lui,
 // s'affiche, simplement faux. La règle est écrite au-dessus de `Echapper` /
-// `Desechapper` dans Missives.cpp, et son miroir vit dans missivesTexte.ts
+// `Desechapper` dans Missives.cpp, et son miroir vit dans pontTexte.ts
 // (dépôt vulkaar rp / vulkaar-engine), où elle s'éprouve dans les deux sens.
 //
 // L'ÉCRAN REMPLACE LES DEUX PANNEAUX de la racine, comme l'établi, le panneau

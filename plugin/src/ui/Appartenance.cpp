@@ -1,6 +1,7 @@
 #include "ui/Appartenance.h"
 #include "ui/Banque.h"   // [vulkaar] la banque tient la racine comme nous
 #include "ui/Missives.h"   // [vulkaar] les missives aussi
+#include "ui/Notes.h"      // [vulkaar] et le carnet de notes — ils sont CINQ
 #include "ui/Etabli.h"
 
 #include "ui/Sfx.h"
@@ -477,8 +478,12 @@ namespace FUI::Appartenance
                    deux secondes plus tard sans un mot pour le joueur.
                    [vulkaar] LES MISSIVES EN FONT PARTIE depuis le 06/09/2026, et
                    pour la même raison exactement : un écran de plus qui tient la
-                   racine, un oubli de plus qui la lui volerait. */
-                if (!Etabli::Ouvert() && !Banque::Ouvert() && !Missives::Ouvert()) UIRoot::Close();
+                   racine, un oubli de plus qui la lui volerait.
+                   [vulkaar] LES NOTES EN FONT PARTIE depuis le 07/09/2026, et
+                   pour la troisième fois la même raison : ils sont CINQ écrans à
+                   ouvrir la racine, et un oubli la vole à un panneau ouvert. */
+                if (!Etabli::Ouvert() && !Banque::Ouvert() && !Missives::Ouvert() &&
+                    !Notes::Ouvert()) UIRoot::Close();
             }
 
             if (!g_nomActif) {

@@ -1,0 +1,124 @@
+#pragma once
+
+// [vulkaar] LES NOTES — un carnet de pages, et une page qu'on tend à qui est là.
+//
+// CE QUE CET ÉCRAN FAIT (propriétaire, 07/09/2026) : « on va faire un système
+// de note qui sera sur F4 ; on peut écrire une note sur une page, créer une
+// nouvelle page, et partager une page à la personne choisie dans un rayon de
+// 5 m ». Deux colonnes : à gauche la LISTE des pages et le bouton « Nouvelle
+// page », à droite la PAGE choisie — son titre, son texte, et les trois gestes
+// qui la concernent (enregistrer, partager, supprimer).
+//
+// UN CINQUIÈME ÉCRAN, ET CHACUN DES QUATRE AUTRES DOIT L'APPRENDRE. L'établi,
+// le panneau d'appartenance, le comptoir de la banque et le courrier ouvrent
+// tous la racine de la grille pour se dessiner, et chacun la referme en partant
+// — SAUF si un autre la tient encore. Cette liste de voisins est recopiée à
+// cinq endroits (ici, dans les trois autres écrans, et dans `CloseLayer` d'
+// UIRoot.cpp) et le défaut a déjà été payé DEUX fois : un écran neuf qu'on
+// oublie d'ajouter se fait éteindre la racine sous les pieds, reste sans une
+// trame dessinée, et son chien de garde le ferme deux secondes plus tard sans
+// un mot pour le joueur. Ajouter un sixième écran, c'est six fichiers à relire.
+//
+// TOUT L'ARBITRAGE EST AU SERVEUR (vulkaar rp, domain/notes/relaisNotes.ts) :
+// à qui appartient une page, ce qu'un titre et un texte ont le droit de peser
+// (60 et 2 000 caractères), qui est à cinq mètres — 350 unités, MESURÉES À
+// L'INSTANT DU PARTAGE. Ici on ne fait que MONTRER et DEMANDER.
+//
+// ── LE PLATEAU NE PORTE QU'UN SEUL TEXTE, ET C'EST TOUTE L'ARCHITECTURE ────
+// Les pages sont ILLIMITÉES (décision du propriétaire, 07/09) : rien ne plafonne
+// leur nombre. Un plateau qui porterait le texte de toutes grossirait donc sans
+// borne. Il ne porte que la LISTE (id, titre, date, provenance) et le texte de
+// la SEULE page ouverte. D'où la règle qui commande cet écran :
+//
+//   CLIQUER UNE PAGE ENVOIE LE GESTE `page`, ET ON ATTEND SON TEXTE. Tant qu'il
+//   n'est pas arrivé, l'écran dit qu'il l'ouvre. Il n'invente pas un texte vide
+//   — ce vide-là s'enregistrerait PAR-DESSUS le vrai —, et le texte de la page
+//   précédente ne s'affiche jamais sous le titre d'une autre.
+//
+// C'EST LE SERVEUR QUI DIT QUELLE PAGE EST OUVERTE (`ouverte` + `texte`, poussés
+// ensemble, lus de la même lecture du registre). L'écran le suit ; il ne décide
+// pas tout seul qu'une page est chargée.
+//
+// ── CE QUI NE DOIT PAS SE PERDRE ──────────────────────────────────────────
+// « Perdre ce qu'un joueur vient d'écrire est la seule faute que ce chantier ne
+// doit pas commettre » (contrat, §1.8). Trois règles en découlent, et aucune
+// n'est décorative :
+//   1. LE TEXTE EN COURS D'ÉDITION NE S'EFFACE JAMAIS SUR UNE POUSSÉE SERVEUR.
+//      Le serveur repousse un plateau toutes les cinq secondes quand les gens
+//      marchent autour de nous (la veille sur `autour`) : si cela emportait la
+//      saisie, écrire une page serait impossible en ville. Seule l'OUVERTURE
+//      d'une AUTRE page remet les champs à zéro.
+//   2. REFERMER ENREGISTRE. Échap envoie l'enregistrement de la page modifiée
+//      AVANT le « fermer ». Changer de page, créer une page, ouvrir la liste du
+//      partage : tous enregistrent d'abord, pour la même raison.
+//      CE QUI FAIT DE CET ÉCRAN LE SEUL DES CINQ À ENVOYER DEUX GESTES POUR UN
+//      CLIC — `ecrire` puis `page`, `creer` ou `donner` —, et les deux partent
+//      dans la MÊME trame. Le relais a dû apprendre à les laisser passer tous
+//      les deux : l'écriture y a sa PROPRE cadence, séparée de celle de la
+//      navigation (`CADENCE_ECRITURE_MS`, relaisNotes.ts). Avec une cadence
+//      unique, le second geste était refusé à tous les coups — un clic sur deux
+//      ne faisait rien (relecture croisée du 07/09). Le sixième écran qui
+//      voudra enregistrer en partant devra en faire autant.
+//   3. LES CHAMPS NE PEUVENT PAS DÉPASSER LES BORNES DU SERVEUR. Le titre est
+//      borné à 60 caractères et le texte à 2 000 À LA FRAPPE (le compteur se
+//      fige, la lettre suivante n'entre pas) plutôt qu'au départ : un
+//      enregistrement que le serveur refuserait pour la longueur, c'est une
+//      page perdue au moment précis où l'on referme.
+//
+// LES PERSONNES SE DÉSIGNENT PAR LEUR personnageId, le petit entier du registre,
+// et les pages par leur id de note. AUCUN FORMID NE TRANSITE. Les identités
+// viennent du serveur : un nom vide veut dire « on ne s'est pas présentés », et
+// l'on affiche alors le MATRICULE — la règle du jeu entier.
+//
+// LES DEUX FICHIERS DU PONT :
+//   - l'état arrive par GridInventory_notes_etat.txt, écrit par le client skymp
+//     du même processus (notesService.ts) à chaque poussée serveur ;
+//   - les gestes partent par GridInventory_notes.txt, que le même service
+//     consomme (une trame sur quinze). CE FICHIER SE ROGNE, contrairement à
+//     ceux des quatre autres écrans : une ligne « ecrire » porte le texte
+//     ENTIER d'une page (jusqu'à huit kilo-octets) et le service le relit
+//     ENTIER quatre fois par seconde — 1,5 Mio coûtent 3,2 ms par passe
+//     (mesuré le 07/09). Le service accuse donc réception dans l'état (ligne
+//     `lu <seq>`), et la DLL vide le fichier quand tout a été lu : jamais à
+//     l'aveugle, sinon on perdrait le geste écrit entre les deux. Voir
+//     `RognerLesGestes`.
+//
+// L'ÉCHAPPEMENT DES TEXTES, ET LES TROIS CÔTÉS LE FONT PAREIL — une page a des
+// paragraphes, comme une lettre. La règle est écrite au-dessus de `Echapper` /
+// `Desechapper` dans Notes.cpp ; ses miroirs vivent dans `pontTexte.ts` (dépôt
+// vulkaar-engine, où elle s'éprouve dans les deux sens) et dans Missives.cpp.
+// C'est le seul point du pont où l'on peut diverger sans que rien ne tombe :
+// une colonne décalée fait une ligne jetée, qui se voit ; un texte mal
+// déséchappé, lui, s'affiche — simplement faux.
+//
+// L'ÉCRAN REMPLACE LES DEUX PANNEAUX de la racine, comme l'établi, le panneau
+// d'appartenance, le comptoir de la banque et le courrier.
+
+#include <RE/Skyrim.h>
+
+#include <cstdint>
+
+namespace FUI::Notes
+{
+    /** Tronque les deux fichiers du pont — à kDataLoaded.
+     *  L'ÉTAT AUSSI, pas seulement les gestes : un état rescapé d'un plantage
+     *  ferait surgir le panneau au lancement du jeu. */
+    void Initialiser();
+
+    /** Lit l'état, tient le chien de garde et le compte à rebours du message.
+     *  Depuis UIRoot::Tick, à CHAQUE trame, racine ouverte ou non. */
+    void Tick();
+
+    /** Le panneau entier. Appelé par UIRoot::Render À LA PLACE des deux
+     *  panneaux quand Ouvert() est vrai. */
+    void Dessiner();
+
+    /** Le serveur a-t-il ouvert le panneau pour nous ? */
+    [[nodiscard]] bool Ouvert();
+
+    /** Échap : referme d'abord le sous-écran ouvert (la liste du partage, la
+     *  confirmation de suppression), sinon ENREGISTRE la page modifiée puis
+     *  referme le panneau et le dit au serveur (geste « fermer »).
+     *  Rend true si quelque chose a été fermé. */
+    bool Fermer();
+}

@@ -19,6 +19,7 @@
 #include "ui/Appartenance.h"
 #include "ui/Banque.h"   // [vulkaar] le comptoir de la banque
 #include "ui/Missives.h"   // [vulkaar] les missives
+#include "ui/Notes.h"      // [vulkaar] le carnet de notes
 #include "ui/Lang.h"
 #include "ui/Sfx.h"
 #include "ui/Theme.h"
@@ -4109,6 +4110,7 @@ namespace FUI::UIRoot
             kAppartenance,   // [vulkaar] le panneau maison/coffre (un seul ecran)
             kBanque,   // [vulkaar] le comptoir de la banque
             kMissives,   // [vulkaar] le panneau des missives
+            kNotes,      // [vulkaar] le carnet de notes
             kCount
         };
 
@@ -4129,6 +4131,7 @@ namespace FUI::UIRoot
             case Layer::kAppartenance:       return Appartenance::Ouvert();
             case Layer::kBanque:       return Banque::Ouvert();   // [vulkaar]
             case Layer::kMissives:     return Missives::Ouvert();   // [vulkaar]
+            case Layer::kNotes:        return Notes::Ouvert();      // [vulkaar]
             default:                   return false;
             }
         }
@@ -4158,8 +4161,10 @@ namespace FUI::UIRoot
                    qu il n a pas demande. */
                 if (!Etabli::Fermer()) return false;
                 // la racine reste a l'un de nos autres ecrans s'il est la
-                // ([vulkaar] la banque et les missives aussi)
-                if (!Appartenance::Ouvert() && !Banque::Ouvert() && !Missives::Ouvert()) UIRoot::Close();
+                // ([vulkaar] la banque, les missives et les notes aussi : ils
+                // sont CINQ, et un oubli ici vole la racine a un panneau ouvert)
+                if (!Appartenance::Ouvert() && !Banque::Ouvert() && !Missives::Ouvert() &&
+                    !Notes::Ouvert()) UIRoot::Close();
                 return true;
             case Layer::kAppartenance:
                 /* Meme raison que l etabli : la racine a ete ouverte pour le
@@ -4170,21 +4175,35 @@ namespace FUI::UIRoot
                    cette garde, un Echap dans les clefs eteignait tout l'ecran
                    et le chien de garde envoyait « fermer » au serveur. */
                 if (!Appartenance::Ouvert() && !Etabli::Ouvert() && !Banque::Ouvert() &&
-                    !Missives::Ouvert()) UIRoot::Close();   // [vulkaar] la banque et les missives aussi
+                    !Missives::Ouvert() && !Notes::Ouvert()) UIRoot::Close();   // [vulkaar] ils sont CINQ
                 return true;
             case Layer::kBanque:
                 /* [vulkaar] Meme raison encore : la racine a ete ouverte pour le
                    comptoir, elle s en va avec lui -- sauf si l'etabli, le
                    panneau d'appartenance ou les missives la tiennent. */
                 if (!Banque::Fermer()) return false;
-                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Missives::Ouvert()) UIRoot::Close();
+                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Missives::Ouvert() &&
+                    !Notes::Ouvert()) UIRoot::Close();
                 return true;
             case Layer::kMissives:
                 /* [vulkaar] Et une quatrieme fois : la racine a ete ouverte pour
                    le panneau des missives, elle s en va avec lui -- sauf si un
                    autre de nos ecrans la tient. */
                 if (!Missives::Fermer()) return false;
-                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Banque::Ouvert()) UIRoot::Close();
+                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Banque::Ouvert() &&
+                    !Notes::Ouvert()) UIRoot::Close();
+                return true;
+            case Layer::kNotes:
+                /* [vulkaar] Et une cinquieme fois : la racine a ete ouverte pour
+                   le carnet, elle s en va avec lui -- sauf si un autre de nos
+                   ecrans la tient. Fermer() a pu ne refermer QUE la liste du
+                   partage ou la confirmation de suppression : le carnet est
+                   encore la, la racine reste. ET FERMER LE CARNET ENREGISTRE la
+                   page modifiee (contrat des notes) : cet Echap-la n'est pas un
+                   abandon, c'est un depart. */
+                if (!Notes::Fermer()) return false;
+                if (!Notes::Ouvert() && !Etabli::Ouvert() && !Appartenance::Ouvert() &&
+                    !Banque::Ouvert() && !Missives::Ouvert()) UIRoot::Close();
                 return true;
             default: return false;
             }
@@ -4736,6 +4755,7 @@ namespace FUI::UIRoot
         else if (Appartenance::Ouvert()) Appartenance::Dessiner();   // [vulkaar] meme substitution
         else if (Banque::Ouvert()) Banque::Dessiner();   // [vulkaar] meme substitution
         else if (Missives::Ouvert()) Missives::Dessiner();   // [vulkaar] meme substitution
+        else if (Notes::Ouvert()) Notes::Dessiner();   // [vulkaar] meme substitution
         else DrawMainWindow();
         Grid::DrawBagWindows();   // one managed window per open bag (E2/E5)
         LootBarter::DrawWindows();  // container/merchant partner window (loot/barter)
@@ -4812,6 +4832,7 @@ namespace FUI::UIRoot
         Appartenance::Tick();                   // [vulkaar] pont etat/gestes du panneau maison/coffre
         Banque::Tick();                   // [vulkaar] pont etat/gestes du comptoir de la banque
         Missives::Tick();                 // [vulkaar] pont etat/gestes du panneau des missives
+        Notes::Tick();                    // [vulkaar] pont etat/gestes du carnet de notes
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)
         Grid::CapacityTick();       // W1+W2: weight bypass / space overload
         GoldCoins::Tick();          // G1: mirror the gold ledger into coins

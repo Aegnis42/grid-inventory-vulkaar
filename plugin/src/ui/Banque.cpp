@@ -1,6 +1,7 @@
 #include "ui/Banque.h"
 #include "ui/Appartenance.h"
 #include "ui/Missives.h"   // [vulkaar] les missives tiennent la racine comme nous
+#include "ui/Notes.h"      // [vulkaar] et le carnet de notes aussi
 #include "ui/Etabli.h"
 
 #include "game/MonnaiesVulkaar.h"
@@ -343,7 +344,8 @@ namespace FUI::Banque
                    le 06/09/2026 : un écran de plus qui tient la racine, un oubli
                    de plus qui la lui volerait — et son chien de garde le
                    fermerait deux secondes plus tard sans un mot. */
-                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Missives::Ouvert()) UIRoot::Close();
+                if (!Etabli::Ouvert() && !Appartenance::Ouvert() && !Missives::Ouvert() &&
+                    !Notes::Ouvert()) UIRoot::Close();   // [vulkaar] ils sont CINQ
             }
         }
 
