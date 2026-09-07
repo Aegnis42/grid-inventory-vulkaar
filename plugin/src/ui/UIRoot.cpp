@@ -410,6 +410,31 @@ namespace FUI::UIRoot
         {
             g_thunkMsgs.fetch_add(1, std::memory_order_relaxed);
             switch (m) {
+            case WM_KILLFOCUS:
+                /* [vulkaar] LA FENÊTRE PERD LE FOCUS : ImGui DOIT L'APPRENDRE
+                 * (08/09/2026).
+                 *
+                 * Ce thunk ne transmettait que les messages de touche, jamais
+                 * ceux de focus. Or c'est `WM_KILLFOCUS` qui déclenche, dans le
+                 * dos d'ImGui, l'`AddFocusEvent(false)` du greffon Win32, et
+                 * c'est cet événement-là qui appelle `ClearInputKeys()`. Sans
+                 * lui, une touche encore enfoncée AU MOMENT OÙ L'ON QUITTE LA
+                 * FENÊTRE reste enfoncée POUR IMGUI, indéfiniment.
+                 *
+                 * ET UN SEUL MODIFICATEUR COINCÉ SUFFIT À TOUT ÉTEINDRE : la
+                 * touche Entrée et la touche Échap d'un champ de texte passent
+                 * par `Shortcut`, donc par `IsKeyChordPressed`, qui commence par
+                 * `if (g.IO.KeyMods != mods) return false;` (imgui.cpp). Les
+                 * LETTRES, elles, continuent d'entrer. Un Alt+Tab — le premier
+                 * réflexe de qui se croit bloqué — laissait donc un panneau qui
+                 * écrit mais ne se ferme plus.
+                 *
+                 * On ne rend pas la main : le message continue vers le jeu. */
+                if (ImGui::GetCurrentContext()) ImGui::GetIO().AddFocusEvent(false);
+                break;
+            case WM_SETFOCUS:
+                if (ImGui::GetCurrentContext()) ImGui::GetIO().AddFocusEvent(true);
+                break;
             case WM_CHAR:
             case WM_KEYDOWN:
             case WM_KEYUP:
@@ -607,6 +632,56 @@ namespace FUI::UIRoot
                 const bool now = (GetAsyncKeyState(vk) & 0x8000) != 0;
                 if (now == s_down[vk]) continue;
                 s_down[vk] = now;
+
+                /* [vulkaar] CE REPLI DOIT AUSSI LIVRER LES TOUCHES, ET PAS
+                   SEULEMENT DES CARACTÈRES (08/09/2026, mesuré au banc).
+                 *
+                 * LA PRÉMISSE DU CARTOUCHE D'EN HAUT ÉTAIT FAUSSE — « emitting
+                 * key events as well would double every keystroke, because the
+                 * Scaleform road is alive and already delivering them ». Elle
+                 * l'est peut-être pour les lettres ; elle ne l'est pas pour
+                 * ENTRÉE, ÉCHAP, RETOUR ARRIÈRE et TAB. ImGui ne lit ni le saut
+                 * de ligne ni l'annulation dans la file des CARACTÈRES : ils
+                 * passent par `Shortcut(ImGuiKey_Enter)` et
+                 * `Shortcut(ImGuiKey_Escape)` (imgui_widgets.cpp:5071 et 5074),
+                 * et la file des caractères refuse tout code < 0x20
+                 * (imgui_widgets.cpp:4407). Sans ces quelques lignes, un champ
+                 * reçoit les lettres et RIEN D'AUTRE.
+                 *
+                 * CE QUE ÇA A COÛTÉ, le 07/09 au soir : le carnet ouvert, on
+                 * écrivait, Entrée ne faisait pas de paragraphe, et Échap ne
+                 * fermait pas — deux minutes enfermé dans le panneau. Le
+                 * journal de cette séance porte les deux témoins : « a text
+                 * field has been focused for 120 frames and NO WM_CHAR arrived
+                 * (chars 0 keys 2 raw 5 msgs 46) » à 01:10:57, puis « Typing
+                 * falls back to polled characters » à 01:12:05.
+                 *
+                 * SANS GARDE DE DOUBLON, ET C'EST SÛR : `AddKeyEvent` compare au
+                 * dernier événement déjà en file et écarte l'état identique
+                 * (imgui.cpp, `AddKeyAnalogEvent` → `FindLatestInputEvent`).
+                 * Mesuré au banc : deux enfoncements dans la même trame ne font
+                 * qu'UN saut de ligne.
+                 *
+                 * HORS DU VERROU `g_kbFallback`, À DESSEIN : le verrou ne s'arme
+                 * que sur des touches IMPRIMABLES, et l'on ouvre le carnet puis
+                 * l'on tape Entrée sans avoir rien écrit — c'est exactement ce
+                 * qui s'est passé. La touche doit partir dès que la fenêtre se
+                 * tait, pas seulement une fois le verrou fermé.
+                 *
+                 * AVANT le `if (!now)` qui suit : le RELÂCHEMENT doit partir
+                 * aussi, sinon ImGui tient la touche enfoncée et répète. */
+                {
+                    ImGuiKey touche = ImGuiKey_None;
+                    switch (vk) {
+                    case VK_RETURN: touche = ImGuiKey_Enter;     break;
+                    case VK_ESCAPE: touche = ImGuiKey_Escape;    break;
+                    case VK_BACK:   touche = ImGuiKey_Backspace; break;
+                    case VK_TAB:    touche = ImGuiKey_Tab;       break;
+                    default: break;
+                    }
+                    if (touche != ImGuiKey_None) a_io.AddKeyEvent(touche, now);
+                }
+
                 if (!now) continue;
 
                 if (toucheLaMorte) {

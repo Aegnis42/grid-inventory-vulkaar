@@ -269,10 +269,33 @@ namespace FUI
                 // While a text field owns the keyboard, EVERY key is text —
                 // swallow the whole user-event channel (J opened the Journal
                 // mid-typing; ESC unfocuses the field via ImGui instead).
-                if (UIRoot::IsTextInputActive()) {
+                //
+                // [vulkaar] SAUF « Cancel » QUAND LE CARNET EST OUVERT
+                // (08/09/2026). Le carnet donne le clavier à sa page DÈS
+                // L'OUVERTURE, sans qu'on ait à cliquer : la condition
+                // ci-dessus devient vraie tout de suite, et cette porte-là se
+                // refermait avec elle. Il ne restait qu'UNE sortie, l'Échap
+                // d'ImGui — et celui-là s'éteint en silence dès qu'un
+                // modificateur est cru enfoncé (« Shortcut » exige
+                // io.KeyMods == 0) ou dès que la route de la fenêtre se tait.
+                // Les deux sont arrivés le 07/09 au soir : DEUX MINUTES
+                // enfermé dans le panneau, mesurées au journal.
+                //
+                // Les deux causes sont corrigées dans UIRoot.cpp (le repli
+                // livre désormais les touches, la perte de focus est dite à
+                // ImGui). Ceci est la CEINTURE : une sortie qui ne dépend
+                // d'aucune des deux. Elle ne coûte rien — le carnet enregistre
+                // en se refermant, et une fermeture demandée deux fois ne
+                // ferme qu'une fois (CloseLayer ne trouve plus rien).
+                //
+                // Les quatre autres écrans gardent l'ancienne règle : leur
+                // champ ne prend le clavier qu'au CLIC, donc leur Échap sort
+                // par le moteur tant qu'on n'a pas commencé à écrire.
+                const auto* ue = RE::UserEvents::GetSingleton();
+                if (UIRoot::IsTextInputActive() &&
+                    !(Notes::Ouvert() && ue != nullptr && data->fixedStr == ue->cancel)) {
                     return RE::UI_MESSAGE_RESULTS::kHandled;
                 }
-                const auto* ue = RE::UserEvents::GetSingleton();
                 // A2: ESC ("Cancel") and the inventory hotkey ("Inventory" —
                 // translated by the kItemMenu context, vanilla-style) both
                 // close; while carrying an item they cancel the carry first.
