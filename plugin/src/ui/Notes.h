@@ -126,11 +126,29 @@
 // nous en Écrire, et l'on va de l'un à l'autre dans les deux sens : une page
 // reçue est une COPIE QUI NOUS APPARTIENT.
 //
+// UN ORDRE DE MARQUE NE SE POSE PAS QUAND C'EST LE TITRE QUI TENAIT LE CLAVIER,
+// et cette garde-là a été payée. Le carnet a DEUX champs, ImGui n'a qu'UN SEUL
+// état de saisie : dès que le titre l'a tenu, le corps ne le recycle plus et
+// revient avec son curseur à ZÉRO. Un `G` cliqué pendant qu'on écrit le titre
+// arrachait donc le clavier au titre et posait « **** » au TOUT DÉBUT du corps —
+// quatre étoiles que le rendu ne montre même pas (une marque vide), comptées
+// dans les 2 000, et une page modifiée que personne n'avait demandé de modifier.
+// L'écran retient donc le DERNIER champ à avoir tenu le clavier ; le drapeau de
+// la trame n'y suffisait pas, un clic vole l'`ActiveId` dès l'ENFONCEMENT, une
+// trame avant que le bouton ne déclenche. Il refuse alors en une ligne : « Place
+// d'abord ton curseur dans le texte de la page. » Quand PERSONNE n'a encore tenu
+// le clavier, l'ordre PASSE et se pose au début du corps : c'est le geste d'une
+// page neuve, et il est légitime. Voir `g_dernierClavier` dans Notes.cpp.
+//
 // LA BORNE DE 2 000 CARACTÈRES COMPTE LES MARQUES, et c'est honnête : le champ
 // les montre, donc le joueur voit ce qui est compté. La monter serait une
-// décision du propriétaire, et il faudrait la monter DES DEUX CÔTÉS à la fois
-// (ici et dans `notes.ts`), sans quoi une page acceptée à la frappe se ferait
-// refuser à l'enregistrement — c'est-à-dire au moment où l'on referme.
+// décision du propriétaire, et il faudrait la monter chez ses TROIS GARDIENS à
+// la fois — `kTexteMax` ici, `TEXTE_PAGE_MAX` du relais
+// (`packages/gamemode/src/domain/notes/notes.ts`) et `TEXTE_PAGE_MAX` du
+// registre (`packages/comptes/src/depot.ts`). Les trois valeurs sont déclarées
+// séparément et RIEN NE LES COMPARE : en monter deux ne fait tomber aucune
+// épreuve, et une page acceptée à la frappe se ferait refuser à
+// l'enregistrement — c'est-à-dire au moment où l'on referme.
 //
 // ÉCHAP FERME, ET NE PREND PLUS RIEN. Il fallait le corriger : tant qu'un champ
 // a le clavier, `GridMenu` avale tout le canal des événements utilisateur, si

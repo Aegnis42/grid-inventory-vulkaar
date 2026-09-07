@@ -193,6 +193,52 @@ namespace FUI::Notes
         bool g_focusDemande = false;
 
         /**
+         * LE DERNIER CHAMP À AVOIR TENU LE CLAVIER — un souvenir COLLANT, et
+         * c'est la garde de l'ordre en attente.
+         *
+         * CE QUE LE DÉFAUT COÛTAIT. Le carnet a DEUX champs, et ImGui n'a
+         * qu'UN SEUL état de saisie (`g.InputTextState`, recyclé si et
+         * seulement si `state->ID == id`, imgui_widgets.cpp:4810). Dès que le
+         * titre l'a tenu, le corps ne le recycle plus : au retour du clavier,
+         * `stb_textedit_initialize_state` remet le curseur à ZÉRO et vide la
+         * sélection. Une marque demandée pendant qu'on écrivait le TITRE
+         * faisait donc deux dégâts d'un coup — la demande de focus du corps
+         * arrachait l'`ActiveId` au titre (`NavMoveRequestApplyResult` appelle
+         * `ClearActiveID` sans aucune garde sur l'`ActiveId` en cours,
+         * imgui.cpp:14068), et « **** » s'écrivait au TOUT DÉBUT du corps, où
+         * la suite de la frappe partait le rejoindre. Rien à l'écran ne
+         * l'annonçait : les deux champs sont peints pareil, et l'analyse rend
+         * ces quatre étoiles INVISIBLES en mode Lire (une marque vide). La page
+         * était modifiée sans que personne l'ait demandé, et partait telle
+         * quelle au registre au premier enregistrement.
+         *
+         * POURQUOI UN SOUVENIR ET NON LE DRAPEAU `actif` DE LA TRAME. Sur le
+         * chemin du BOUTON, `g_champTitre.actif` est DÉJÀ faux quand le bouton
+         * déclenche : le clic vole l'`ActiveId` au titre dès l'ENFONCEMENT
+         * (« Release focus when we click outside », imgui_widgets.cpp:4901-4903,
+         * puis `ClearActiveID` l.5392), et `Sfx::Button` ne rend vrai qu'au
+         * RELÂCHEMENT, une trame plus tard. Un drapeau de trame ne survit donc
+         * pas jusqu'à la décision ; il faut un souvenir qui, lui, la traverse.
+         * D'où la levée sur `IsItemActive() || IsItemDeactivated()` : le champ
+         * qui PERD le clavier se nomme lui-même, à la trame de l'enfoncement,
+         * une trame AVANT que le bouton ne déclenche quoi que ce soit.
+         *
+         * ET `Aucun` LAISSE PASSER, À DESSEIN. Quand le joueur n'a encore posé
+         * son curseur nulle part, l'ordre s'applique au DÉBUT du corps : c'est
+         * le geste d'une page neuve — Ctrl+B puis on écrit —, et il est
+         * légitime. Refuser là ferait un écran qui ne répond pas à son premier
+         * appui, ce qui se lit comme un bouton cassé. Seul le TITRE est refusé,
+         * parce que lui seul a emporté l'état de saisie.
+         */
+        enum class Cible
+        {
+            Aucun,   // personne n'a encore tenu le clavier sur cette page
+            Titre,
+            Texte
+        };
+        Cible g_dernierClavier = Cible::Aucun;
+
+        /**
          * L'ORDRE EN ATTENTE — la SEULE voie pour qu'un bouton touche au texte.
          *
          * Un bouton ne peut pas écrire dans `g_texte` : tant que le champ est
@@ -751,6 +797,12 @@ namespace FUI::Notes
             g_champTexte.curseur = g_champTexte.selDebut = g_champTexte.selFin = 0;
             g_champTitre.actif = false;
             g_champTexte.actif = false;
+            /* LE SOUVENIR DU CLAVIER MEURT AVEC LA PAGE : plus aucun champ n'a
+               de sens, et un `Titre` rescapé refuserait la première marque de la
+               page suivante en accusant un champ que le joueur n'a jamais
+               touché. `Aucun` laisse passer — l'ordre s'appliquera au début du
+               corps, ce qui est exactement ce qu'on veut d'une page neuve. */
+            g_dernierClavier = Cible::Aucun;
         }
 
         /** Charge dans les tampons la page que le SERVEUR dit ouverte. C'est le
@@ -811,6 +863,13 @@ namespace FUI::Notes
                le joueur tape sans avoir à cliquer dans le pavé. */
             g_mode = p->matricule.empty() ? Mode::Ecrire : Mode::Lire;
             g_focusDemande = (g_mode == Mode::Ecrire);
+            /* LE SOUVENIR SUIT LE CLAVIER QU'ON VIENT DE DONNER. Ici on écrit
+               `Texte` plutôt que `Aucun` : cette fonction DONNE elle-même le
+               clavier au corps, et poser `Aucun` reviendrait au même — l'ordre
+               passerait — mais mentirait sur qui le tient pendant la trame ou
+               deux que met le champ à s'activer. En mode Lire, personne ne le
+               tient et personne ne le prendra : `Aucun` y est la vérité. */
+            g_dernierClavier = (g_mode == Mode::Ecrire) ? Cible::Texte : Cible::Aucun;
             g_ordreEnAttente = false;
             g_refus.clear();
             g_refusRestant = 0;
@@ -1307,6 +1366,12 @@ namespace FUI::Notes
             g_champTitre.actif = false;
             g_champTexte.actif = false;
             g_ordreEnAttente = false;
+            /* ET LE SOUVENIR DU CLAVIER AVEC EUX. Le plateau du partage prend
+               toute la colonne : ni les champs ni la barre d'outils ne sont
+               dessinés tant qu'il est là. Un `Titre` gardé de l'autre côté
+               refuserait la première marque posée au retour, en accusant un
+               champ que le joueur a quitté depuis longtemps. */
+            g_dernierClavier = Cible::Aucun;
 
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
             ImGui::Text("Tendre « %s »", Etiquette(a_p, a_rang).c_str());
@@ -1406,9 +1471,31 @@ namespace FUI::Notes
         /** POSER UN ORDRE — la seule façon dont un bouton ou un raccourci
          *  touche au texte (voir le cartouche de `g_ordreEnAttente`). Le refus
          *  précédent s'efface : on vient de redemander, la vieille excuse n'a
-         *  plus lieu d'être affichée. */
+         *  plus lieu d'être affichée.
+         *
+         *  C'EST ICI, ET NULLE PART AILLEURS, QUE LA GARDE SE POSE : les huit
+         *  boutons et les quatre raccourcis passent tous par cette porte, si
+         *  bien qu'aucun chemin neuf ne pourra la contourner par distraction. */
         void PoserOrdre(Riche::Marque a_m)
         {
+            /* LE TITRE A ÉTÉ LE DERNIER À TENIR LE CLAVIER : ON REFUSE, ET ON
+               LE DIT. Sans ce refus, l'ordre partait quand même — le clavier
+               sautait au corps (`g_ordreEnAttente && !g_champTexte.actif` plus
+               bas), ImGui n'avait RIEN à recycler puisque son unique état de
+               saisie appartenait au titre, et les deux marqueurs s'inséraient à
+               l'octet ZÉRO du corps, invisibles au rendu, comptés dans les
+               2 000, emportés au registre. Le grisage de la rangée n'y pouvait
+               rien : il n'est qu'un TÉMOIN, et à la trame de l'enfoncement le
+               titre a déjà rendu son `ActiveId`.
+               LE MESSAGE DIT QUOI FAIRE, pas ce qui s'est passé : le joueur n'a
+               que faire de l'état de saisie d'ImGui, il veut savoir où poser son
+               curseur. Il passe par `g_refus`, qui a déjà sa réserve de deux
+               lignes dans le budget du pied : rien à ajouter à la hauteur. */
+            if (g_dernierClavier == Cible::Titre) {
+                g_refus = "Place d'abord ton curseur dans le texte de la page.";
+                g_refusRestant = kTramesMessage;
+                return;
+            }
             g_ordre = a_m;
             g_ordreEnAttente = true;
             g_refus.clear();
@@ -1531,8 +1618,11 @@ namespace FUI::Notes
          * ferme l'en-tête de la page et AVANT le calcul du pied. C'est le seul
          * endroit qui ne demande aucun ajustement de budget vertical —
          * `hautSaisie` se mesure sur ce qui reste APRÈS, donc le champ rétrécit
-         * de lui-même de la hauteur de la barre, et le mémo déplié ne pousse
-         * rien hors du panneau.
+         * de lui-même de la hauteur de la barre. Le mémo, lui, ne coûte plus une
+         * ligne du tout : il est l'INFOBULLE du « ? ». Déplié dans le flux, il
+         * poussait le PIED sous le bord du cadre en petite fenêtre — le plancher
+         * de trois lignes de la saisie gagnait, et c'est le compteur et les trois
+         * boutons qui sortaient.
          *
          * LES HUIT BOUTONS DE MARQUE SONT GRISÉS EN MODE LIRE au lieu d'être
          * retirés : la rangée garde sa géométrie d'un mode à l'autre (une barre
@@ -1560,8 +1650,10 @@ namespace FUI::Notes
                titre. Cela ne mange aucun clic — à la trame de l'ENFONCEMENT, le
                champ du titre a déjà rendu son `ActiveId` (imgui_widgets.cpp
                l.4901-4903 puis 5392), donc `g_champTitre.actif` y est faux et le
-               bouton répond du premier coup. La vraie garde, celle qui empêche
-               un ordre de partir, est en tête de `RaccourcisPlume`. */
+               bouton répond du premier coup — et c'est précisément pourquoi ce
+               grisage ne peut PAS servir de garde. La vraie garde est dans
+               `PoserOrdre`, sur le souvenir COLLANT `g_dernierClavier`, seul à
+               survivre de l'enfoncement au relâchement. */
             ImGui::BeginDisabled(!ecrire || g_champTitre.actif);
             for (int i = 0; i < 4; ++i) {
                 if (i > 0) ImGui::SameLine(0.0f, ecart);
@@ -1649,9 +1741,14 @@ namespace FUI::Notes
             if (BoutonBarre("Écrire##vk_notes_mode_ecrire", lEcrire, haut, ecrire) && !ecrire) {
                 /* Retour à l'écriture : le clavier va au champ, comme à
                    l'ouverture d'une page — sinon il faudrait cliquer dedans
-                   avant que la touche Entrée ne compte pour un saut de ligne. */
+                   avant que la touche Entrée ne compte pour un saut de ligne.
+                   ET LE SOUVENIR SUIT LE CLAVIER, comme au chargement d'une
+                   page : c'est le corps qui va l'avoir, donc c'est le corps
+                   qu'on retient — sans quoi un `Titre` vieux d'un passage en
+                   Lire refuserait la première marque du retour. */
                 g_mode = Mode::Ecrire;
                 g_focusDemande = true;
+                g_dernierClavier = Cible::Texte;
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s", "écrire la page — les marques s'y voient en clair");
@@ -1713,7 +1810,14 @@ namespace FUI::Notes
                déjà `(ctrl || alt)` pour l'INSERTION d'un caractère, mais
                l'événement de touche arrive quand même à ImGui, et
                `IsKeyPressed(key, bool)` interroge `ImGuiKeyOwner_Any`
-               (imgui.cpp:9746) — un champ actif ne se l'approprie pas. */
+               (imgui.cpp:9746) — un champ actif ne se l'approprie pas.
+               CE `return` SURVIT À LA GARDE DE `PoserOrdre`, ET CE N'EST PAS UN
+               DOUBLON : celle-là refuserait et AFFICHERAIT une ligne de refus à
+               chaque Ctrl+B tapé dans le titre. Le raccourci, lui, doit être
+               INERTE — on ne reproche rien à qui tape une combinaison dans un
+               champ qui ne s'en sert pas, et un bandeau surgissant sous le titre
+               pendant qu'on l'écrit serait du bruit. Les BOUTONS, eux, refusent
+               à voix haute : on les a visés, on mérite une réponse. */
             if (g_champTitre.actif) return;
             const ImGuiIO& io = ImGui::GetIO();
             if (!io.KeyCtrl || io.KeyAlt) return;
@@ -1785,6 +1889,17 @@ namespace FUI::Notes
                    qu'on ne retrouve plus dans la liste. */
                 GarderContreEchap(g_titre, sizeof(g_titre), g_titreFrappe);
                 g_champTitre.actif = ImGui::IsItemActive();
+                /* LE SOUVENIR SE LÈVE ICI, ET IL TIENT UNE TRAME DE PLUS QUE LE
+                   DRAPEAU. `IsItemDeactivated()` est ce qui couvre la trame de
+                   l'ENFONCEMENT d'un bouton de la barre : le champ y perd son
+                   `ActiveId` (imgui_widgets.cpp:4901-4903) et se nomme une
+                   dernière fois, une trame AVANT que `Sfx::Button` ne déclenche
+                   au relâchement. Sans cela, la décision serait prise sur un
+                   drapeau déjà retombé, et l'ordre partirait — voir le cartouche
+                   de `g_dernierClavier`. */
+                if (ImGui::IsItemActive() || ImGui::IsItemDeactivated()) {
+                    g_dernierClavier = Cible::Titre;
+                }
                 /* LE `PopID` VIENT APRÈS CES DEUX-LÀ : ils interrogent le
                    DERNIER item soumis, et c'est bien celui-ci qu'on veut. */
                 ImGui::PopID();
@@ -1904,6 +2019,18 @@ namespace FUI::Notes
                     &RappelSaisie, &g_champTexte);
                 GarderContreEchap(g_texte, sizeof(g_texte), g_texteFrappe);
                 g_champTexte.actif = ImGui::IsItemActive();
+                /* SYMÉTRIQUE DU TITRE, et c'est ce qui rend le chemin NORMAL
+                   intact : le joueur clique dans le corps, écrit, puis clique
+                   sur « G » — à la trame de l'enfoncement le corps se nomme
+                   encore (il est `Deactivated`), le souvenir reste `Texte`, et
+                   l'ordre passe avec le curseur, la sélection et la pile
+                   d'annulation qu'ImGui recycle (`state->ID` n'a pas changé).
+                   CE CHAMP EST DESSINÉ APRÈS LE TITRE, donc son mot est le
+                   dernier de la trame : cliquer du titre vers le corps rend
+                   bien `Texte`, jamais `Titre`. */
+                if (ImGui::IsItemActive() || ImGui::IsItemDeactivated()) {
+                    g_dernierClavier = Cible::Texte;
+                }
                 ImGui::PopID();
                 ImGui::PopStyleColor(4);
             } else {
