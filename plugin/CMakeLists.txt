@@ -83,6 +83,8 @@ set(SOURCES
     src/ui/Missives.cpp
     src/ui/Notes.h         # [vulkaar] le carnet de notes (F4)
     src/ui/Notes.cpp
+    src/ui/Riche.h         # [vulkaar] la plume : les marques de mise en forme des pages
+    src/ui/Riche.cpp
     src/ui/Clavier.h
     src/ui/Clavier.cpp
     src/ui/ClavierTables.gen.h

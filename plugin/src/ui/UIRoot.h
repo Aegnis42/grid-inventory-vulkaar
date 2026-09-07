@@ -53,6 +53,22 @@ namespace FUI::UIRoot
     // instead: not bold, but readable, which is the right way round.
     ImFont* BoldFont(const char* a_utf8);
 
+    // ★[vulkaar] Les deux faces PENCHÉES, pour la plume du carnet de notes.
+    // Elles sont cuites depuis Segoe UI (segoeuii / segoeuiz) et non depuis
+    // Malgun, qui n'a pas de cut italique : le latin de Malgun EST celui de
+    // Segoe UI, donc la penchée s'accorde au corps déjà à l'écran au lieu
+    // d'y poser une seconde typographie.
+    // ★Même règle que BoldFont : un seul point de code qu'elles ne savent
+    // pas épeler renvoie TOUTE la chaîne à la police principale, parce qu'un
+    // mot simplement droit vaut mieux qu'un mot à moitié en tofu.
+    ImFont* ItalicFont(const char* a_utf8);   // italique, sinon la principale
+
+    // ★La cascade descend d'une marche à la fois : gras-italique, sinon le
+    // GRAS, sinon la principale. Sur un poste sans segoeuiz un titre garde
+    // ainsi son poids et ne perd que son inclinaison, au lieu de retomber
+    // d'un coup au corps.
+    ImFont* BoldItalicFont(const char* a_utf8);
+
     void RegisterMenu();  // RE::UI::Register (call at kDataLoaded)
     bool TryInitD3D();    // idempotent ImGui init from renderer data
 

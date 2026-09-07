@@ -91,6 +91,55 @@
 // une colonne décalée fait une ligne jetée, qui se voit ; un texte mal
 // déséchappé, lui, s'affiche — simplement faux.
 //
+// ── LA PLUME : DE BELLES PAGES, ET LE RENDU N'EST QU'UNE VUE ──────────────
+// « je veux que pour la partie écriture on puisse faire saut de ligne, retour à
+// la ligne, mise en gras, italique, et tout ce qui permet de faire de belles
+// notes » (propriétaire, 07/09/2026).
+//
+// LES MARQUES VIVENT DANS LE TEXTE DE LA PAGE, et nulle part ailleurs : le
+// registre n'en sait rien, si bien qu'une page partagée emporte sa mise en
+// forme sans qu'un seul octet de protocole ait changé. En ligne, `**gras**`,
+// `*italique*`, `__souligné__`, `~~barré~~` ; en tête de ligne, `# titre`,
+// `## sous-titre`, `- puce`, `> citation`, et trois tirets ou plus font un
+// filet. Une ligne vide sépare deux paragraphes.
+//
+// IL N'Y A AUCUN CARACTÈRE D'ÉCHAPPEMENT, ET C'EST LE PONT QUI L'INTERDIT : la
+// tabulation y devient une espace et l'antislash s'y double (voir `Echapper`).
+// C'est donc UNE RÈGLE D'ADJACENCE qui tient ce rôle — une ouvrante n'en est
+// une que collée au caractère qui suit, une fermante que collée à celui qui
+// précède, et une ouvrante non fermée sur la MÊME ligne reste du texte. Ainsi
+// « 2 * 3 » et « 10 h - 12 h » s'écrivent sans y penser, et personne n'a à
+// apprendre à protéger une étoile.
+//
+// LE RENDU EST UNE VUE, JAMAIS UNE RÉÉCRITURE. `Riche::Dessiner` peint le
+// texte ; il ne le retouche pas, et l'écran ne réenregistre jamais ce qu'il
+// vient d'afficher. La conséquence est la seule qui compte ici : un défaut de
+// l'analyse fait une page MAL PEINTE, jamais une page ABÎMÉE. C'est ce qui
+// permet de toucher à la grammaire sans risquer ce que Notes.h interdit par
+// ailleurs — perdre ce qu'un joueur vient d'écrire.
+//
+// DEUX MODES, PARCE QU'IMGUI NE LAISSE PAS LE CHOIX. Un champ de saisie ne sait
+// afficher qu'UNE police et UNE couleur : le gras NE PEUT PAS s'y montrer. On
+// écrit donc les marques en clair (mode Écrire) et on les lit posées (mode
+// Lire) ; la bascule est une porte qui quitte la page, donc elle ENREGISTRE en
+// passant, comme toutes les autres. Une page reçue s'ouvre en Lire, une page à
+// nous en Écrire, et l'on va de l'un à l'autre dans les deux sens : une page
+// reçue est une COPIE QUI NOUS APPARTIENT.
+//
+// LA BORNE DE 2 000 CARACTÈRES COMPTE LES MARQUES, et c'est honnête : le champ
+// les montre, donc le joueur voit ce qui est compté. La monter serait une
+// décision du propriétaire, et il faudrait la monter DES DEUX CÔTÉS à la fois
+// (ici et dans `notes.ts`), sans quoi une page acceptée à la frappe se ferait
+// refuser à l'enregistrement — c'est-à-dire au moment où l'on referme.
+//
+// ÉCHAP FERME, ET NE PREND PLUS RIEN. Il fallait le corriger : tant qu'un champ
+// a le clavier, `GridMenu` avale tout le canal des événements utilisateur, si
+// bien qu'Échap n'allait pas fermer le panneau — il allait à ImGui, qui
+// ANNULAIT la frappe et laissait le panneau ouvert, alors que le pied promet
+// « ta page s'enregistre en se refermant ». L'écran garde donc une copie
+// d'ombre de chaque champ, la restitue sur la trame de l'annulation, et demande
+// la fermeture hors de la trame ImGui. Voir `GarderContreEchap` dans Notes.cpp.
+//
 // L'ÉCRAN REMPLACE LES DEUX PANNEAUX de la racine, comme l'établi, le panneau
 // d'appartenance, le comptoir de la banque et le courrier.
 

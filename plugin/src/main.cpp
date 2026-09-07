@@ -12,6 +12,7 @@
 #include "ui/Banque.h"   // [vulkaar] le comptoir de la banque
 #include "ui/Missives.h"   // [vulkaar] les missives
 #include "ui/Notes.h"      // [vulkaar] le carnet de notes
+#include "ui/Riche.h"      // [vulkaar] la plume : les marques de mise en forme des pages
 #include "ui/EssaiSwf.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
@@ -3522,6 +3523,13 @@ namespace
             FUI::Banque::Initialiser();              // [vulkaar] pont du comptoir de la banque
             FUI::Missives::Initialiser();            // [vulkaar] pont du panneau des missives
             FUI::Notes::Initialiser();               // [vulkaar] pont du carnet de notes
+            /* [vulkaar] L'auto-épreuve de la plume : elle n'ouvre aucun fichier
+               et n'appelle rien d'ImGui — elle ne fait que passer l'analyse des
+               marques et `Poser` sur un jeu de cas gravés, et journaliser le
+               nombre d'écarts. C'est la seule moitié du module qui peut abîmer
+               une page ; qu'elle dise « 0 écart » au lancement est la preuve
+               qu'on emporte en jeu. */
+            FUI::Riche::Autotest();
             RecolteInitialiser();              // vulkaar : la liste de recolte est de CETTE session
             PortesInitialiser();               // vulkaar : les noms de portes sont de CETTE session
             // FUI::EssaiSwf::Initialiser();  // vulkaar : ecran Scaleform d'essai —

@@ -4,6 +4,7 @@
 #include "ui/Etabli.h"
 #include "ui/Missives.h"
 
+#include "ui/Riche.h"
 #include "ui/Sfx.h"
 #include "ui/Theme.h"
 #include "ui/UIRoot.h"
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Voir Notes.h pour l'architecture — et pour les trois règles qui font qu'une
@@ -32,7 +34,7 @@ namespace FUI::Notes
         /* LES BORNES DU SERVEUR (contrat des notes : 60 caractères de titre,
            2 000 de texte), en CARACTÈRES et non en octets. Contrairement au
            courrier, elles ne se contentent pas de rougir un compteur : elles
-           ARRÊTENT LA FRAPPE (voir BornerCaracteres). Un champ qui dépasserait
+           ARRÊTENT LA FRAPPE (voir BornerAuxCaracteres). Un champ qui dépasserait
            ferait un enregistrement refusé, et un enregistrement refusé au moment
            où l'on referme le panneau, c'est une page perdue. */
         constexpr int kTitreMax = 60;
@@ -40,15 +42,39 @@ namespace FUI::Notes
         /* Les tampons, en OCTETS : chaque caractère peut en peser quatre en
            UTF-8, plus le zéro final. Larges exprès — ImGui borne la saisie aux
            octets, et un joueur qui écrit avec des accents n'a pas à taper moins
-           que les autres ; c'est BornerCaracteres qui compte les caractères. */
+           que les autres ; c'est BornerAuxCaracteres qui compte les caractères. */
         constexpr int kOctetsTitre = kTitreMax * 4 + 1;
         constexpr int kOctetsTexte = kTexteMax * 4 + 1;
 
-        /* Les deux bornes, en variables : le rappel de saisie d'ImGui ne reçoit
-           qu'un `void*`, et lui passer l'adresse d'une constante demanderait un
-           const_cast à chaque appel — une verrue pour rien. */
-        int g_borneTitre = kTitreMax;
-        int g_borneTexte = kTexteMax;
+        /**
+         * CE QUE LE RAPPEL DE SAISIE SAIT D'UN CHAMP — et il y en a DEUX.
+         *
+         * Le rappel d'ImGui ne reçoit qu'un `void*` : il portait autrefois
+         * l'adresse d'un `int` (la borne), et cela suffisait tant qu'il n'avait
+         * qu'à compter des caractères. La plume lui demande davantage — où est
+         * le curseur, où est la sélection —, donc le `void*` porte désormais
+         * CETTE structure. LES DEUX APPELS CHANGENT ENSEMBLE : un `UserData`
+         * resté un `int*` d'un côté serait relu comme un `Champ*` de l'autre,
+         * c'est-à-dire un comportement indéfini que rien ne signalerait.
+         *
+         * LES UNITÉS NE SE MÉLANGENT PAS, et c'est écrit ici une fois pour
+         * toutes : `borne` compte des CARACTÈRES (points de code — « é » en
+         * fait un), parce que c'est ce que le serveur borne ; `curseur`,
+         * `selDebut` et `selFin` sont des OCTETS, parce que c'est la seule
+         * unité qu'ImGui connaisse. Tout calcul qui les rapproche doit dire
+         * laquelle des deux il manipule.
+         */
+        struct Champ
+        {
+            int  borne;      // en CARACTÈRES — la borne du serveur
+            int  curseur;    // en OCTETS — relevé à CHAQUE appel du rappel
+            int  selDebut;   // en OCTETS — peut être PLUS GRAND que selFin
+            int  selFin;     // en OCTETS
+            bool actif;      // le champ avait-il le clavier à la trame d'avant
+        };
+
+        Champ g_champTitre{ kTitreMax, 0, 0, 0, false };
+        Champ g_champTexte{ kTexteMax, 0, 0, 0, false };
 
         struct Page
         {
@@ -131,6 +157,90 @@ namespace FUI::Notes
         bool        g_partage = false;    // la liste « à qui tends-tu cette page ? »
         bool        g_confirme = false;   // la confirmation de suppression
         int         g_messageRestant = 0; // trames avant effacement du message
+
+        // ── LA PLUME : deux modes, un ordre, et l'ombre des deux champs ───
+        //
+        // POURQUOI DEUX MODES. Un champ de saisie d'ImGui ne sait afficher
+        // qu'UNE police et UNE couleur — c'est une propriété du widget, pas un
+        // choix de notre part : le gras ne PEUT PAS s'afficher dans le champ.
+        // On écrit donc les marques en clair (`**gras**`) et on les lit mises
+        // en forme. Le texte stocké, lui, ne change JAMAIS entre les deux : le
+        // mode Lire est une VUE, et un défaut de l'analyse ne peut pas abîmer
+        // une page (voir Notes.h).
+        enum class Mode
+        {
+            Ecrire,   // le champ, les marques en clair
+            Lire      // la page dessinée, mise en forme
+        };
+        Mode g_mode = Mode::Ecrire;
+        /* LE MÉMO DES MARQUES N'A PLUS D'ÉTAT — c'est une INFOBULLE du `?`, pas
+           un bloc qu'on déplie. Déplié dans le flux, il pesait neuf lignes et
+           un filet ; en 1280×720 le budget vertical tombait sous le plancher de
+           trois lignes du champ, et c'est le PIED qui passait sous le bord du
+           cadre : la question « Supprimer « X » ? C'est sans retour. » et ses
+           deux réponses ne montraient plus que deux pixels d'encre. Une
+           confirmation qu'on ne lit pas n'en est plus une. En infobulle, l'aide
+           ne coûte plus une seule ligne de hauteur — c'est une aide qu'on
+           consulte, pas un bloc qui rétrécit la page. */
+
+        /* LE FOCUS DEMANDÉ, UNE SEULE FOIS. Rien ne donnait le clavier au champ
+           à l'ouverture d'une page : il fallait cliquer dedans pour que la
+           touche Entrée compte comme un saut de ligne. On le demande donc au
+           chargement — et cela protège d'un second défaut : tant qu'un champ a
+           le clavier, `GridMenu` avale tout le canal des événements
+           utilisateur, donc le E « Activer » que le jeu traduit en Entrée ne
+           vient plus insérer un saut de ligne fantôme. */
+        bool g_focusDemande = false;
+
+        /**
+         * L'ORDRE EN ATTENTE — la SEULE voie pour qu'un bouton touche au texte.
+         *
+         * Un bouton ne peut pas écrire dans `g_texte` : tant que le champ est
+         * actif, ImGui recopie son propre état par-dessus à chaque trame, et la
+         * modification disparaîtrait sans un mot. On dépose donc un ORDRE, et
+         * c'est le rappel de saisie — qui, lui, tourne DANS ImGui, avec
+         * `InsertChars`/`DeleteChars` — qui l'exécute.
+         *
+         * Deux chemins y mènent. Le clic sur un bouton a d'abord DÉSACTIVÉ le
+         * champ (ImGui y a donc déjà déposé le texte final) : on redemande le
+         * clavier à la trame suivante, et comme le tampon n'a PAS été touché
+         * entre-temps, ImGui recycle son état — curseur, sélection et pile
+         * d'annulation survivent. Le raccourci clavier (Ctrl+B…), lui, ne fait
+         * jamais perdre le focus : l'ordre est appliqué dans la trame même.
+         */
+        bool          g_ordreEnAttente = false;
+        Riche::Marque g_ordre = Riche::Marque::Gras;
+        /* CE QUE L'ÉCRAN DIT QUAND `Poser` A REFUSÉ. Une insertion de marque
+           peut franchir la borne des 2 000 caractères SANS passer par la frappe :
+           `Poser` refuse alors et ne change rien, et le silence serait pris
+           pour un bouton cassé. */
+        std::string g_refus;
+        int         g_refusRestant = 0;
+
+        /**
+         * L'OMBRE DES DEUX CHAMPS, ET CE QU'ELLE RÉPARE (voir Notes.h).
+         *
+         * `GridMenu` avale tout le canal des événements utilisateur tant qu'un
+         * champ a le clavier — Échap n'allait donc PAS à `CloseTopWindow`, il
+         * allait à ImGui, qui sur un champ actif REVIENT au texte d'avant
+         * l'activation (`clear_active_id = revert_edit = true`, imgui_widgets.cpp
+         * l.5143, puis le texte de repli est recopié dans notre tampon l.5230).
+         * En jeu : on cliquait dans la page, on écrivait, on tapait Échap — le
+         * texte disparaissait ET le panneau ne se fermait même pas, alors que le
+         * pied annonce « ta page s'enregistre en se refermant ». C'est
+         * exactement la faute que Notes.h interdit.
+         *
+         * La parade tient en trois lignes et ne touche à rien d'interne : on
+         * garde une copie du tampon à chaque trame où le champ est actif — ImGui
+         * y écrit son état à chaque trame, donc l'ombre est celle de la trame
+         * d'AVANT l'annulation —, et sur la trame où le champ se désactive avec
+         * Échap enfoncé, on la recopie. L'annulation d'ImGui est défaite ; la
+         * fermeture, elle, est demandée à `Tick` — HORS de la trame ImGui —,
+         * par la MÊME porte que le canal des événements utilisateur.
+         */
+        std::string g_titreFrappe;
+        std::string g_texteFrappe;
+        bool        g_echapDemande = false;
 
         // ---- plomberie ----
         unsigned long long g_seqGeste = 0;
@@ -294,22 +404,145 @@ namespace FUI::Notes
          * `DeleteChars` est la seule façon correcte de rogner : elle recale le
          * curseur et la sélection d'ImGui, ce qu'un `Buf[i] = 0` ne fait pas.
          */
-        int BornerCaracteres(ImGuiInputTextCallbackData* a_donnees)
+        void BornerAuxCaracteres(ImGuiInputTextCallbackData* a_donnees, int a_max)
         {
-            const int max = *static_cast<const int*>(a_donnees->UserData);
-            int n = 0;
-            int coupe = -1;
+            int n = 0;          // des CARACTÈRES
+            int coupe = -1;     // un indice d'OCTET, l'unité d'ImGui
             for (int i = 0; i < a_donnees->BufTextLen; ++i) {
                 if ((static_cast<unsigned char>(a_donnees->Buf[i]) & 0xC0) != 0x80) {
                     ++n;
-                    if (n == max + 1) {
+                    if (n == a_max + 1) {
                         coupe = i;
                         break;
                     }
                 }
             }
             if (coupe >= 0) a_donnees->DeleteChars(coupe, a_donnees->BufTextLen - coupe);
+        }
+
+        /**
+         * LE RAPPEL DE SAISIE, UN SEUL POUR LES DEUX CHAMPS.
+         *
+         * IL EST APPELÉ AVEC DEUX DRAPEAUX, ET C'EST VOULU : `CallbackEdit`
+         * seul ne se déclenche que sur une trame où l'on a TAPÉ, or l'ordre
+         * d'une marque arrive justement sur une trame où l'on n'a rien tapé —
+         * celle où le champ vient de retrouver le clavier. `CallbackAlways`
+         * couvre celle-là.
+         *
+         * ET LES DEUX SONT MUTUELLEMENT EXCLUSIFS SUR UNE TRAME : ImGui les
+         * choisit dans une chaîne `if / else if` (imgui_widgets.cpp l.5278-5285),
+         * si bien que la trame où l'on tape est précisément celle où `Always`
+         * est SAUTÉ. D'où la règle : on relève le curseur et la sélection à
+         * CHAQUE appel, quel que soit `EventFlag`, sans aucun `else`. Un relevé
+         * fait sous `Always` seulement serait vieux d'une frappe, et la marque
+         * se poserait à côté.
+         *
+         * ON LIT LA SÉLECTION AVANT TOUTE INSERTION : `InsertChars` et
+         * `DeleteChars` effacent la sélection d'ImGui (c'est écrit dans imgui.h
+         * l.2658), donc la relire après ne rendrait plus rien.
+         *
+         * ON NE RETIENT JAMAIS `d->Buf` : il pointe l'interne d'ImGui, qui le
+         * réalloue quand il veut. On en fait une copie, le temps de l'appel.
+         */
+        int RappelSaisie(ImGuiInputTextCallbackData* a_donnees)
+        {
+            Champ* champ = static_cast<Champ*>(a_donnees->UserData);
+            if (champ == nullptr) return 0;   // ne peut pas arriver ; ne coûte rien
+            champ->actif = true;
+
+            /* LE RELEVÉ, à chaque appel et sans condition. Des OCTETS. */
+            champ->curseur = a_donnees->CursorPos;
+            champ->selDebut = a_donnees->SelectionStart;
+            champ->selFin = a_donnees->SelectionEnd;
+
+            /* L'ORDRE EN ATTENTE, et seulement sur le champ du TEXTE : le titre
+               est une ligne, il n'a pas de mise en forme. L'ordre est consommé
+               qu'il aboutisse ou non — un ordre qui survivrait à son refus se
+               rejouerait à la trame d'après, indéfiniment. */
+            if (champ == &g_champTexte && g_ordreEnAttente) {
+                g_ordreEnAttente = false;
+                /* LA SÉLECTION PEUT ÊTRE À L'ENVERS : on sélectionne aussi de
+                   la droite vers la gauche, et alors `SelectionStart` est plus
+                   GRAND que `SelectionEnd`. Sans ce redressement, la marque se
+                   posait sur un intervalle vide. */
+                int debut = champ->selDebut;
+                int fin = champ->selFin;
+                if (debut > fin) std::swap(debut, fin);
+                /* Pas de sélection : c'est le CURSEUR qui compte. `selDebut` et
+                   `selFin` sont alors égaux, mais rien ne garantit qu'ils
+                   valent le curseur — stb tient les deux séparément. */
+                if (debut == fin) {
+                    debut = champ->curseur;
+                    fin = champ->curseur;
+                }
+                const std::string avant(a_donnees->Buf, static_cast<std::size_t>(a_donnees->BufTextLen));
+                /* `Poser` est TOTALE : elle redresse elle-même ce qui dépasse
+                   et compte la borne en CARACTÈRES, pas en octets. Elle rend
+                   `possible = false` quand la marque ferait franchir la borne —
+                   et alors rien ne change, parce qu'une page tronquée à
+                   l'enregistrement est exactement ce que la borne évite. */
+                const Riche::Pose pose = Riche::Poser(avant, debut, fin, g_ordre, champ->borne);
+                /* LA SECONDE SERRURE, EN OCTETS. `Poser` compte en caractères,
+                   ImGui en octets : un texte qui tiendrait dans la borne des
+                   2 000 caractères mais pas dans le tampon ferait retourner
+                   `InsertChars` SANS RIEN INSÉRER (imgui.cpp, sortie muette
+                   quand la place manque et qu'aucun rappel de redimension n'est
+                   posé) — et le `DeleteChars` d'avant, lui, aurait déjà eu
+                   lieu. C'est-à-dire la page entière effacée sans un mot. On
+                   vérifie donc AVANT d'effacer quoi que ce soit. */
+                const bool tientDansLeTampon =
+                    pose.possible &&
+                    pose.texte.size() < static_cast<std::size_t>(a_donnees->BufSize);
+                if (!tientDansLeTampon) {
+                    g_refus = "Pas la place : la page atteindrait 2 000 caractères.";
+                    g_refusRestant = kTramesMessage;
+                } else if (pose.texte != avant) {
+                    a_donnees->DeleteChars(0, a_donnees->BufTextLen);
+                    if (!pose.texte.empty()) {
+                        a_donnees->InsertChars(0, pose.texte.c_str(),
+                            pose.texte.c_str() + pose.texte.size());
+                    }
+                    /* LA SÉLECTION SE REPLACE, en octets et bornée au tampon :
+                       `SetSelection` en fait l'affirmation (imgui.h l.2663), et
+                       une affirmation fausse tombe en Debug. Sans cela, poser
+                       une marque sur un mot le désélectionnait — on ne pouvait
+                       pas enchaîner gras PUIS italique sans re-sélectionner. */
+                    const int borneOctets = a_donnees->BufTextLen;
+                    const int f = std::clamp(pose.fin, 0, borneOctets);
+                    const int d = std::clamp(pose.debut, 0, f);
+                    a_donnees->SetSelection(d, f);
+                }
+            }
+
+            BornerAuxCaracteres(a_donnees, champ->borne);
+
+            /* LE ROGNAGE ET L'INSERTION ONT RECALÉ LE CURSEUR : on relit, sans
+               quoi le prochain ordre partirait d'une position périmée. */
+            champ->curseur = a_donnees->CursorPos;
+            champ->selDebut = a_donnees->SelectionStart;
+            champ->selFin = a_donnees->SelectionEnd;
             return 0;
+        }
+
+        /**
+         * LA PARADE D'ÉCHAP, À POSER JUSTE APRÈS UN CHAMP (voir le cartouche de
+         * `g_texteFrappe`). Deux trames y jouent : celle d'avant a rempli
+         * l'ombre, celle-ci défait l'annulation d'ImGui et demande la
+         * fermeture à `Tick`.
+         *
+         * L'ORDRE DES DEUX BRANCHES COMPTE. Sur la trame d'Échap, le champ
+         * n'est plus actif (ImGui a rendu l'`ActiveId` avant de nous rendre la
+         * main) : rafraîchir l'ombre AVANT de la lire recopierait le texte déjà
+         * annulé, c'est-à-dire exactement ce qu'on cherche à ne pas garder.
+         */
+        void GarderContreEchap(char* a_tampon, std::size_t a_octets, std::string& a_ombre)
+        {
+            if (ImGui::IsItemDeactivated() && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                std::snprintf(a_tampon, a_octets, "%s", a_ombre.c_str());
+                g_echapDemande = true;
+            } else if (ImGui::IsItemActive()) {
+                a_ombre.assign(a_tampon);
+            }
         }
 
         /** `<seq>\t<action>[\t<reste>]`. Le pont des notes n'a qu'un sujet : pas
@@ -500,11 +733,41 @@ namespace FUI::Notes
             g_enregistrementEnvoye = false;
             g_partage = false;
             g_confirme = false;
+            /* ET TOUS LES DRAPEAUX DE LA PLUME AVEC. Un mode Lire rescapé
+               montrerait la page suivante en lecture sans qu'on l'ait demandé ;
+               un ordre en attente se poserait sur un texte qui n'est plus le
+               sien ; une ombre survivante ressusciterait, à la prochaine touche
+               Échap, le texte d'une page qu'on vient de quitter. Aucun de ces
+               trois-là ne se verrait avant d'avoir coûté une page. */
+            g_mode = Mode::Ecrire;
+            g_focusDemande = false;
+            g_ordreEnAttente = false;
+            g_refus.clear();
+            g_refusRestant = 0;
+            g_titreFrappe.clear();
+            g_texteFrappe.clear();
+            g_echapDemande = false;
+            g_champTitre.curseur = g_champTitre.selDebut = g_champTitre.selFin = 0;
+            g_champTexte.curseur = g_champTexte.selDebut = g_champTexte.selFin = 0;
+            g_champTitre.actif = false;
+            g_champTexte.actif = false;
         }
 
         /** Charge dans les tampons la page que le SERVEUR dit ouverte. C'est le
          *  SEUL endroit où la saisie en cours est remplacée : une poussée qui
-         *  laisse la même page ouverte ne touche à rien (voir Notes.h). */
+         *  laisse la même page ouverte ne touche à rien (voir Notes.h).
+         *
+         *  L'ÉCHANGE DES TAMPONS N'EST SÛR QUE GRÂCE AUX `PushID(g_chargee)` DE
+         *  `BlocPage` — qu'on ne retire donc PAS un jour comme décoratifs. Cette
+         *  fonction peut être appelée pendant que le champ est ENCORE ACTIF (le
+         *  geste « créer » : le serveur ouvre lui-même la page neuve alors que
+         *  l'ancienne et son champ sont toujours à l'écran), et un `InputText`
+         *  actif ignore le tampon de l'appelant pour y réécrire son propre état
+         *  à la fin de la trame (imgui_widgets.cpp l.4800-4801 et 5337-5342). Ce
+         *  qu'on écrit ici serait alors remplacé par le texte de la page qu'on
+         *  vient de quitter — et la page neuve partirait au registre en portant
+         *  le texte de l'autre. C'est l'identifiant qui change qui fait du champ
+         *  un widget NEUF, lequel relit le tampon. */
         void ChargerPageOuverte()
         {
             const Page* p = PageParId(g_ouverteServeur);
@@ -536,6 +799,28 @@ namespace FUI::Notes
             g_enregistrementEnvoye = false;
             g_partage = false;
             g_confirme = false;
+
+            /* ── LA PLUME REPART AVEC LA PAGE ──────────────────────────────
+               LE MODE SUIT LA PROVENANCE : une page REÇUE s'ouvre en Lire —
+               on nous l'a tendue pour qu'on la lise, et ses marques n'auraient
+               aucun sens en clair au premier coup d'œil —, une page à nous
+               s'ouvre en Écrire. La bascule reste offerte dans les deux sens :
+               une page reçue est une COPIE QUI NOUS APPARTIENT, et le serveur
+               autorise à l'écrire.
+               LE CLAVIER SE DEMANDE UNE FOIS, et seulement si l'on écrit :
+               le joueur tape sans avoir à cliquer dans le pavé. */
+            g_mode = p->matricule.empty() ? Mode::Ecrire : Mode::Lire;
+            g_focusDemande = (g_mode == Mode::Ecrire);
+            g_ordreEnAttente = false;
+            g_refus.clear();
+            g_refusRestant = 0;
+            /* L'OMBRE PART DE LA VÉRITÉ. Sans cela, un Échap tapé avant d'avoir
+               écrit une seule lettre recopierait l'ombre de la page d'AVANT
+               par-dessus celle-ci — et l'enregistrement de la fermeture
+               l'emporterait au registre. */
+            g_titreFrappe.assign(g_titre);
+            g_texteFrappe.assign(g_texte);
+            g_echapDemande = false;
         }
 
         void LireEtat()
@@ -894,6 +1179,11 @@ namespace FUI::Notes
             g_demandeeDepuis = g_tic;
             g_partage = false;
             g_confirme = false;
+            /* L'ORDRE EN ATTENTE MEURT AVEC LA PAGE QU'ON QUITTE : il a été
+               calculé sur une sélection qui ne veut plus rien dire, et le champ
+               disparaît pendant l'attente du texte — l'ordre resterait pendu
+               jusqu'à la page suivante, où il se poserait tout seul. */
+            g_ordreEnAttente = false;
         }
 
         void ColonneGauche(float a_S)
@@ -916,6 +1206,12 @@ namespace FUI::Notes
                    ouvrir la page d'à côté un jour sur dix. */
                 EnregistrerSiModifiee();
                 EcrireGeste("creer", "");
+                /* L'ORDRE EN ATTENTE MEURT ICI, comme dans `DemanderPage` : le
+                   champ RESTE à l'écran pendant l'aller-retour au serveur (on ne
+                   pose pas `g_demandee`, on ne sait pas encore quel id la page
+                   recevra), donc un ordre posé juste avant se poserait sur la
+                   page NEUVE, sur une sélection qui ne veut plus rien dire. */
+                g_ordreEnAttente = false;
             }
             RetirerStyleBouton();
             ImGui::Spacing();
@@ -1004,6 +1300,14 @@ namespace FUI::Notes
          *  l'instant du clic. */
         void BlocPartage(const Page& a_p, std::size_t a_rang, float a_S)
         {
+            /* LES DEUX CHAMPS NE SONT PAS DESSINÉS ICI : leur drapeau « actif »
+               resterait sur la valeur de la trame d'avant, et un ordre déposé
+               juste avant le clic sur « Partager » se croirait encore attendu
+               par un champ qui n'existe plus. On éteint les deux. */
+            g_champTitre.actif = false;
+            g_champTexte.actif = false;
+            g_ordreEnAttente = false;
+
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
             ImGui::Text("Tendre « %s »", Etiquette(a_p, a_rang).c_str());
             ImGui::PopStyleColor();
@@ -1061,24 +1365,444 @@ namespace FUI::Notes
             RetirerStyleBouton();
         }
 
+        // ── la barre d'outils de la plume ────────────────────────────────
+
+        /** LES QUATRE MARQUES EN LIGNE, dans l'ordre de la barre. Le libellé
+         *  porte son identifiant : `Sfx::Button` tire l'identité du bouton de
+         *  la partie qui suit `##`, et celle-là ne bouge jamais. */
+        struct BoutonMarque
+        {
+            Riche::Marque marque;
+            const char*   libelle;   // « G##vk_notes_gras »
+            const char*   lettre;    // la partie visible, pour mesurer le trait
+            char          face;      // 'g' grasse, 'i' italique, ' ' la courante
+            char          trait;     // 's' un filet dessous, 'b' un filet au travers
+        };
+
+        const BoutonMarque kBoutonsEnLigne[4] = {
+            { Riche::Marque::Gras,     "G##vk_notes_gras",     "G", 'g', ' ' },
+            { Riche::Marque::Italique, "I##vk_notes_italique", "I", 'i', ' ' },
+            { Riche::Marque::Souligne, "S##vk_notes_souligne", "S", ' ', 's' },
+            { Riche::Marque::Barre,    "B##vk_notes_barre",    "B", ' ', 'b' },
+        };
+
+        /** LES QUATRE MARQUES EN BLOC : elles prennent la LIGNE où l'on est,
+         *  pas la sélection. « Liste » plutôt que « Puce » : c'est le mot que
+         *  le joueur cherche, et le module garde le sien. */
+        struct BoutonBloc
+        {
+            Riche::Marque marque;
+            const char*   libelle;
+            const char*   visible;   // pour `LargeurBouton`, qui mesure l'encre
+        };
+
+        const BoutonBloc kBoutonsEnBloc[4] = {
+            { Riche::Marque::Titre,    "Titre##vk_notes_m_titre",       "Titre" },
+            { Riche::Marque::Puce,     "Liste##vk_notes_m_liste",       "Liste" },
+            { Riche::Marque::Citation, "Citation##vk_notes_m_citation", "Citation" },
+            { Riche::Marque::Filet,    "Filet##vk_notes_m_filet",       "Filet" },
+        };
+
+        /** POSER UN ORDRE — la seule façon dont un bouton ou un raccourci
+         *  touche au texte (voir le cartouche de `g_ordreEnAttente`). Le refus
+         *  précédent s'efface : on vient de redemander, la vieille excuse n'a
+         *  plus lieu d'être affichée. */
+        void PoserOrdre(Riche::Marque a_m)
+        {
+            g_ordre = a_m;
+            g_ordreEnAttente = true;
+            g_refus.clear();
+            g_refusRestant = 0;
+        }
+
+        /** LE FILET QUI EXPLIQUE LE BOUTON : le `S` porte un trait dessous, le
+         *  `B` un trait au travers, et la barre se lit alors sans infobulle.
+         *  C'EST UN TRAIT, PAS UN GLYPHE : un caractère combinant ou décoratif
+         *  se peindrait en tofu sur un poste dont la police ne le connaît pas,
+         *  et rien ne le dirait — la même raison qui fait dessiner à la main
+         *  les puces et les filets du mode Lire. */
+        void TraitDeBouton(char a_genre, const char* a_lettre, float a_S)
+        {
+            const ImVec2 a = ImGui::GetItemRectMin();
+            const ImVec2 b = ImGui::GetItemRectMax();
+            const float cx = (a.x + b.x) * 0.5f;
+            const float cy = (a.y + b.y) * 0.5f;
+            const float demi = ImGui::CalcTextSize(a_lettre).x * 0.5f + 1.0f * a_S;
+            // 's' : sous l'encre ; 'b' : en plein milieu de la lettre.
+            const float y = (a_genre == 's') ? cy + ImGui::GetFontSize() * 0.42f : cy;
+            ImGui::GetWindowDrawList()->AddLine(ImVec2(cx - demi, y), ImVec2(cx + demi, y),
+                ImGui::GetColorU32(ImGuiCol_Text), 1.0f);
+        }
+
+        /** L'INFOBULLE D'UNE MARQUE, ET ELLE PARLE MÊME GRISÉE. Sans le
+         *  drapeau, ImGui ne rapporte AUCUN survol sur un item désactivé, et un
+         *  bouton grisé est alors parfaitement muet : le joueur ne saurait pas
+         *  qu'il lui suffit de repasser en « Écrire ». Même raison que le bouton
+         *  « Enregistrer » du pied. */
+        void InfobulleMarque(Riche::Marque a_m, bool a_ecrire)
+        {
+            if (!ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) return;
+            if (!a_ecrire) {
+                ImGui::SetTooltip("%s — repasse en « Écrire » pour t'en servir", Riche::Nom(a_m));
+                return;
+            }
+            /* GRISÉE PARCE QUE LE TITRE A LE CLAVIER : il faut le DIRE, sinon la
+               rangée s'éteint sans raison visible pendant qu'on tape le titre.
+               Et surtout ne pas annoncer « repasse en Écrire » — on y est. */
+            if (g_champTitre.actif) {
+                ImGui::SetTooltip("%s — le titre ne se met pas en forme ; clique dans la page",
+                    Riche::Nom(a_m));
+                return;
+            }
+            ImGui::SetTooltip("%s   %s\n%s", Riche::Nom(a_m), Riche::Exemple(a_m), Riche::Aide(a_m));
+        }
+
+        /** LE MÉMO DES MARQUES — L'INFOBULLE DU `?`, ET RIEN D'AUTRE.
+         *
+         *  IL NE REDIT PAS LA GRAMMAIRE À SA FAÇON : il la demande au module qui
+         *  l'applique (`Riche::Nom` et `Riche::Exemple`). Une aide recopiée à la
+         *  main divergerait de l'analyse au premier ajustement, et c'est l'aide
+         *  qui aurait tort, sans que rien ne tombe pour le signaler.
+         *
+         *  IL NE COÛTE PLUS UN SEUL PIXEL DE HAUTEUR, et c'est la raison d'être
+         *  de l'infobulle : dessiné dans le flux, il valait neuf lignes de plus
+         *  entre la barre et le champ, le budget vertical butait sur le plancher
+         *  de trois lignes du champ, et le pied — compteur, boutons, et la
+         *  question d'une suppression sans retour — sortait du cadre.
+         *
+         *  LA LARGEUR EST DONNÉE, PAS SUBIE : sans position de repli, ImGui
+         *  peindrait le troisième paragraphe sur une seule ligne large comme
+         *  l'écran. */
+        void MemoDesMarques(float a_S)
+        {
+            std::string enLigne;
+            for (const auto& b : kBoutonsEnLigne) {
+                if (!enLigne.empty()) enLigne += "      ";
+                enLigne += Riche::Nom(b.marque);
+                enLigne += " ";
+                enLigne += Riche::Exemple(b.marque);
+            }
+            std::string enBloc;
+            for (const auto& b : kBoutonsEnBloc) {
+                if (!enBloc.empty()) enBloc += "      ";
+                enBloc += Riche::Nom(b.marque);
+                enBloc += " ";
+                enBloc += Riche::Exemple(b.marque);
+            }
+
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 400.0f * a_S);
+            ImGui::TextWrapped("%s", enLigne.c_str());
+            ImGui::TextWrapped("En tête de ligne : %s", enBloc.c_str());
+            /* LA RÈGLE D'ADJACENCE VAUT L'ÉCHAPPEMENT, et il faut la dire : il
+               n'existe AUCUN caractère d'échappement dans notre grammaire (la
+               tabulation est interdite et l'antislash est réservé par le pont),
+               donc c'est l'adjacence — et elle seule — qui laisse écrire
+               « 2 * 3 » sans y penser. */
+            ImGui::TextWrapped("%s", "Une ligne vide sépare deux paragraphes. Une marque ne s'ouvre "
+                                     "que collée au mot qui suit, ne se ferme que collée au mot qui "
+                                     "précède, et doit se fermer sur la même ligne : « 2 * 3 » et "
+                                     "« 10 h - 12 h » s'écrivent tels quels.");
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+
+        /** UN BOUTON DE LA BARRE. L'IDENTITÉ D'UN BOUTON VIENT DE SON LIBELLÉ
+         *  (Sfx.h) : un libellé qui change entre l'appui et le relâchement donne
+         *  un bouton qu'on NE PEUT PAS cliquer — l'appui et le relâchement
+         *  tombent sur deux widgets différents et le clic ne se termine jamais.
+         *  Donc le libellé est FIXE, suffixé de son identifiant, et l'état actif
+         *  ne se dit QUE dans la couleur. */
+        bool BoutonBarre(const char* a_libelle, float a_largeur, float a_haut, bool a_actif)
+        {
+            if (a_actif) {
+                ImGui::PushStyleColor(ImGuiCol_Button, Theme::Acc(0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
+            }
+            const bool clic = Sfx::Button(a_libelle, ImVec2(a_largeur, a_haut));
+            if (a_actif) ImGui::PopStyleColor(2);
+            return clic;
+        }
+
+        /**
+         * LA BARRE D'OUTILS, UNE SEULE RANGÉE.
+         *
+         * SA PLACE N'EST PAS ARBITRAIRE : elle est posée APRÈS le filet qui
+         * ferme l'en-tête de la page et AVANT le calcul du pied. C'est le seul
+         * endroit qui ne demande aucun ajustement de budget vertical —
+         * `hautSaisie` se mesure sur ce qui reste APRÈS, donc le champ rétrécit
+         * de lui-même de la hauteur de la barre, et le mémo déplié ne pousse
+         * rien hors du panneau.
+         *
+         * LES HUIT BOUTONS DE MARQUE SONT GRISÉS EN MODE LIRE au lieu d'être
+         * retirés : la rangée garde sa géométrie d'un mode à l'autre (une barre
+         * qui se vide ferait sauter tout ce qui est en dessous à chaque
+         * bascule), et un bouton grisé qui répond au survol dit POURQUOI il ne
+         * répond pas au clic. Un bouton absent, lui, ne dit rien.
+         */
+        void BarreOutils(float a_S)
+        {
+            const bool ecrire = (g_mode == Mode::Ecrire);
+            const float haut = ImGui::GetFrameHeight();
+            const float cote = (std::max)(haut, 26.0f * a_S);
+            const float ecart = 4.0f * a_S;
+            /* LA LARGEUR SE PREND AVANT LE PREMIER BOUTON : une fois la rangée
+               commencée, `GetContentRegionAvail` ne rend plus que ce qui reste
+               à droite, et la bascule se collerait au dernier bouton posé. */
+            const float dispo = ImGui::GetContentRegionAvail().x;
+
+            PousserStyleBouton();
+
+            // ---- les quatre marques en ligne ----
+            /* GRISÉES AUSSI TANT QUE LE TITRE A LE CLAVIER, et c'est un TÉMOIN,
+               pas une garde : un titre ne se met pas en forme, et sans ce
+               grisage la rangée aurait l'air de marcher pendant qu'on tape le
+               titre. Cela ne mange aucun clic — à la trame de l'ENFONCEMENT, le
+               champ du titre a déjà rendu son `ActiveId` (imgui_widgets.cpp
+               l.4901-4903 puis 5392), donc `g_champTitre.actif` y est faux et le
+               bouton répond du premier coup. La vraie garde, celle qui empêche
+               un ordre de partir, est en tête de `RaccourcisPlume`. */
+            ImGui::BeginDisabled(!ecrire || g_champTitre.actif);
+            for (int i = 0; i < 4; ++i) {
+                if (i > 0) ImGui::SameLine(0.0f, ecart);
+                const BoutonMarque& b = kBoutonsEnLigne[i];
+                /* LA BARRE S'EXPLIQUE D'ELLE-MÊME : le `G` est dessiné dans la
+                   police GRASSE, le `I` dans l'ITALIQUE.
+                   `PushFont(police, 0)` GARDE LA TAILLE DE BASE COURANTE : on
+                   change de face, pas de corps. Repasser `GetFontSize()` ici
+                   serait donner une taille FINALE là où ImGui attend une taille
+                   de BASE — la police se cuirait une fois de plus par trame,
+                   pour un résultat faux. */
+                ImFont* face = (b.face == 'g') ? UIRoot::BoldFont(b.lettre)
+                             : (b.face == 'i') ? UIRoot::ItalicFont(b.lettre)
+                                               : nullptr;
+                if (face != nullptr) ImGui::PushFont(face, 0.0f);
+                const bool clic = BoutonBarre(b.libelle, cote, haut, false);
+                if (face != nullptr) ImGui::PopFont();
+                if (b.trait != ' ') TraitDeBouton(b.trait, b.lettre, a_S);
+                InfobulleMarque(b.marque, ecrire);
+                if (clic) PoserOrdre(b.marque);
+            }
+
+            // ---- les quatre marques en bloc ----
+            for (const auto& b : kBoutonsEnBloc) {
+                ImGui::SameLine(0.0f, ecart);
+                const bool clic = BoutonBarre(b.libelle, LargeurBouton(b.visible, a_S), haut, false);
+                InfobulleMarque(b.marque, ecrire);
+                if (clic) PoserOrdre(b.marque);
+            }
+            ImGui::EndDisabled();
+
+            // ---- le mémo, qui reste offert dans les deux modes ----
+            /* LE `?` NE BASCULE RIEN : le mémo est SON INFOBULLE, donc il est
+               déjà ouvert quand la souris est dessus, et il n'y a plus rien à
+               déplier. C'est ce qui lui retire tout coût vertical — voir le
+               cartouche de `MemoDesMarques`. Le bouton reste un bouton pour que
+               la rangée garde sa géométrie et pour que la cible du survol soit
+               franche. */
+            ImGui::SameLine(0.0f, ecart * 2.0f);
+            (void)BoutonBarre("?##vk_notes_memo", cote, haut, false);
+            /* LA FIN DU GROUPE DE GAUCHE SE RELÈVE ICI, AVANT LE MÉMO, ET C'EST
+               OBLIGATOIRE : le mémo est une infobulle, donc il soumet ses trois
+               paragraphes dans une AUTRE fenêtre, et `GetItemRectMax()` ne
+               désignerait plus le « ? » mais le dernier texte de l'infobulle —
+               un rectangle sans rapport, qui ferait replier la bascule au hasard
+               du survol. On la DEMANDE à ImGui plutôt que de recalculer la
+               largeur de la rangée à la main : une formule redirait la mise en
+               page et divergerait au premier bouton ajouté. */
+            const float finGauche = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + ImGui::GetScrollX();
+            if (ImGui::IsItemHovered()) MemoDesMarques(a_S);
+
+            /* ---- la bascule, calée à droite SI ELLE TIENT ----
+               LE REPÈRE DE `SameLine(offset)` EST `window->Pos.x` (imgui.cpp
+               l.11356), pas le curseur courant : un offset INFÉRIEUR à la
+               position atteinte fait RECULER le curseur, et la bascule se
+               posait alors PAR-DESSUS les boutons de marque. Sous ~1613 px de
+               large c'était le cas à toutes les échelles, le groupe de gauche
+               mesurant environ 373 px pour une colonne qui n'en offre que 391 en
+               1280×720. Et le recouvrement ne se voyait pas seulement : dans
+               ImGui c'est le PREMIER item soumis qui prend le survol
+               (imgui.cpp:4901), et un item DÉSACTIVÉ le prend quand même
+               (4940-4947, `SetHoveredID` avant le test du drapeau) — donc
+               c'étaient « Citation » et « Filet », grisés et inertes, qui
+               avalaient les clics destinés à « Écrire ». Une page REÇUE, qui
+               s'ouvre en Lire, ne pouvait plus être rouverte en écriture : il ne
+               restait qu'une fente de trois pixels pour retrouver sa seule
+               porte. Quand la place manque, la bascule prend donc une ligne à
+               elle ; `hautSaisie`, mesuré APRÈS la barre, l'absorbe seul.
+               AUCUN PADDING À RAJOUTER : cette barre vit dans l'enfant
+               `##vk_notes_droite`, ouvert sans bordure, et un enfant sans
+               bordure a un `WindowPadding` NUL (imgui.cpp:7587) — son bord droit
+               de contenu est donc exactement `dispo`. En ajouter un pousserait
+               « Lire » hors de l'enfant, qui n'a pas de barre horizontale et le
+               rognerait sans rien dire. */
+            const float lEcrire = LargeurBouton("Écrire", a_S);
+            const float lLire = LargeurBouton("Lire", a_S);
+            const float debut = dispo - (lEcrire + lLire + ecart);
+            if (debut >= finGauche + ecart) {
+                ImGui::SameLine(debut, 0.0f);
+            } else {
+                // Ligne neuve : le curseur est déjà revenu au bord gauche du
+                // contenu, on ne fait que caler la bascule à droite de celle-là.
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (std::max)(debut, 0.0f));
+            }
+            if (BoutonBarre("Écrire##vk_notes_mode_ecrire", lEcrire, haut, ecrire) && !ecrire) {
+                /* Retour à l'écriture : le clavier va au champ, comme à
+                   l'ouverture d'une page — sinon il faudrait cliquer dedans
+                   avant que la touche Entrée ne compte pour un saut de ligne. */
+                g_mode = Mode::Ecrire;
+                g_focusDemande = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", "écrire la page — les marques s'y voient en clair");
+            }
+            ImGui::SameLine(0.0f, ecart);
+            if (BoutonBarre("Lire##vk_notes_mode_lire", lLire, haut, !ecrire) && ecrire) {
+                /* ÉCRIRE → LIRE EST UNE PORTE QUI QUITTE LA PAGE, donc elle
+                   passe par l'enregistrement comme toutes les autres : ce qu'on
+                   lit doit être ce qui est au registre, sans quoi on relirait
+                   sagement la version d'avant sans que rien ne le dise.
+                   L'ordre en attente meurt ici : le champ disparaît, et
+                   personne ne l'exécuterait plus. */
+                EnregistrerSiModifiee();
+                g_mode = Mode::Lire;
+                g_ordreEnAttente = false;
+                g_focusDemande = false;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", "lire la page mise en forme — elle s'enregistre en passant");
+            }
+
+            RetirerStyleBouton();
+        }
+
+        /**
+         * LES RACCOURCIS DE LA PLUME — Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+Maj+B.
+         *
+         * C'EST LA VOIE LA PLUS SÛRE : le champ ne perd pas le clavier, donc
+         * l'ordre est exécuté par le rappel DE LA MÊME TRAME, sans redemander
+         * le focus ni risquer de perdre le curseur.
+         *
+         * JAMAIS CTRL+ENTRÉE : sur un `InputTextMultiline` sans
+         * `CtrlEnterForNewLine`, il VALIDE et referme le champ
+         * (imgui_widgets.cpp l.5107-5117). Aucun des quatre choisis n'est pris :
+         * `InputText` ne réclame que X, C, V, Z, Y, A, Inser et Suppr.
+         *
+         * ILS NE SE LISENT QUE FENÊTRE AU FOCUS : un Ctrl+B tapé pour un autre
+         * écran ne doit pas poser une marque dans une page qu'on ne regarde
+         * même pas.
+         */
+        void RaccourcisPlume()
+        {
+            if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) return;
+            /* LE TITRE A LE CLAVIER : AUCUN ORDRE — et la raison n'est PAS
+               « un titre ne se met pas en forme » (ça, le rappel de saisie le
+               dit déjà en refusant d'appliquer l'ordre au titre). C'est qu'un
+               ordre posé ici FERAIT DÉPLACER LE CLAVIER TOUT SEUL : plus bas,
+               `g_ordreEnAttente && !g_champTexte.actif` est vrai par
+               construction — c'est le titre qui est actif, pas le corps — et
+               `SetKeyboardFocusHere` arrache alors l'`ActiveId` au titre pour le
+               donner au pavé (`NavMoveRequestApplyResult` appelle `ClearActiveID`
+               sans aucune garde sur l'`ActiveId` en cours, imgui.cpp:14068). La
+               suite de ce que le joueur tape en croyant finir son titre partait
+               dans le CORPS, entre deux marqueurs que personne n'avait demandés,
+               et le tout au registre au premier enregistrement.
+               LE RELEVÉ EST FRAIS : `g_champTitre.actif` est posé quelques
+               lignes plus haut, dans CETTE trame, avant cet appel.
+               Et cela ne peut pas se filtrer plus en amont : le WndProc écarte
+               déjà `(ctrl || alt)` pour l'INSERTION d'un caractère, mais
+               l'événement de touche arrive quand même à ImGui, et
+               `IsKeyPressed(key, bool)` interroge `ImGuiKeyOwner_Any`
+               (imgui.cpp:9746) — un champ actif ne se l'approprie pas. */
+            if (g_champTitre.actif) return;
+            const ImGuiIO& io = ImGui::GetIO();
+            if (!io.KeyCtrl || io.KeyAlt) return;
+            if (ImGui::IsKeyPressed(ImGuiKey_B, false)) {
+                // Maj d'abord : sans cela le barré serait avalé par le gras.
+                PoserOrdre(io.KeyShift ? Riche::Marque::Barre : Riche::Marque::Gras);
+            } else if (!io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_I, false)) {
+                PoserOrdre(Riche::Marque::Italique);
+            } else if (!io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_U, false)) {
+                PoserOrdre(Riche::Marque::Souligne);
+            }
+        }
+
         /** LA PAGE : son titre, son texte, et les trois gestes qui la
          *  concernent. */
         void BlocPage(const Page& a_p, std::size_t a_rang, float a_S)
         {
+            /* LE MODE SE LIT UNE FOIS, EN TÊTE, et la trame s'y tient. La barre
+               d'outils est dessinée au MILIEU de cette fonction : une bascule
+               cliquée là changerait `g_mode` alors que le titre est déjà peint,
+               et la page se retrouverait avec un titre d'un mode et un corps de
+               l'autre. La bascule prend donc effet à la trame suivante — un
+               seizième de seconde que personne ne voit, contre une trame
+               bâtarde que tout le monde verrait. */
+            const bool ecrire = (g_mode == Mode::Ecrire);
+
             // ---- le titre ----
-            ImGui::PushStyleColor(ImGuiCol_FrameBg, Voile(0.04f));
-            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Voile(0.10f));
-            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Voile(0.10f));
-            ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
-            ImGui::SetNextItemWidth(-1.0f);
-            /* LE TITRE PEUT RESTER VIDE (décision du propriétaire, 07/09) : on
-               crée une page avant de savoir comment l'appeler, et la liste
-               affiche alors « Page n ». L'invite le dit, plutôt qu'un astérisque
-               qui laisserait croire à un champ obligatoire. */
-            ImGui::InputTextWithHint("##vk_notes_titre", "titre de la page (facultatif)",
-                g_titre, sizeof(g_titre), ImGuiInputTextFlags_CallbackEdit, &BornerCaracteres,
-                &g_borneTitre);
-            ImGui::PopStyleColor(4);
+            if (ecrire) {
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, Voile(0.04f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Voile(0.10f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Voile(0.10f));
+                ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
+                ImGui::SetNextItemWidth(-1.0f);
+                /* LE TITRE PEUT RESTER VIDE (décision du propriétaire, 07/09) : on
+                   crée une page avant de savoir comment l'appeler, et la liste
+                   affiche alors « Page n ». L'invite le dit, plutôt qu'un astérisque
+                   qui laisserait croire à un champ obligatoire. */
+                /* ── L'IDENTITÉ DU CHAMP SUIT LA PAGE, ET CE N'EST PAS UN ORNEMENT ──
+                   Un `InputText` ACTIF IGNORE le tampon de l'appelant — c'est
+                   écrit dans la source, imgui_widgets.cpp l.4800-4801 : « From the
+                   moment we focused we are normally ignoring the content of
+                   'buf' » — et à la fin de la trame il le REMPLACE par son propre
+                   état (l.5337-5342, recopié l.5386). Or `ChargerPageOuverte`
+                   échange les tampons SANS que le champ disparaisse : le geste
+                   « créer » fait ouvrir la page neuve par le serveur lui-même,
+                   pendant que l'ancienne page et son champ sont encore à
+                   l'écran. Sans ce `PushID`, la page neuve s'ouvrait en portant
+                   le texte ENTIER de la précédente, se déclarait « Modifiée », et
+                   la première porte venue l'enregistrait telle quelle : un
+                   doublon que personne n'avait demandé. Le `g_focusDemande` n'y
+                   pouvait rien — `SetKeyboardFocusHere` ne réinitialise pas un
+                   champ DÉJÀ actif (imgui_widgets.cpp:4766).
+                   Avec un identifiant qui change, le champ soumis est NEUF : il
+                   part du tampon qu'on vient d'écrire, et l'ancien identifiant,
+                   n'étant plus soumis, voit son `ActiveId` libéré par `NewFrame`
+                   (imgui.cpp:5524-5528) sans jamais recopier son texte nulle part.
+                   UNE PAIRE PAR CHAMP, JAMAIS UNE SEULE POUR TOUT LE BLOC : entre
+                   les deux champs vivent la barre d'outils et le pied, dont les
+                   boutons tirent leur identité de leur libellé — un identifiant
+                   qui changerait entre l'appui et le relâchement (un plateau peut
+                   tomber entre les deux) perdrait le clic en silence. */
+                ImGui::PushID(g_chargee);
+                ImGui::InputTextWithHint("##vk_notes_titre", "titre de la page (facultatif)",
+                    g_titre, sizeof(g_titre),
+                    ImGuiInputTextFlags_CallbackEdit | ImGuiInputTextFlags_CallbackAlways,
+                    &RappelSaisie, &g_champTitre);
+                /* LE TITRE EST LOGÉ À LA MÊME ENSEIGNE QUE LE TEXTE : Échap y
+                   annulait la frappe tout pareil, et un titre perdu est une page
+                   qu'on ne retrouve plus dans la liste. */
+                GarderContreEchap(g_titre, sizeof(g_titre), g_titreFrappe);
+                g_champTitre.actif = ImGui::IsItemActive();
+                /* LE `PopID` VIENT APRÈS CES DEUX-LÀ : ils interrogent le
+                   DERNIER item soumis, et c'est bien celui-ci qu'on veut. */
+                ImGui::PopID();
+                ImGui::PopStyleColor(4);
+            } else {
+                /* EN LECTURE, LE TITRE EST UN TITRE : en grand, en or, à la
+                   place exacte du champ. On passe par l'étiquette et non par le
+                   tampon, pour qu'une page sans titre s'annonce « Page n »
+                   comme dans la liste au lieu de n'afficher rien du tout. */
+                const std::string entete = Etiquette(a_p, a_rang);
+                ImFont* face = UIRoot::BoldFont(entete.c_str());
+                ImGui::PushFont(face, Theme::SnapPx(26.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
+                ImGui::TextUnformatted(entete.c_str());
+                ImGui::PopStyleColor();
+                ImGui::PopFont();
+                g_champTitre.actif = false;
+            }
             FiletSousItem();
 
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.45f));
@@ -1092,6 +1816,10 @@ namespace FUI::Notes
 
             FiletTravers(a_S);
 
+            // ---- la plume : la barre, et le mémo dans l'infobulle du « ? » ----
+            BarreOutils(a_S);
+            ImGui::Spacing();
+
             // ---- le texte ----
             const int caracteres = Caracteres(g_texte);
             const bool modifiee = Modifiee();
@@ -1101,24 +1829,96 @@ namespace FUI::Notes
                texte : un champ qui se mesurerait sur ce qui reste APRÈS les
                aurait poussés dehors dès la première ligne de trop. */
             const float ligne = ImGui::GetTextLineHeightWithSpacing();
-            const float hautPied = ImGui::GetFrameHeight() * (g_confirme ? 2.0f : 1.0f) +
-                                   ligne + ImGui::GetStyle().ItemSpacing.y * 4.0f;
+            /* LA RÉSERVE COMPTE CE QUI EST VRAIMENT PEINT, ET RIEN DE PLUS. Deux
+               `ItemSpacing` seulement (avant le compteur, avant la dernière
+               rangée), et surtout : la CONFIRMATION et la LIGNE D'ÉTAT sont
+               EXCLUSIVES — le pied est une chaîne `if (g_confirme) … else if
+               (!g_refus.empty()) … else …`, jamais les deux. Les additionner
+               réservait une rangée fantôme, prise sur le champ à toutes les
+               résolutions.
+               LE REFUS D'UNE MARQUE SE REPLIE, lui, donc il compte pour DEUX
+               lignes : c'est la seule ligne d'état qui puisse dépasser la
+               largeur de la colonne, et sans cette réserve elle poussait le pied
+               d'un cran hors du panneau tant que le message durait. */
+            const float hautPied = ImGui::GetStyle().ItemSpacing.y * 2.0f +
+                                   ImGui::GetFrameHeight() +
+                                   (g_confirme
+                                        ? ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeight()
+                                        : ligne * (g_refus.empty() ? 1.0f : 2.0f));
             const float hautSaisie = (std::max)(ImGui::GetContentRegionAvail().y - hautPied, ligne * 3.0f);
 
-            ImGui::PushStyleColor(ImGuiCol_FrameBg, Voile(0.04f));
-            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Voile(0.08f));
-            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Voile(0.08f));
-            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.92f));
-            /* Les retours à la ligne SURVIVENT jusqu'au bout — le champ est
-               multiligne, le pont les échappe, le registre les garde. Une page a
-               des paragraphes.
-               PAS DE TABULATION DANS LA SAISIE (le défaut d'ImGui) : le pont la
-               changerait en espace, et le joueur verrait son retrait disparaître
-               entre l'écriture et la relecture. */
-            ImGui::InputTextMultiline("##vk_notes_texte", g_texte, sizeof(g_texte),
-                ImVec2(-1.0f, hautSaisie), ImGuiInputTextFlags_CallbackEdit, &BornerCaracteres,
-                &g_borneTexte);
-            ImGui::PopStyleColor(4);
+            if (ecrire) {
+                /* LES RACCOURCIS SE LISENT AVANT LE CHAMP, et c'est ce qui les
+                   rend gratuits : l'ordre est déjà posé quand le rappel de
+                   saisie part, donc il s'exécute DANS LA TRAME MÊME, sans que le
+                   champ ait à perdre puis reprendre le clavier. */
+                RaccourcisPlume();
+
+                /* LE CLAVIER, DEMANDÉ UNE FOIS ET JUSTE AVANT LE CHAMP.
+                   Deux motifs y mènent : une page qui vient de s'ouvrir (on
+                   écrit sans cliquer), et un ordre déposé par un BOUTON — le
+                   clic a désactivé le champ, il faut le lui rendre pour que le
+                   rappel puisse exécuter l'ordre.
+                   `SetKeyboardFocusHere` NE SÉLECTIONNE JAMAIS TOUT sur un champ
+                   MULTILIGNE : les trois `select_all` d'ImGui sont sous
+                   `if (!is_multiline)` (imgui_widgets.cpp l.4833-4840). Et comme
+                   le tampon n'a PAS été touché entre-temps, ImGui recycle son
+                   état (l.4810) : curseur, sélection et pile d'annulation
+                   survivent au passage. */
+                if (g_focusDemande || (g_ordreEnAttente && !g_champTexte.actif)) {
+                    ImGui::SetKeyboardFocusHere();
+                }
+                g_focusDemande = false;
+
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, Voile(0.04f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Voile(0.08f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Voile(0.08f));
+                ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.92f));
+                /* Les retours à la ligne SURVIVENT jusqu'au bout — le champ est
+                   multiligne, le pont les échappe, le registre les garde. Une page a
+                   des paragraphes.
+                   PAS DE TABULATION DANS LA SAISIE (le défaut d'ImGui) : le pont la
+                   changerait en espace, et le joueur verrait son retrait disparaître
+                   entre l'écriture et la relecture.
+                   `WordWrap` SE POSE EN OU, jamais à la place : écraser
+                   `CallbackEdit` ou le rappel désarmerait la borne des 2 000
+                   caractères, c'est-à-dire la garde qui empêche de perdre une
+                   page à l'enregistrement. Et JAMAIS `CtrlEnterForNewLine` : ce
+                   serait inverser exactement ce que le propriétaire demande — la
+                   touche Entrée doit rester le saut de ligne. */
+                /* SON IDENTITÉ SUIT LA PAGE, pour la raison écrite au champ du
+                   titre : un champ ACTIF réécrit le tampon de l'appelant avec
+                   SON état, et `ChargerPageOuverte` peut échanger les tampons
+                   sous un champ encore actif. Le `PushID` est ici SA PROPRE
+                   paire — surtout pas une seule qui engloberait la barre et le
+                   pied, dont les boutons perdraient leur clic si leur identité
+                   changeait entre l'appui et le relâchement.
+                   IL NE GÊNE PAS L'ORDRE EN ATTENTE : le recyclage d'état ne
+                   compare que `state->ID == id` (imgui_widgets.cpp:4810), et
+                   l'identifiant est STABLE tant qu'on reste sur la même page. */
+                ImGui::PushID(g_chargee);
+                ImGui::InputTextMultiline("##vk_notes_texte", g_texte, sizeof(g_texte),
+                    ImVec2(-1.0f, hautSaisie),
+                    ImGuiInputTextFlags_CallbackEdit | ImGuiInputTextFlags_CallbackAlways |
+                        ImGuiInputTextFlags_WordWrap,
+                    &RappelSaisie, &g_champTexte);
+                GarderContreEchap(g_texte, sizeof(g_texte), g_texteFrappe);
+                g_champTexte.actif = ImGui::IsItemActive();
+                ImGui::PopID();
+                ImGui::PopStyleColor(4);
+            } else {
+                /* LE MODE LIRE — la page MISE EN FORME, à la place exacte du
+                   champ et sur la même hauteur, pour que la bascule ne fasse
+                   sauter ni le pied ni le panneau.
+                   C'EST UNE VUE, ET RIEN D'AUTRE : `Riche::Dessiner` ne touche
+                   jamais à `g_texte`. Un défaut de l'analyse fait donc une page
+                   mal peinte, jamais une page abîmée — c'est la propriété qui
+                   permet d'y toucher sans trembler. */
+                ImGui::BeginChild("##vk_notes_lecture", ImVec2(0.0f, hautSaisie), ImGuiChildFlags_None);
+                Riche::Dessiner(g_texte, ImGui::GetContentRegionAvail().x, a_S, Theme::Chrome(0.92f));
+                ImGui::EndChild();
+                g_champTexte.actif = false;
+            }
 
             // ---- le compteur et les trois boutons ----
             char compteur[32];
@@ -1191,6 +1991,14 @@ namespace FUI::Notes
                     g_confirme = false;
                 }
                 RetirerStyleBouton();
+            } else if (!g_refus.empty()) {
+                /* UNE MARQUE REFUSÉE SE DIT, ET ELLE PASSE DEVANT L'ÉTAT DE LA
+                   PAGE : `Poser` n'a rien changé, donc « À jour. » serait vrai
+                   et parfaitement inutile — le joueur vient d'appuyer sur un
+                   bouton qui n'a rien fait, et c'est CELA qu'il faut expliquer. */
+                ImGui::PushStyleColor(ImGuiCol_Text, RougeSombre());
+                ImGui::TextWrapped("%s", g_refus.c_str());
+                ImGui::PopStyleColor();
             } else if (!modifiee) {
                 ImGui::PushStyleColor(ImGuiCol_Text, Theme::Chrome(0.35f));
                 ImGui::TextUnformatted("À jour.");
@@ -1274,6 +2082,31 @@ namespace FUI::Notes
 
         if (g_messageRestant > 0) {
             if (--g_messageRestant == 0) g_message.clear();
+        }
+        if (g_refusRestant > 0) {
+            if (--g_refusRestant == 0) g_refus.clear();
+        }
+
+        /**
+         * ÉCHAP FERME, ET IL FERME D'ICI — hors de la trame ImGui.
+         *
+         * Le canal des événements utilisateur est AVALÉ EN ENTIER tant qu'un
+         * champ a le clavier (GridMenu.cpp, « ESC unfocuses the field via ImGui
+         * instead ») : Échap n'arrivait donc jamais à `CloseTopWindow`, il
+         * allait à ImGui, qui annulait la frappe et laissait le panneau ouvert.
+         * L'écran a défait l'annulation (voir `GarderContreEchap`) et lève ce
+         * drapeau ; on le consomme ici, par la MÊME porte que le canal des
+         * événements — donc les fenêtres au-dessus se ferment d'abord, et le
+         * carnet s'enregistre en partant, comme partout ailleurs.
+         *
+         * LE DRAPEAU SE CONSOMME AVANT D'AGIR, et pas par coquetterie :
+         * `CloseTopWindow` redescend jusqu'à `Fermer()`, qui vide les tampons —
+         * si l'appel repassait un jour par le champ, un drapeau resté levé
+         * fermerait une seconde fenêtre que personne n'a demandé de fermer.
+         */
+        if (g_echapDemande) {
+            g_echapDemande = false;
+            if (g_ouvert) UIRoot::CloseTopWindow();
         }
 
         /* UN REFUS DOIT DÉMENTIR L'ATTENTE, ET RIEN NE LE FAISAIT.

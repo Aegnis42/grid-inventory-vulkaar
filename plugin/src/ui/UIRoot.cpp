@@ -60,6 +60,14 @@ namespace FUI::UIRoot
         ImFont* g_fontMain = nullptr;
         ImFont* g_fontBold = nullptr;   // latin + hangul only, see BoldFont()
 
+        // ★[vulkaar] Les deux faces PENCHÉES de la plume du carnet. Le corps
+        // est cuit dans Malgun Gothic, dont le LATIN EST celui de Segoe UI
+        // (même dessin, même chasse) : segoeuii/segoeuiz s'accordent donc au
+        // texte déjà à l'écran, là où une penchée prise ailleurs collerait une
+        // seconde typographie au milieu d'une phrase.
+        ImFont* g_fontItal = nullptr;       // italique, voir ItalicFont()
+        ImFont* g_fontBoldItal = nullptr;   // gras-italique, voir BoldItalicFont()
+
         // icon-brightness UP pass. GI57: the >1 gain used to be ADDITIVE
         // (dst + t*src) — bright pixels received the most, dark ones almost
         // nothing, which read as "glow" rather than "brighter" (user report).
@@ -812,10 +820,16 @@ namespace FUI::UIRoot
             const char* kYaHei  = "C:\\Windows\\Fonts\\msyh.ttc";
             const char* kMeiryo = "C:\\Windows\\Fonts\\meiryo.ttc";
             const char* kYuGoth = "C:\\Windows\\Fonts\\YuGothM.ttc";
+            // ★[vulkaar] les deux faces penchées de Segoe UI. Deux chemins, et
+            // deux gardes séparées plus bas.
+            const char* kSegoeIt = "C:\\Windows\\Fonts\\segoeuii.ttf";
+            const char* kSegoeBdIt = "C:\\Windows\\Fonts\\segoeuiz.ttf";
 
             io.Fonts->Clear();
             g_fontMain = nullptr;
             g_fontBold = nullptr;
+            g_fontItal = nullptr;
+            g_fontBoldItal = nullptr;
 
             if (exists(kMalgun)) {
                 ImFontConfig base;
@@ -869,9 +883,45 @@ namespace FUI::UIRoot
                     bc.OversampleV = 2;
                     g_fontBold = io.Fonts->AddFontFromFileTTF(kMalgunBd, kBodyFont * k, &bc);
                 }
+                // ★[vulkaar] Les deux faces PENCHÉES du carnet — Segoe UI, et non
+                // Malgun : Malgun ne livre aucun cut italique, et son latin EST
+                // celui de Segoe UI. La penchée se pose donc sur le corps sans
+                // que la page change de typographie au milieu d'un mot.
+                // ★Mêmes réglages de suréchantillonnage que le gras, et AUCUNE
+                // plage de glyphes, pour la raison écrite juste au-dessus :
+                // l'atlas cuit à la demande, une plage rendrait IsGlyphInFont()
+                // menteur, et l'accesseur rendrait alors une police qui ne
+                // dessine rien.
+                // ★Un exists() PAR FACE, et non un seul pour les deux : sur un
+                // poste amputé de segoeuiz, une garde commune lui prendrait
+                // aussi son italique. Et sans garde du tout, un chemin absent
+                // ne passe pas en silence : AddFontFromFileTTF lève
+                // IM_ASSERT_USER_ERROR(« Could not load font file! ») avant de
+                // rendre NULL (imgui_draw.cpp:3193-3201).
+                if (exists(kSegoeIt)) {
+                    ImFontConfig ic;
+                    ic.OversampleH = 2;
+                    ic.OversampleV = 2;
+                    g_fontItal = io.Fonts->AddFontFromFileTTF(kSegoeIt, kBodyFont * k, &ic);
+                }
+                if (exists(kSegoeBdIt)) {
+                    ImFontConfig bic;
+                    bic.OversampleH = 2;
+                    bic.OversampleV = 2;
+                    g_fontBoldItal = io.Fonts->AddFontFromFileTTF(kSegoeBdIt, kBodyFont * k, &bic);
+                }
             } else {
                 g_fontMain = io.Fonts->AddFontDefault();
             }
+
+            // ★[vulkaar] UNE ligne, et la seule trace utile sur un poste
+            // amputé : le jour où l'italique du carnet ne se voit pas, c'est
+            // ici qu'on lit que la face n'a pas été trouvée. Sans elle, une
+            // fonte absente est indiscernable d'un défaut de l'analyse des
+            // marques — deux causes, un seul symptôme, et rien pour trancher.
+            SKSE::log::info("[POLICES] faces cuites : corps={} gras={} italique={} gras-italique={}",
+                g_fontMain ? "oui" : "non", g_fontBold ? "oui" : "non",
+                g_fontItal ? "oui" : "non", g_fontBoldItal ? "oui" : "non");
 
             io.Fonts->Build();
             ImGui_ImplDX11_InvalidateDeviceObjects();   // font texture recreates on NewFrame
@@ -3760,6 +3810,55 @@ namespace FUI::UIRoot
             if (!g_fontBold->IsGlyphInFont(static_cast<ImWchar>(cp))) return main;
         }
         return g_fontBold;
+    }
+
+    // ★[vulkaar] La règle de BoldFont, recopiée telle quelle pour les faces
+    // penchées : UN SEUL point de code que la face ne sait pas épeler renvoie
+    // TOUTE la chaîne à la police principale. Une moitié de mot en italique et
+    // l'autre en tofu est pire qu'un mot qui n'est simplement pas penché, et
+    // l'appelant ne peut pas voir venir un changement de fonte au milieu d'une
+    // chaîne qu'il n'inspecte pas.
+    // ★Les blancs sont sautés : aucune face ne les dessine, et les compter
+    // ferait retomber au corps toute ligne un peu aérée. Une suite d'octets
+    // invalide arrête le parcours sans condamner la face — c'est ce que fait
+    // déjà BoldFont, et deux réponses différentes pour la même chaîne seraient
+    // pires que l'une ou l'autre.
+    // (BoldFont porte le même code et reste tel quel : c'est du fork, on
+    // n'écrit en français que ce qui est à nous.)
+    static bool SaitToutEpeler(ImFont* a_face, const char* a_utf8)
+    {
+        if (!a_face || !a_utf8) return false;
+        for (const char* p = a_utf8; *p;) {
+            unsigned int cp = 0;
+            const int n = ImTextCharFromUtf8(&cp, p, nullptr);
+            if (n <= 0) break;
+            p += n;
+            if (cp == ' ' || cp == '\t' || cp == '\n') continue;
+            if (cp > IM_UNICODE_CODEPOINT_MAX) return false;
+            if (!a_face->IsGlyphInFont(static_cast<ImWchar>(cp))) return false;
+        }
+        return true;
+    }
+
+    ImFont* ItalicFont(const char* a_utf8)
+    {
+        ImFont* principale = g_fontMain ? g_fontMain : ImGui::GetFont();
+        if (!a_utf8) return principale;
+        return SaitToutEpeler(g_fontItal, a_utf8) ? g_fontItal : principale;
+    }
+
+    ImFont* BoldItalicFont(const char* a_utf8)
+    {
+        ImFont* principale = g_fontMain ? g_fontMain : ImGui::GetFont();
+        if (!a_utf8) return principale;
+        // ★La cascade a DEUX marches, et leur ordre porte la raison : un mot
+        // que la face gras-italique ne sait pas épeler garde au moins son
+        // POIDS dans le gras — un titre reste un titre, il perd son
+        // inclinaison et non son rang. Le corps n'est le dernier recours que
+        // si le gras lui-même manque à l'appel.
+        if (SaitToutEpeler(g_fontBoldItal, a_utf8)) return g_fontBoldItal;
+        if (SaitToutEpeler(g_fontBold, a_utf8)) return g_fontBold;
+        return principale;
     }
 
     void DrawItemIconQuad(ImDrawList* a_dl, void* a_srv, const ImVec2 a_p[4])
