@@ -907,20 +907,8 @@ namespace FUI::Notes
                taille ≤ 0 comme « à la mesure du libellé » — le −1 d'ImGui, qui
                veut dire « tout ce qui reste », y ferait un bouton court sans
                rien signaler. */
-            /* LA SONDE DU CLIC (07/09/2026) — « l'interface s'affiche mais
-               quand je clique sur nouvelle page rien ne se passe ». Le fichier
-               du pont était VIDE et le journal ne portait aucun « geste ecrit » :
-               le clic n'atteignait donc pas le bouton, et l'analyse du code
-               n'a rien trouvé qui l'explique. On ne devine pas deux fois — on
-               MESURE. Cette sonde ne parle QUE sur un clic gauche, panneau
-               ouvert : elle dit où est la souris, où est le bouton, et si
-               ImGui le tenait pour survolé. Elle s'enlèvera quand la cause
-               sera connue. */
-            const ImVec2 avantBouton = ImGui::GetCursorScreenPos();
-            const float largeurBouton = ImGui::GetContentRegionAvail().x;
-            const bool clicSonde = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
             if (Sfx::Button("Nouvelle page##vk_notes_creer",
-                    ImVec2(largeurBouton, haut))) {
+                    ImVec2(ImGui::GetContentRegionAvail().x, haut))) {
                 /* Le serveur crée la page et répond par un plateau ; c'est LUI
                    qui dit quel id elle a reçu, et c'est lui qui l'ouvre. On
                    n'essaie pas de deviner « la dernière de la liste » : deux
@@ -928,20 +916,6 @@ namespace FUI::Notes
                    ouvrir la page d'à côté un jour sur dix. */
                 EnregistrerSiModifiee();
                 EcrireGeste("creer", "");
-            }
-            if (clicSonde) {
-                const ImVec2 m = ImGui::GetIO().MousePos;
-                const ImVec2 r0 = ImGui::GetItemRectMin();
-                const ImVec2 r1 = ImGui::GetItemRectMax();
-                SKSE::log::info(
-                    "[NOTES] sonde clic : souris ({:.0f},{:.0f}) bouton ({:.0f},{:.0f})-({:.0f},{:.0f}) "
-                    "large={:.0f} survole={} actif={} fenetreSurvolee={} fenetreActive={} capture={}",
-                    m.x, m.y, r0.x, r0.y, r1.x, r1.y, largeurBouton,
-                    ImGui::IsItemHovered() ? 1 : 0, ImGui::IsItemActive() ? 1 : 0,
-                    ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) ? 1 : 0,
-                    ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) ? 1 : 0,
-                    ImGui::GetIO().WantCaptureMouse ? 1 : 0);
-                (void)avantBouton;
             }
             RetirerStyleBouton();
             ImGui::Spacing();
@@ -1398,34 +1372,6 @@ namespace FUI::Notes
     {
         if (!g_ouvert) return;
         g_dernierDessin = g_tic;
-        /* SONDE (07/09/2026, voir la sonde du clic) : la preuve que ce panneau
-           est dessiné, une ligne par seconde et pas une de plus. Sans elle, un
-           écran muet et un écran ABSENT se ressemblent dans un journal. */
-        if (g_tic % 60 == 0) {
-            /* `clavierPris` est le témoin décisif d'Échap : GridMenu avale TOUT
-               le canal des touches quand `UIRoot::IsTextInputActive()` est vrai
-               (« pendant qu'un champ tient le clavier, chaque touche est du
-               texte »). Si Échap ne ferme pas ET que ce témoin vaut 1 alors
-               qu'aucune page n'est ouverte, la cause est là et nulle part
-               ailleurs. */
-            SKSE::log::info(
-                "[NOTES] sonde : panneau dessine (tic {}, {} page(s), chargee={}, demandee={}, "
-                "sourisCapturee={}, clavierPris={}, wantTexte={}, fenetreSurvolee={})",
-                g_tic, g_pages.size(), g_chargee, g_demandee,
-                ImGui::GetIO().WantCaptureMouse ? 1 : 0,
-                UIRoot::IsTextInputActive() ? 1 : 0,
-                ImGui::GetIO().WantTextInput ? 1 : 0,
-                ImGui::IsAnyItemHovered() ? 1 : 0);
-            /* Le survol marche (le bouton s'éclaire) : ce qui manque est le
-               BOUTON DE LA SOURIS. On dit donc où elle est et si elle est
-               enfoncée — `IsWindowHovered` de la ligne d'avant ne valait rien,
-               appelée avant `Begin` : elle interrogeait une autre fenêtre. */
-            const ImGuiIO& sondeIo = ImGui::GetIO();
-            SKSE::log::info("[NOTES] sonde souris : pos ({:.0f},{:.0f}) gauche={} droite={} anyItem={}",
-                sondeIo.MousePos.x, sondeIo.MousePos.y,
-                sondeIo.MouseDown[0] ? 1 : 0, sondeIo.MouseDown[1] ? 1 : 0,
-                ImGui::IsAnyItemHovered() ? 1 : 0);
-        }
 
         const ImGuiIO& io = ImGui::GetIO();
         const float S = Theme::Scale();

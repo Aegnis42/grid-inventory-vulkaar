@@ -423,16 +423,6 @@ namespace FUI
 
         io.AddMouseSourceEvent(mouseSource);
         io.AddMouseButtonEvent(static_cast<int>(mouseEvent->button), a_down);
-        /* [vulkaar] SONDE (07/09/2026) — « le carnet s'affiche, le bouton
-           s'éclaire, mais le clic ne fait rien et Échap ne ferme pas », alors
-           que le courrier répond dans la même partie. Le survol vient d'un
-           SONDAGE du curseur (MouseHandler), les clics et Échap viennent d'ICI.
-           Cette ligne dit si le menu reçoit encore des événements pendant que
-           le carnet est ouvert. Une ligne par pression, jamais par trame. */
-        if (a_down) {
-            SKSE::log::info("[MENU] evenement souris recu : bouton {} (carnet ouvert={})",
-                static_cast<int>(mouseEvent->button), Notes::Ouvert() ? 1 : 0);
-        }
     }
 
     void GridInventoryMenu::OnMouseWheelEvent(RE::GFxEvent* a_event)
