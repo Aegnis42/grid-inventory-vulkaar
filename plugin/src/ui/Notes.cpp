@@ -2336,19 +2336,11 @@ namespace FUI::Notes
         const ImGuiIO& io = ImGui::GetIO();
         const float S = Theme::Scale();
 
-        /* [vulkaar] SONDE TEMPORAIRE — LA TOUCHE ENTRÉE, ET CE QU'ELLE TROUVE
-           EN ARRIVANT (08/09/2026). Deux corrections ont échoué sur cette
-           touche ; celle-ci dit, en UNE ligne par appui, si elle atteint ImGui
-           et dans quel état. `mods` doit valoir 0 : au-dessus de zéro, `Shortcut`
-           refuse le saut de ligne et l'annulation sans un mot, et c'est
-           exactement la panne. À RETIRER dès que le saut de ligne est confirmé
-           en jeu. */
-        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
-            SKSE::log::info("[NOTES] Entree vue : mods=0x{:x} saisie={} champActif={} octets={}",
-                static_cast<unsigned>(io.KeyMods), io.WantTextInput ? 1 : 0,
-                g_champTexte.actif ? 1 : 0, std::strlen(g_texte));
-        }
+        /* LA SONDE D'ENTRÉE A SERVI ET S'EN VA (08/09/2026). Elle a dit
+           « mods=0x0 saisie=1 champActif=1 » à l'instant où le saut de ligne
+           est enfin apparu : la condition qui manquait était bien celle-là, et
+           la correction vit désormais dans `UIRoot::Tick` — les quatre
+           modificateurs relevés au système à chaque trame. */
         const float pad = Theme::PadX() * S;
 
         /* UN PANNEAU CENTRÉ ET DISCRET — le goût du propriétaire (29/08) : pas
