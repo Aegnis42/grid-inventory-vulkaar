@@ -4859,6 +4859,38 @@ namespace FUI::UIRoot
         // textEntryCount -1 -> -2) and movement/attack died.
         g_textInputOn = io.WantTextInput;
 
+        /* [vulkaar] LES MODIFICATEURS VIENNENT DU SYSTÈME, À CHAQUE TRAME
+         * (08/09/2026) — et c'est ce qui rend Entrée et Échap fiables.
+         *
+         * CE QUI SE PASSAIT : `io.KeyMods` n'était alimenté que par la route de
+         * la fenêtre (le greffon Win32 le recalcule à chaque message de touche).
+         * Or sur ce poste cette route est presque muette — « a text field has
+         * been focused for 120 frames and NO WM_CHAR arrived (chars 0 keys 1
+         * raw 3 msgs 11) ». Un ENFONCEMENT de Maj livré et son RELÂCHEMENT
+         * perdu, et ImGui croit Maj tenue POUR TOUJOURS.
+         *
+         * ET UN SEUL MODIFICATEUR FANTÔME SUFFIT À TUER ENTRÉE ET ÉCHAP, sans
+         * toucher au reste : ces deux touches passent par `Shortcut` →
+         * `IsKeyChordPressed`, qui commence par `if (g.IO.KeyMods != mods)
+         * return false;`. Les LETTRES et RETOUR ARRIÈRE, eux, passent par
+         * `IsKeyPressed`, qui ne regarde aucun modificateur — d'où la panne
+         * qu'on a vue deux fois : on écrit, on efface, mais on ne peut ni aller
+         * à la ligne ni fermer.
+         *
+         * `GetAsyncKeyState` dit la VÉRITÉ DU SYSTÈME, sans dépendre d'aucun
+         * message. `AddKeyEvent` écarte lui-même l'état identique : pousser à
+         * chaque trame ne coûte rien et ne fabrique aucun événement. C'est
+         * exactement ce que fait le greffon Win32 d'ImGui
+         * (`ImGui_ImplWin32_UpdateKeyModifiers`) — mais lui ne le fait que
+         * quand un message lui parvient. */
+        {
+            const auto tenue = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+            io.AddKeyEvent(ImGuiMod_Ctrl, tenue(VK_CONTROL));
+            io.AddKeyEvent(ImGuiMod_Shift, tenue(VK_SHIFT));
+            io.AddKeyEvent(ImGuiMod_Alt, tenue(VK_MENU));
+            io.AddKeyEvent(ImGuiMod_Super, tenue(VK_LWIN) || tenue(VK_RWIN));
+        }
+
         // ★The polled CHARACTER road. Inert until it has proven that printable
         // keys are pressed and no WM_CHAR follows -- see PollTypedCharacters.
         PollTypedCharacters(io);
