@@ -3,6 +3,7 @@
 #include "ui/Equip.h"
 #include "ui/Fallback.h"
 #include "ui/Grid.h"
+#include "game/Durabilite.h"
 #include "game/Ledger.h"
 #include "game/MonnaiesVulkaar.h"
 #include "game/SortiesVulkaar.h"
@@ -9527,8 +9528,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // Mabinogi-style: hugging the corner, full black outline so the count
         // reads on any icon underneath (all skins are dark-grounded)
         const ImVec2 tp(a_tileMin.x + 2.0f, a_tileMin.y - 1.0f);
+        // the count already carries a full black outline, so the fill can be
+        // the plain emphasis colour on any panel — light or dark
+        // ★White on an ink skin, not the clay accent. The figure sits on an
+        // item picture and carries a full black ring, so white is the one fill
+        // that keeps its distance from every sprite underneath -- the clay is a
+        // mid-tone and met the leather bags halfway.
+        DrawOutlinedText(a_dl, tp,
+            Theme::InkChrome() ? IM_COL32(255, 255, 255, 255) : Theme::Val(), a_text);
+    }
+
+    void DrawOutlinedText(ImDrawList* a_dl, const ImVec2& a_pos, ImU32 a_col, const char* a_text)
+    {
         // ★Eight passes of black is a LOT of edge, and it is there because the
-        // count sits on an item picture, not on the panel. But on a pale skin
+        // figure sits on an item picture, not on the panel. But on a pale skin
         // the figure itself is dark, so the ring merges with it into a smudge
         // — the same trap the title fell into. Skins whose ink is dark get the
         // figure alone; the picture under it is what they contrast against.
@@ -9538,23 +9551,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // accent -- a mid-tone that has neither the panel's lightness nor the
         // ink's darkness to lean on. The ring is what gives it an edge on a
         // bright sack and on a black boot alike.
+        // [vulkaar] Sorti de DrawCountBadge tel quel (memes huit passes, meme
+        // regle de skin) pour que la jauge « p/max » d'une case d'echange se
+        // lise avec le meme contour que le compte, dans un autre coin.
         if (!Theme::S().lightPanel || Theme::InkNeedsOutline() || Theme::InkChrome()) {
             const ImU32 oc = IM_COL32(0, 0, 0, 255);
             for (int oy = -1; oy <= 1; ++oy) {
                 for (int ox = -1; ox <= 1; ++ox) {
                     if (ox == 0 && oy == 0) continue;
-                    a_dl->AddText(ImVec2(tp.x + ox, tp.y + oy), oc, a_text);
+                    a_dl->AddText(ImVec2(a_pos.x + ox, a_pos.y + oy), oc, a_text);
                 }
             }
         }
-        // the count already carries a full black outline, so the fill can be
-        // the plain emphasis colour on any panel — light or dark
-        // ★White on an ink skin, not the clay accent. The figure sits on an
-        // item picture and carries a full black ring, so white is the one fill
-        // that keeps its distance from every sprite underneath -- the clay is a
-        // mid-tone and met the leather bags halfway.
-        a_dl->AddText(tp, Theme::InkChrome() ? IM_COL32(255, 255, 255, 255)
-                                             : Theme::Val(), a_text);
+        a_dl->AddText(a_pos, a_col, a_text);
     }
 
     // ★See Grid.h. Drawn immediately before the sprite it belongs to, from the
@@ -10408,7 +10417,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count, int a_coinValue,
                          int a_price, bool a_isBuy, RE::TESObjectREFR* a_owner,
                          ExtraScope a_scope, std::uint16_t a_uid, int a_xlIdx,
-                         std::uint16_t a_sig, int a_hand, const TileContext& a_tile)
+                         std::uint16_t a_sig, int a_hand, const TileContext& a_tile,
+                         int a_centMilliemes)
     {
         if (!a_obj) return;
 
@@ -10817,7 +10827,35 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // extras by design -- and because tempering is the cheapest per-instance
         // difference a player can create, so this is what makes the GI1 tile
         // binding visible at all (before this, tempering showed NOTHING).
-        if (const auto* xh = extraOf.operator()<RE::ExtraHealth>();
+        // [vulkaar] SAUF pour un objet de la forge : la meme ExtraHealth y porte
+        // une JAUGE de durabilite (Durabilite.h explique l'echelle), et la
+        // trempe n'existe pas pour lui. Le maximum vient de la table lue a
+        // kDataLoaded ; la valeur vient de l'extra LOCAL, que le client
+        // maintient exact. Une entree NUE d'une forme de la forge est NEUVE :
+        // elle affiche « Durabilite 600 / 600 » et non rien du tout.
+        // ★LA SANTE DE LA LIGNE QUAND L'APPELANT LA CONNAIT (a_centMilliemes
+        // >= 0). Le sac lu ci-dessus est celui du SPECTATEUR ; pour une ligne
+        // d'offre d'echange c'est le mauvais livre : la ligne de l'AUTRE
+        // decrit un exemplaire qui n'est pas dans mon sac, et la ligne de la
+        // mienne peut etre nue quand mon sac garde un jumeau use. Lire le sac
+        // affichait alors « 600 / 600 » en vert pour une epee offerte a 20/600
+        // (ou la sante de MON jumeau) — la fraude ouverte que la relecture
+        // du 08/09 a relevee. Avec la valeur de la ligne, 0 = nue = max, comme
+        // partout sur les ponts texte (Durabilite.h).
+        if (const auto max = Durabilite::MaxDe(a_obj->GetFormID()); max.has_value()) {
+            std::uint32_t p = 0;
+            if (a_centMilliemes >= 0) {
+                p = Durabilite::PointsDeCentMilliemes(a_centMilliemes, *max);
+            } else {
+                const auto* xh = extraOf.operator()<RE::ExtraHealth>();
+                p = Durabilite::PointsDe(xh ? xh->health : 0.0f, *max);
+            }
+            // Sous 10 % elle passe au rouge : c'est le seuil auquel le serveur
+            // avertit le porteur (contrat §2.6), l'infobulle dit la meme chose.
+            const bool basse = (static_cast<std::uint64_t>(p) * 10u < *max);
+            ImGui::TextColored(basse ? Theme::TipBad() : Theme::TipGood(), "%s %u / %u",
+                Lang::T(Lang::Str::DurabiliteLabel), p, *max);
+        } else if (const auto* xh = extraOf.operator()<RE::ExtraHealth>();
             xh && xh->health > 1.0f) {
             ImGui::TextColored(Theme::TipGood(), "%s +%d%%", Lang::T(Lang::Str::TemperLabel),
                 static_cast<int>(std::lroundf((xh->health - 1.0f) * 100.0f)));
@@ -14152,13 +14190,52 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     // [vulkaar] voir Grid.h : peek + abandon du carry, aucun transfert.
-    bool PorteVersEchange(RE::FormID& a_form, int& a_count)
+    bool PorteVersEchange(RE::FormID& a_form, int& a_count, int& a_centMilliemes)
     {
         auto* obj = HeldShelfStorable();
         if (!obj) return false;
         if (MonnaiesVulkaar::EstMonnaie(obj)) return false;
         a_form = obj->GetFormID();
         a_count = g_held->count;
+        // [vulkaar] LA SANTE DU POOL PORTE, lue sur la liste vivante de
+        // l'exemplaire (uid, sig) comme CommitHeldToShelfBag lit ses marqueurs.
+        // Sans cette lecture une epee usee offerte arriverait NEUVE chez
+        // l'autre (mesure du 08/09 : l'echange strippait les extras) — la
+        // fraude que le contrat ferme.
+        // ★POOL D'ABORD, PORTE A DEFAUT. Un carry leve de la POUPEE est dans
+        // l'un de DEUX etats et `fromDoll` ne dit pas lequel : le drapeau est
+        // pose une fois a BeginCarry (:4018) et jamais remis a false, alors
+        // que l'unequip mis en file par le clic (Equip.cpp) s'execute au Tick
+        // suivant et RETIRE ExtraWorn de la liste. Trancher sur fromDoll seul
+        // (l'ancien ternaire) envoyait donc, des la deuxieme trame du carry,
+        // WornExtraMatching chercher une liste portee qui n'existe plus : son
+        // repli WornExtraOf rendait nullptr (ou la liste de l'AUTRE main), la
+        // sante restait a 0 et l'offre partait `hex:1` — et le serveur, sans
+        // designation, ne prend « jamais une usee » : c'etait la NEUVE du sac
+        // qui partait, l'usee restait (relecture contradictoire du 08/09).
+        // La liste NON portee se retrouve par (uid, sig) ; la sante etant dans
+        // la signature (InstanceSig hache l'ExtraHealth), la liste trouvee
+        // porte la meme health que l'unite levee. La liste PORTEE n'est
+        // consultee que si l'unite est ENCORE au corps, a la meme horloge que
+        // l'exclusion du plateau (:1715-1717) : jamais pour un carry
+        // fromCarrier (un porteur d'anneau n'a pas de liste portee a lui, en
+        // reclamer une prenait celle du PREMIER anneau), et seulement tant
+        // que WornLedger::Doffing dit que l'unequip n'a pas atterri.
+        a_centMilliemes = 0;
+        {
+            auto* p = RE::PlayerCharacter::GetSingleton();
+            auto* entry = LiveEntry(p, obj);
+            RE::ExtraDataList* xl = ExtraForPoolImpl(entry, g_held->uid, g_held->sig);
+            if (!xl && g_held->fromDoll && !g_held->fromCarrier &&
+                WornLedger::Doffing(obj->GetFormID())) {
+                xl = WornExtraMatching(entry, g_held->uid, g_held->sig, g_held->hand);
+            }
+            if (xl) {
+                if (const auto* xh = xl->GetByType<RE::ExtraHealth>()) {
+                    a_centMilliemes = Durabilite::CentMilliemesDe(xh->health);
+                }
+            }
+        }
         g_held.reset();
         RequestRebuild();
         return true;

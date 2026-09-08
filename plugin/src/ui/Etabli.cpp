@@ -68,6 +68,35 @@ namespace FUI::Etabli
             int         combien = 0;
         };
 
+        /** [vulkaar] UNE PILE RÉPARABLE du sac — une ligne `repar` du plateau
+         *  (08/09/2026, contrat durabilité §5.3). Le SERVEUR l'a calculée
+         *  depuis la même lecture du sac que les comptes d'ingrédients : la
+         *  DLL ne lit pas le sac pour cet écran, elle montre et demande. Une
+         *  ligne par pile (base, santé), jamais par exemplaire — deux objets de
+         *  même forme et même santé sont indiscernables, l'écran dit « ×3 ». */
+        struct Reparable
+        {
+            RE::FormID  base = 0;
+            int         centMilliemes = 0;   // la santé en entier : c'est ce qui désigne la pile
+            int         points = 0;
+            int         max = 0;
+            int         count = 0;
+            bool        worn = false;
+            RE::FormID  matiere = 0;
+            std::string matiereNom;          // repli quand la forme est introuvable
+            int         cout = 1;            // unités de matière pour UNE réparation
+            int         possede = 0;         // unités de matière dans le sac
+        };
+
+        /** Les deux modes de l'écran. « Réparer » n'existe que si le plateau
+         *  porte au moins une ligne `repar` : un serveur d'avant ne l'offre pas
+         *  et l'onglet ne doit pas promettre un bouton inerte. */
+        enum class Onglet
+        {
+            kFabriquer,
+            kReparer,
+        };
+
         // ---- état reçu (le serveur fait foi) ----
         bool                      g_ouvert = false;
         std::string               g_titre;
@@ -75,6 +104,7 @@ namespace FUI::Etabli
         std::string               g_qualites[kNbQualites];
         std::vector<Rayon>        g_rayons;
         std::vector<Geste>        g_gestes;
+        std::vector<Reparable>    g_reparables;
         unsigned long long        g_seqEtat = 0;
 
         // ---- état de l'écran (local, jamais envoyé) ----
@@ -82,6 +112,9 @@ namespace FUI::Etabli
         int         g_qualiteChoisie = 1;
         char        g_recherche[64] = {};
         std::string g_gesteChoisi;
+        Onglet      g_onglet = Onglet::kFabriquer;
+        RE::FormID  g_reparBase = 0;        // la pile choisie : (base, santé)
+        int         g_reparCm = -1;
         int         g_messageRestant = 0;   // trames avant effacement du bandeau
 
         // ---- l'aperçu (mode INSPECT de l'IconCache : sa propre texture) ----
@@ -261,6 +294,24 @@ namespace FUI::Etabli
             return nullptr;
         }
 
+        const Reparable* ReparableChoisi()
+        {
+            for (const auto& r : g_reparables) {
+                if (r.base == g_reparBase && r.centMilliemes == g_reparCm) return &r;
+            }
+            return nullptr;
+        }
+
+        /** Le nom d'une pile réparable : celui de la FORME, que le plateau ne
+         *  porte pas (le serveur n'a que des identifiants). Repli : l'hexa,
+         *  qui vaut mieux qu'une ligne vide si l'esp manque chez ce joueur. */
+        std::string NomReparable(const Reparable& a_r)
+        {
+            char hex[16];
+            std::snprintf(hex, sizeof(hex), "%08X", a_r.base);
+            return NomDe(a_r.base, hex);
+        }
+
         /** Combien de lots ce geste permet à cette qualité, sac en main. Le
          *  serveur refera le calcul : ceci n'est QUE de l'affichage. */
         int LotsFaisables(const Geste& a_g, int a_qualite)
@@ -351,6 +402,7 @@ namespace FUI::Etabli
             std::string qualites[kNbQualites];
             std::vector<Rayon> rayons;
             std::vector<Geste> gestes;
+            std::vector<Reparable> reparables;
 
             char ligne[2048];
             char* c[16];
@@ -413,6 +465,26 @@ namespace FUI::Etabli
                         p = virgule ? virgule + 1 : nullptr;
                     }
                     gestes.back().ingredients.push_back(std::move(i));
+                } else if (std::strcmp(c[0], "repar") == 0 && n >= 11) {
+                    /* [vulkaar] repar  baseHex  centMilliemes  points  max  count
+                       worn  matiereHex  matiereNom  coutUnites  possede — contrat
+                       durabilité §5.3, une ligne par pile. Les hexas sont sans
+                       0x : strtoul en base 16 les prend tels quels, comme pour
+                       les gestes. La santé voyage en ENTIER, jamais en float. */
+                    Reparable r;
+                    r.base = static_cast<RE::FormID>(std::strtoul(c[1], nullptr, 16));
+                    r.centMilliemes = std::atoi(c[2]);
+                    r.points = std::atoi(c[3]);
+                    r.max = std::atoi(c[4]);
+                    r.count = std::atoi(c[5]);
+                    r.worn = (c[6][0] == '1');
+                    r.matiere = static_cast<RE::FormID>(std::strtoul(c[7], nullptr, 16));
+                    r.matiereNom = c[8];
+                    r.cout = std::atoi(c[9]);
+                    r.possede = std::atoi(c[10]);
+                    // Une ligne qui ne désigne rien (base nulle, max nul) ne
+                    // ferait qu'une entrée vide et un bouton sans objet.
+                    if (r.base != 0 && r.max > 0 && r.count > 0) reparables.push_back(std::move(r));
                 }
             }
             std::fclose(f);
@@ -428,6 +500,7 @@ namespace FUI::Etabli
             g_titre = std::move(titre);
             g_rayons = std::move(rayons);
             g_gestes = std::move(gestes);
+            g_reparables = std::move(reparables);
             for (int q = 0; q < kNbQualites; ++q) g_qualites[q] = std::move(qualites[q]);
 
             if (!message.empty()) {
@@ -442,6 +515,9 @@ namespace FUI::Etabli
                 g_recherche[0] = '\0';
                 g_gesteChoisi = g_gestes.empty() ? std::string() : g_gestes.front().id;
                 g_qualiteChoisie = 1;
+                g_onglet = Onglet::kFabriquer;
+                g_reparBase = 0;
+                g_reparCm = -1;
                 g_apRx = kRx0; g_apRy = kRy0; g_apRz = kRz0; g_apZoom = kZoomMin;
                 UIRoot::Open();
             }
@@ -452,9 +528,49 @@ namespace FUI::Etabli
             if (!g_gesteChoisi.empty() && GesteChoisi() == nullptr) {
                 g_gesteChoisi = g_gestes.empty() ? std::string() : g_gestes.front().id;
             }
+            /* La pile choisie aussi : après une réparation le plateau repart
+               du serveur, et la pile (base, santé) qu'on regardait N'EXISTE
+               PLUS — elle est devenue une autre santé, ou nue. On retombe sur
+               la première ; et sans plus rien à réparer, l'onglet lui-même se
+               referme sur « Fabriquer » plutôt que de montrer une liste vide. */
+            if (g_reparables.empty()) {
+                g_onglet = Onglet::kFabriquer;
+                g_reparBase = 0;
+                g_reparCm = -1;
+            } else if (ReparableChoisi() == nullptr) {
+                g_reparBase = g_reparables.front().base;
+                g_reparCm = g_reparables.front().centMilliemes;
+            }
         }
 
         // ── les morceaux de l'écran ───────────────────────────────────────
+
+        /** [vulkaar] Les deux onglets, « Fabriquer » et « Réparer », en tête de
+         *  colonne — et SEULEMENT quand il y a quelque chose à réparer : sans
+         *  ligne `repar` la rangée n'apparaît pas, l'écran est celui d'avant.
+         *  Même dessin que les rayons, pour que l'œil les lise comme une
+         *  famille. */
+        void RangeeOnglets(float a_largeur)
+        {
+            if (g_reparables.empty()) return;
+            const float S = Theme::Scale();
+            const float espace = 4.0f * S;
+            const float cote = (std::max)(56.0f * S, (a_largeur - espace) * 0.5f);
+            const float haut = 40.0f * S;
+
+            struct Choix { const char* libelle; Onglet onglet; };
+            const Choix choix[] = { { "Fabriquer", Onglet::kFabriquer }, { "Réparer", Onglet::kReparer } };
+            for (int i = 0; i < 2; ++i) {
+                const bool actif = (g_onglet == choix[i].onglet);
+                if (i > 0) ImGui::SameLine(0.0f, espace);
+                ImGui::PushID(2000 + i);
+                ImGui::PushStyleColor(ImGuiCol_Button, actif ? Theme::Acc(0.40f) : Theme::Chrome(0.16f));
+                ImGui::PushStyleColor(ImGuiCol_Text, actif ? Theme::GoldCol() : Theme::Chrome(0.85f));
+                if (ImGui::Button(choix[i].libelle, ImVec2(cote, haut))) g_onglet = choix[i].onglet;
+                ImGui::PopStyleColor(2);
+                ImGui::PopID();
+            }
+        }
 
         /** La rangée des rayons, en tête de colonne. « Tous » d'abord. */
         void RangeeRayons(float a_largeur)
@@ -559,6 +675,57 @@ namespace FUI::Etabli
                 // sépare, et une liste nue devient illisible passé dix entrées.
                 dl->AddLine(ImVec2(depart.x, depart.y + haut), ImVec2(depart.x + largeur, depart.y + haut),
                     Theme::Chrome(0.12f), 1.0f);
+                ImGui::PopID();
+            }
+        }
+
+        /** [vulkaar] La liste des piles réparables, filtrée par la recherche.
+         *  À droite de chaque ligne : la jauge « p / max », et le nombre quand
+         *  la pile en compte plusieurs. */
+        void ListeReparables()
+        {
+            const float S = Theme::Scale();
+            const float haut = 38.0f * S;
+            const std::string filtre = EnMinuscules(g_recherche);
+
+            for (const auto& r : g_reparables) {
+                const std::string affiche = NomReparable(r);
+                if (!filtre.empty() && EnMinuscules(affiche).find(filtre) == std::string::npos) continue;
+
+                const bool actif = (r.base == g_reparBase && r.centMilliemes == g_reparCm);
+                const bool faisable = (r.possede >= r.cout);
+
+                /* L'identité d'ImGui est la PILE, pas la forme : deux piles de la
+                   même épée à deux santés sont deux lignes. */
+                ImGui::PushID(static_cast<int>(r.base));
+                ImGui::PushID(r.centMilliemes);
+                const ImVec2 depart = ImGui::GetCursorScreenPos();
+                if (ImGui::Selectable("##ligne", actif, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0.0f, haut))) {
+                    g_reparBase = r.base;
+                    g_reparCm = r.centMilliemes;
+                }
+                const float largeur = ImGui::GetItemRectSize().x;
+
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const float milieu = depart.y + (haut - ImGui::GetTextLineHeight()) * 0.5f;
+                std::string gauche = affiche;
+                if (r.count > 1) gauche += "  ×" + std::to_string(r.count);
+                if (r.worn) gauche += "  (porté)";
+                dl->AddText(ImVec2(depart.x + 10.0f * S, milieu),
+                    faisable ? Theme::Chrome(0.95f) : Theme::Chrome(0.45f), gauche.c_str());
+
+                char jauge[32];
+                std::snprintf(jauge, sizeof(jauge), "%d / %d", r.points, r.max);
+                const float l = ImGui::CalcTextSize(jauge).x;
+                // Sous 10 % la jauge passe au rouge, comme dans l'infobulle de
+                // la grille : le seuil de l'avertissement du serveur.
+                const bool basse = (static_cast<long long>(r.points) * 10 < r.max);
+                dl->AddText(ImVec2(depart.x + largeur - l - 12.0f * S, milieu),
+                    basse ? Theme::Col(ImVec4(0.80f, 0.32f, 0.28f, 1.0f)) : Theme::Chrome(0.50f), jauge);
+
+                dl->AddLine(ImVec2(depart.x, depart.y + haut), ImVec2(depart.x + largeur, depart.y + haut),
+                    Theme::Chrome(0.12f), 1.0f);
+                ImGui::PopID();
                 ImGui::PopID();
             }
         }
@@ -745,6 +912,82 @@ namespace FUI::Etabli
             }
             ImGui::EndDisabled();
             if (lots > 0) ImGui::TextDisabled("de quoi en faire %d", lots);
+            else ImGui::TextDisabled("il te manque de quoi");
+
+            ImGui::PopFont();
+            ImGui::End();
+            ImGui::PopStyleColor();
+        }
+
+        /** [vulkaar] Le panneau de droite en mode « Réparer » : la pile, sa
+         *  jauge, la matière qu'il faut et le bouton. Même boîte, même police,
+         *  même discipline des DEUX sorties (PopFont sur chacune) que le
+         *  panneau de fabrication. */
+        void PanneauReparation(const Reparable* a_r, const ImVec2& a_pos, const ImVec2& a_taille)
+        {
+            const float S = Theme::Scale();
+            ImGui::SetNextWindowPos(a_pos, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(a_taille, ImGuiCond_Always);
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(12, 11, 10, 224));
+            ImGui::Begin("##vk_etabli_detail", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
+            ImGui::PushFont(nullptr, Theme::SnapPx(21.0f));
+
+            if (a_r == nullptr) {
+                ImGui::TextDisabled("Rien à réparer ici.");
+                ImGui::PopFont();
+                ImGui::End();
+                ImGui::PopStyleColor();
+                return;
+            }
+
+            ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
+            ImGui::TextUnformatted(NomReparable(*a_r).c_str());
+            ImGui::PopStyleColor();
+            if (a_r->count > 1 && a_r->worn) ImGui::TextDisabled("×%d, dont celle que tu portes", a_r->count);
+            else if (a_r->count > 1) ImGui::TextDisabled("×%d", a_r->count);
+            else if (a_r->worn) ImGui::TextDisabled("portée");
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fiche");
+            Fiche(a_r->base);
+            /* La jauge — le maximum et les points viennent du SERVEUR, qui
+               les a lus dans sa table ; la DLL n'en recalcule rien. */
+            const bool basse = (static_cast<long long>(a_r->points) * 10 < a_r->max);
+            if (basse) ImGui::PushStyleColor(ImGuiCol_Text, Theme::Col(ImVec4(0.80f, 0.32f, 0.28f, 1.0f)));
+            ImGui::Text("Durabilité   %d / %d", a_r->points, a_r->max);
+            if (basse) ImGui::PopStyleColor();
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextDisabled("Matière");
+            const bool assez = (a_r->possede >= a_r->cout);
+            if (!assez) ImGui::PushStyleColor(ImGuiCol_Text, Theme::Col(ImVec4(0.80f, 0.32f, 0.28f, 1.0f)));
+            ImGui::Text("%s   %d / %d", NomDe(a_r->matiere, a_r->matiereNom).c_str(), a_r->possede, a_r->cout);
+            if (!assez) ImGui::PopStyleColor();
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            /* UNE réparation = UNE unité de matière = une part du maximum
+               (le pourcentage est une règle du serveur, pas d'ici) ; le plateau
+               repart après chaque geste, l'écran se rafraîchit tout seul. On
+               n'envoie que ce qui désigne la pile : la base et sa santé, en
+               hexa minuscule sans 0x et en entier — la grammaire du contrat
+               (§5.3), celle que le client relaie telle quelle. */
+            ImGui::BeginDisabled(!assez);
+            if (ImGui::Button("Réparer", ImVec2(-1.0f, 40.0f * S))) {
+                char reste[64];
+                std::snprintf(reste, sizeof(reste), "%x\t%d", a_r->base, a_r->centMilliemes);
+                EcrireGeste("reparer", reste);
+            }
+            ImGui::EndDisabled();
+            if (assez) ImGui::TextDisabled("une unité de matière par réparation");
             else ImGui::TextDisabled("il te manque de quoi");
 
             ImGui::PopFont();
@@ -1029,8 +1272,16 @@ namespace FUI::Etabli
         auto* icones = IconCache::GetSingleton();
         if (!icones) return;
 
-        const Geste* g = g_ouvert ? GesteChoisi() : nullptr;
-        const RE::FormID voulu = (g != nullptr) ? g->produit : 0;
+        /* L'aperçu suit L'ONGLET : en mode « Réparer » c'est la pile choisie
+           qui tourne au milieu du monde, pas le dernier geste regardé. */
+        RE::FormID voulu = 0;
+        if (g_ouvert) {
+            if (g_onglet == Onglet::kReparer) {
+                if (const Reparable* r = ReparableChoisi()) voulu = r->base;
+            } else if (const Geste* g = GesteChoisi()) {
+                voulu = g->produit;
+            }
+        }
         if (voulu == g_apercuArme) {
             /* Meme objet, mais l'angle et le zoom ont pu bouger au glisser :
                le pilote repose l'orientation a chaque trame. */
@@ -1076,6 +1327,9 @@ namespace FUI::Etabli
         EcrireGeste("fermer", "");
         g_ouvert = false;
         g_gesteChoisi.clear();
+        g_onglet = Onglet::kFabriquer;
+        g_reparBase = 0;
+        g_reparCm = -1;
         return true;
     }
 
@@ -1114,7 +1368,9 @@ namespace FUI::Etabli
         ImGui::PushFont(nullptr, Theme::SnapPx(20.0f));
 
         const float interne = ImGui::GetContentRegionAvail().x;
-        const Geste* choisi = GesteChoisi();
+        const bool reparer = (g_onglet == Onglet::kReparer && !g_reparables.empty());
+        const Geste* choisi = reparer ? nullptr : GesteChoisi();
+        const Reparable* pile = reparer ? ReparableChoisi() : nullptr;
 
         if (!g_titre.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::GoldCol());
@@ -1123,10 +1379,17 @@ namespace FUI::Etabli
             ImGui::Spacing();
         }
 
-        RangeeRayons(interne);
-        ImGui::Spacing();
-        RangeeQualites(interne, choisi);
-        ImGui::Spacing();
+        /* [vulkaar] Les onglets d'abord (absents sans ligne `repar`), puis la
+           colonne de l'onglet : rayons et qualités n'ont pas de sens pour une
+           réparation, la recherche en a pour les deux. */
+        RangeeOnglets(interne);
+        if (!g_reparables.empty()) ImGui::Spacing();
+        if (!reparer) {
+            RangeeRayons(interne);
+            ImGui::Spacing();
+            RangeeQualites(interne, choisi);
+            ImGui::Spacing();
+        }
 
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputTextWithHint("##vk_etabli_rech", "recherche", g_recherche, sizeof(g_recherche));
@@ -1134,7 +1397,8 @@ namespace FUI::Etabli
         ImGui::Separator();
 
         ImGui::BeginChild("##vk_etabli_liste", ImVec2(0.0f, 0.0f), false);
-        ListeGestes();
+        if (reparer) ListeReparables();
+        else ListeGestes();
         ImGui::EndChild();
         ImGui::PopFont();
         ImGui::End();
@@ -1156,7 +1420,8 @@ namespace FUI::Etabli
         const ImVec2 tailleDetail(std::clamp(libre * 0.50f, 340.0f, 640.0f),
                                   std::clamp(io.DisplaySize.y * 0.36f, 260.0f, 520.0f));
         const ImVec2 posDetail(largeur + (libre - tailleDetail.x) * 0.5f, io.DisplaySize.y * 0.58f);
-        PanneauDetail(choisi, posDetail, tailleDetail);
+        if (reparer) PanneauReparation(pile, posDetail, tailleDetail);
+        else PanneauDetail(choisi, posDetail, tailleDetail);
 
         /* LE BANDEAU : ce que le serveur vient de répondre. */
         if (!g_message.empty()) {

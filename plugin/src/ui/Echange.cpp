@@ -7,6 +7,7 @@
 
 #include <imgui.h>
 
+#include "game/Durabilite.h"
 #include "game/MonnaiesVulkaar.h"
 #include "ui/Fallback.h"
 #include "ui/Grid.h"
@@ -33,6 +34,12 @@ namespace FUI::Echange
         {
             RE::FormID form = 0;
             int count = 0;
+            /** [vulkaar] La sante de l'exemplaire en CENT-MILLIEMES entiers
+             *  (Durabilite.h), 0 = nu. Deux piles de meme forme et de sante
+             *  differente sont deux lignes : c'est ce qui designe l'exemplaire
+             *  au serveur, qui sinon prendrait « une nue » et laisserait
+             *  l'usee au vendeur (contrat durabilite §2.5). */
+            int centMilliemes = 0;
         };
 
         enum class Phase
@@ -82,13 +89,21 @@ namespace FUI::Echange
             std::fclose(f);
         }
 
-        /** L'offre complète — objets puis monnaies — au format `hex:count`. */
+        /** L'offre complète — objets puis monnaies — au format `hex:count`,
+         *  ou `hex:count:centMilliemes` pour un exemplaire qui porte une santé
+         *  (contrat durabilité §5.4 : le champ est OPTIONNEL, absent ou 0 =
+         *  nu — on ne l'écrit donc que s'il dit quelque chose, et un client
+         *  d'avant lit toujours les deux premiers). */
         std::string OffreEnTexte()
         {
             std::string sortie;
-            char morceau[32];
+            char morceau[48];
             for (const auto& l : g_offre) {
-                std::snprintf(morceau, sizeof(morceau), "%x:%d ", l.form, l.count);
+                if (l.centMilliemes > 0) {
+                    std::snprintf(morceau, sizeof(morceau), "%x:%d:%d ", l.form, l.count, l.centMilliemes);
+                } else {
+                    std::snprintf(morceau, sizeof(morceau), "%x:%d ", l.form, l.count);
+                }
                 sortie += morceau;
             }
             for (int i = 0; i < MonnaiesVulkaar::kNb; ++i) {
@@ -125,8 +140,12 @@ namespace FUI::Echange
                 unsigned form = 0;
                 int count = 0, lus = 0;
                 if (std::sscanf(p, "%x:%d%n", &form, &count, &lus) == 2 && form && count > 0) {
-                    sortie.push_back({ static_cast<RE::FormID>(form), count });
                     p += lus;
+                    // Le troisième champ, la santé en cent-millièmes, est
+                    // facultatif : un plateau d'avant s'arrête au count.
+                    int cm = 0;
+                    if (*p == ':' && std::sscanf(p, ":%d%n", &cm, &lus) == 1) p += lus;
+                    sortie.push_back({ static_cast<RE::FormID>(form), count, cm > 0 ? cm : 0 });
                 } else {
                     break;
                 }
@@ -227,14 +246,14 @@ namespace FUI::Echange
         // ---- dessin ----
 
         void CaseObjet(ImDrawList* a_dl, const ImVec2& a_p0, RE::FormID a_form, int a_count,
-                       bool a_survolable)
+                       bool a_survolable, int a_centMilliemes = 0)
         {
             const float cote = Grid::CellPx();
             Grid::DrawCellLattice(a_dl, a_p0, 1, 1);
             auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(a_form);
             const ImVec2 p1(a_p0.x + cote, a_p0.y + cote);
+            const float marge = 3.0f * Theme::Scale();
             if (obj) {
-                const float marge = 3.0f * Theme::Scale();
                 if (const auto* icone = IconCache::GetSingleton()->Get(obj); icone && icone->srv) {
                     a_dl->AddImage(reinterpret_cast<ImTextureID>(icone->srv),
                         ImVec2(a_p0.x + marge, a_p0.y + marge), ImVec2(p1.x - marge, p1.y - marge));
@@ -243,7 +262,34 @@ namespace FUI::Echange
                         ImVec2(a_p0.x + marge, a_p0.y + marge), ImVec2(p1.x - marge, p1.y - marge));
                 }
                 if (a_survolable && ImGui::IsMouseHoveringRect(a_p0, p1)) {
-                    Grid::DrawItemTooltip(obj, a_count);
+                    /* [vulkaar] L'infobulle recoit LA SANTE DE LA LIGNE. Sans
+                       elle, DrawItemTooltip lit le sac du SPECTATEUR : pour
+                       une ligne de l'autre, un exemplaire qui n'y est pas
+                       (« 600 / 600 » en vert pour une epee offerte a 20/600),
+                       ou la sante de MON jumeau reste au sac pour une ligne
+                       nue de la mienne. 0 = nue = max, comme sur le pont. */
+                    Grid::DrawItemTooltip(obj, a_count, -1, -1, false, nullptr,
+                                          Grid::ExtraScope::kAny, 0, -1, 0, 0, {},
+                                          a_centMilliemes);
+                }
+            }
+            /* [vulkaar] LA JAUGE D'UNE LIGNE USEE, ecrite dans la case : la
+               ligne porte sa sante, et c'est le seul temoin visible sans
+               survol. Rien pour une ligne nue : neuve, comme les autres.
+               Peinte APRES l'icone — un ImDrawList peint dans l'ordre
+               d'emission, et ecrite avant elle la jauge disparaissait sous
+               chaque pixel opaque du sprite (relecture du 08/09). Dans le
+               coin BAS-GAUCHE : le haut-gauche est au badge de compte, le
+               bas-droit aux marqueurs de la grille. Meme contour noir que le
+               compte, pour se lire sur n'importe quel rendu. */
+            if (a_centMilliemes > 0) {
+                if (const auto max = Durabilite::MaxDe(a_form); max.has_value()) {
+                    const std::uint32_t p = Durabilite::PointsDeCentMilliemes(a_centMilliemes, *max);
+                    char texte[32];
+                    std::snprintf(texte, sizeof(texte), "%u/%u", p, *max);
+                    Grid::DrawOutlinedText(a_dl,
+                        ImVec2(a_p0.x + marge, p1.y - marge - ImGui::GetTextLineHeight()),
+                        Theme::Chrome(0.85f), texte);
                 }
             }
             if (a_count > 1) {
@@ -265,7 +311,7 @@ namespace FUI::Echange
             int clique = -1;
             for (int i = 0; i < static_cast<int>(a_lignes.size()) && i < a_cols * a_rows; ++i) {
                 const ImVec2 p0(base.x + (i % a_cols) * cote, base.y + (i / a_cols) * cote);
-                CaseObjet(dl, p0, a_lignes[i].form, a_lignes[i].count, true);
+                CaseObjet(dl, p0, a_lignes[i].form, a_lignes[i].count, true, a_lignes[i].centMilliemes);
                 if (a_interactif && ImGui::IsMouseHoveringRect(p0, ImVec2(p0.x + cote, p0.y + cote)) &&
                     ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                     clique = i;
@@ -440,16 +486,19 @@ namespace FUI::Echange
                         ImGui::GetWindowPos().y + ImGui::GetWindowHeight()))) {
                 RE::FormID form = 0;
                 int count = 0;
-                if (Grid::PorteVersEchange(form, count)) {
+                int centMilliemes = 0;
+                if (Grid::PorteVersEchange(form, count, centMilliemes)) {
                     bool fusionne = false;
                     for (auto& l : g_offre) {
-                        if (l.form == form) {
+                        // Meme forme ET meme sante : une usee et une neuve
+                        // sont deux lignes, comme deux tuiles dans la grille.
+                        if (l.form == form && l.centMilliemes == centMilliemes) {
                             l.count += count;
                             fusionne = true;
                             break;
                         }
                     }
-                    if (!fusionne) g_offre.push_back({ form, count });
+                    if (!fusionne) g_offre.push_back({ form, count, centMilliemes });
                     MarquerOffreSale();
                 }
             }

@@ -118,6 +118,11 @@ namespace FUI::Lang
         X(PoisonLabel, "Poison")                                                                            \
         X(ChargeLabel, "Charge")                                                                            \
         X(TemperLabel, "Tempered")                                                                          \
+        /* [vulkaar] La jauge des objets de la forge, a la place de la trempe. En FRANCAIS   */             \
+        /* dans la table compilee, comme « Mède » ci-dessus : ce fork n'a pas de fr.ini, ses  */             \
+        /* ecrans a lui (etabli, echange, banque) ecrivent leur francais en dur, et l'anglais  */             \
+        /* n'est le repli de personne ici. Un pack peut toujours le recouvrir.                 */             \
+        X(DurabiliteLabel, "Durabilité")                                                                    \
         X(SoulLabel, "Soul")                                                                                \
         X(SoulPetty, "Petty")                                                                               \
         X(SoulLesser, "Lesser")                                                                             \

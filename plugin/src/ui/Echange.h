@@ -15,6 +15,11 @@
 // (Grid::PorteVersEchange abandonne le carry, l'objet n'a jamais quitté
 // l'inventaire). Les monnaies s'offrent par leurs trois cases dédiées.
 //
+// UNE LIGNE D'OFFRE DÉSIGNE SON EXEMPLAIRE (08/09/2026) : `hex:count`, ou
+// `hex:count:centMilliemes` quand l'exemplaire porte une santé — la jauge de
+// durabilité des objets de la forge, en entier (Durabilite.h). Sans ce champ
+// le serveur prenait « une nue » et l'épée usée offerte arrivait neuve.
+//
 // LE MENU D'INTERACTION vit aussi ici : la touche X (client) écrit son état
 // dans GridInventory_interaction.txt (seq/ouvert/aCible/étiquette), la DLL
 // dessine « Se présenter / Se présenter à tous / Échanger » et répond par

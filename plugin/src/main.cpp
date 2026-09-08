@@ -3,6 +3,7 @@
 #include "game/Census.h"
 #include "game/Costume.h"
 #include "game/DeltaWatch.h"
+#include "game/Durabilite.h"
 #include "game/Ledger.h"
 #include "game/MonnaiesVulkaar.h"
 #include "game/SortiesVulkaar.h"
@@ -3517,6 +3518,12 @@ namespace
             FUI::GoldCoins::InitForms();   // G1: resolve Grid Inventory.esp
             FUI::MonnaiesVulkaar::InitForms();   // vulkaar : Septime / Mede / Titus
             FUI::SortiesVulkaar::Initialiser();  // vulkaar : journal jets/destructions
+            /* [vulkaar] La table des maximums de durabilite : ICI et nulle part
+               ailleurs, parce que LookupFormID exige l'ordre de chargement, que
+               kDataLoaded est le premier moment ou il est connu, et que la
+               table ne change pas de toute la session (elle vient du paquet
+               client, pas du serveur). */
+            FUI::Durabilite::Initialiser();
             FUI::Echange::Initialiser();         // vulkaar : pont de la fenetre d echange
             FUI::Etabli::Initialiser();        // vulkaar : pont de l ecran d etabli
             FUI::Appartenance::Initialiser();        // vulkaar : pont du panneau de la maison

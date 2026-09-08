@@ -487,7 +487,16 @@ namespace FUI::Grid
                          // hand "the worn list of this form" is ambiguous, so the
                          // doll passes the identity its slot recorded.
                          std::uint16_t a_sig = 0, int a_hand = 0,
-                         const TileContext& a_tile = {});
+                         const TileContext& a_tile = {},
+                         // [vulkaar] La sante de la LIGNE decrite, en cent-
+                         // milliemes (Durabilite.h), quand l'appelant la connait
+                         // mieux que le sac : -1 = lire le sac du proprietaire
+                         // comme toujours ; >= 0 = cette valeur, 0 = nue = max.
+                         // L'echange la passe pour ses deux panneaux -- le sac
+                         // du spectateur n'est jamais le bon livre pour une
+                         // ligne d'offre (ni celle de l'autre, ni la mienne
+                         // quand un jumeau use reste au sac).
+                         int a_centMilliemes = -1);
 
     // ★An item's name as the GAME would print it. Quest items name themselves
     // through their own extra data, not their base form: a Missives note's FULL
@@ -776,6 +785,12 @@ namespace FUI::Grid
     // top-left corner, full black outline (player tiles + partner grid).
     void DrawCountBadge(ImDrawList* a_dl, const ImVec2& a_tileMin, const char* a_text);
 
+    // [vulkaar] Le meme texte cerne de noir que le badge de compte (huit
+    // passes, meme regle de skin), a une position libre : la jauge « p/max »
+    // d'une case d'echange l'emploie dans le coin bas-gauche, le haut-gauche
+    // etant au compte et le bas-droit aux marqueurs.
+    void DrawOutlinedText(ImDrawList* a_dl, const ImVec2& a_pos, ImU32 a_col, const char* a_text);
+
     // ★(1.3.1) soul-gem recharge (hover + T -- the vanilla ChargeItem key):
     // a popup lists the player's filled soul gems; picking one recharges the
     // hovered enchanted weapon. Worn units included -- while equipped the
@@ -796,7 +811,11 @@ namespace FUI::Grid
     // n est qu un visuel, l objet n a jamais quitte l inventaire, l offre est
     // virtuelle. Memes exclusions que l etagere ; les MONNAIES vulkaar se
     // proposent par leurs cases dediees de la fenetre d echange, jamais ici.
-    bool PorteVersEchange(RE::FormID& a_form, int& a_count);
+    // `a_centMilliemes` : la sante du POOL porte, en cent-milliemes entiers
+    // (Durabilite::CentMilliemesDe), 0 pour un exemplaire nu — c est ce qui
+    // designe l exemplaire sur le pont d offre, jamais un float (contrat
+    // durabilite §5.4).
+    bool PorteVersEchange(RE::FormID& a_form, int& a_count, int& a_centMilliemes);
     // Commit it into the open shelf bag: queue the store, note the pending
     // remove, drop the carry. Fills the bundle entry's identity. False when
     // nothing eligible rides the cursor.

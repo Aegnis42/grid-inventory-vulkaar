@@ -15,8 +15,17 @@
 //
 // LES LIBELLÉS VIENNENT DU SERVEUR, jamais d'ici : noms de rayons, de gestes,
 // de qualités. Ce fichier n'écrit pas un mot de français destiné au joueur —
-// sauf les quelques étiquettes de l'écran lui-même (« Fabriquer », la
-// recherche), qui n'appartiennent à aucune donnée de la table.
+// sauf les quelques étiquettes de l'écran lui-même (« Fabriquer », « Réparer »,
+// la recherche), qui n'appartiennent à aucune donnée de la table.
+//
+// LE SECOND MODE, « RÉPARER » (08/09/2026, contrat durabilité §2.7 et §5.3) :
+// le plateau gagne des lignes `repar` — une par PILE (base, santé) d'objets de
+// la forge du sac dont la jauge n'est pas pleine, avec sa matière, son coût et
+// ce que le sac en possède — et l'écran gagne un onglet qui les liste, montre
+// « Durabilité p / max » et renvoie `<seq> reparer <baseHex> <centMilliemes>`.
+// L'onglet n'existe que si au moins une ligne `repar` est arrivée : face à un
+// serveur d'avant, l'écran est exactement celui d'avant. Le plateau repart du
+// serveur après chaque geste, la liste se rafraîchit toute seule.
 //
 // LES NOMS D'INGRÉDIENTS, EUX, SE RÉSOLVENT ICI. Le serveur ne les a pas : sa
 // table ne porte qu'un EDID technique (« IngotIron »). Nous avons le jeu sous

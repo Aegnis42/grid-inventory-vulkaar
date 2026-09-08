@@ -71,6 +71,8 @@ set(SOURCES
     src/game/MonnaiesVulkaar.cpp
     src/game/SortiesVulkaar.h
     src/game/SortiesVulkaar.cpp
+    src/game/Durabilite.h      # [vulkaar] la table des maximums de durabilite et l'echelle
+    src/game/Durabilite.cpp
     src/ui/Echange.h
     src/ui/Echange.cpp
     src/ui/Etabli.h
